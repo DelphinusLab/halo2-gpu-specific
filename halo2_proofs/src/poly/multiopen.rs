@@ -75,13 +75,13 @@ pub struct ProverQuery<'a, C: CurveAffine> {
 #[derive(Debug, Clone, Copy)]
 pub struct VerifierQuery<'r, C: CurveAffine> {
     /// point at which polynomial is queried
-    point: C::Scalar,
+    pub point: C::Scalar,
     /// rotation at which polynomial is queried
     rotation: Rotation,
     /// commitment to polynomial
-    commitment: CommitmentReference<'r, C>,
+    pub commitment: CommitmentReference<'r, C>,
     /// evaluation of polynomial at query point
-    eval: C::Scalar,
+    pub eval: C::Scalar,
 }
 
 impl<'r, 'params: 'r, C: CurveAffine> VerifierQuery<'r, C> {
@@ -112,7 +112,7 @@ impl<'r, 'params: 'r, C: CurveAffine> VerifierQuery<'r, C> {
 }
 
 #[derive(Copy, Clone, Debug)]
-enum CommitmentReference<'r, C: CurveAffine> {
+pub enum CommitmentReference<'r, C: CurveAffine> {
     Commitment(&'r C),
     MSM(&'r MSM<C>),
 }

@@ -293,14 +293,14 @@ impl<C: CurveAffine> EncodedChallenge<C> for Challenge255<C> {
     }
 }
 
-pub(crate) fn read_n_points<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
+pub fn read_n_points<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
     transcript: &mut T,
     n: usize,
 ) -> io::Result<Vec<C>> {
     (0..n).map(|_| transcript.read_point()).collect()
 }
 
-pub(crate) fn read_n_scalars<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
+pub fn read_n_scalars<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
     transcript: &mut T,
     n: usize,
 ) -> io::Result<Vec<C::Scalar>> {
