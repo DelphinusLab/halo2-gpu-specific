@@ -64,6 +64,8 @@ impl<C: CurveAffine> Committed<C> {
         // Divide by t(X) = X^{params.n} - 1.
         let h_poly = domain.divide_by_vanishing_poly(h_poly);
 
+        println!("do once!");
+
         // Obtain final h(X) polynomial
         let h_poly = domain.extended_to_coeff(h_poly);
 

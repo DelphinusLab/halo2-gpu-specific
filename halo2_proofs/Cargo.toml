@@ -29,6 +29,8 @@ name = "plonk"
 harness = false
 
 [dependencies]
+core_affinity = "0.5.10"
+ark-std = { version = "0.3.0", features = ["print-trace"] }
 backtrace = { version = "0.3", optional = true }
 rayon = "1.5.1"
 ff = "0.11"

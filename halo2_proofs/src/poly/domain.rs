@@ -43,6 +43,8 @@ impl<G: Group> EvaluationDomain<G> {
         // n = 2^k
         let n = 1u64 << k;
 
+        println!("quotient_poly_degree {}", quotient_poly_degree);
+
         // We need to work within an extended domain, not params.k but params.k + i
         // for some integer i such that 2^(params.k + i) is sufficiently large to
         // describe the quotient polynomial.
