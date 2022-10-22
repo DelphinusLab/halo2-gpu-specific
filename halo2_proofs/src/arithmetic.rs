@@ -161,6 +161,64 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     }
 }
 
+
+pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
+    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
+    use pairing::bn256::Fr;
+    let devices = Device::all();
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+    let a: &mut [Fr] = unsafe { std::mem::transmute(a) };
+    let omega: &Fr = unsafe { std::mem::transmute(&omega) };
+    kern.radix_fft_many(&mut [a], &[*omega], &[log_n])
+        .expect("GPU FFT failed!");
+}
+
+fn omega<F: PrimeField>(num_coeffs: usize) -> F {
+    // Compute omega, the 2^exp primitive root of unity
+    let exp = (num_coeffs as f32).log2().floor() as u32;
+    let mut omega = F::root_of_unity();
+    for _ in exp..F::S {
+        omega = omega.square();
+    }
+    omega
+}
+
+#[test]
+fn test_fft() {
+    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
+    use ff::PrimeField;
+    use group::ff::Field;
+    use pairing::bn256::Fr;
+    let mut rng = rand::thread_rng();
+    let devices = Device::all();
+
+    let log_d = 24;
+    let d = 1 << log_d;
+    let mut coeffs = (0..d).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
+    let omega = omega::<Fr>(coeffs.len());
+
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+    for _ in 0..10 {
+        if false {
+            best_fft(&mut coeffs, omega, log_d);
+        } else {
+            kern.radix_fft_many(&mut [&mut coeffs], &[omega], &[log_d])
+                .expect("GPU FFT failed!");
+        }
+    }
+}
+
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
 /// $n = 2^k$, when provided `log_n` = $k$ and an element of multiplicative
 /// order $n$ called `omega` ($\omega$). The result is that the vector `a`, when
@@ -173,7 +231,10 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 /// This will use multithreading if beneficial.
 
 pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    //let timer = start_timer!(|| format!("do fft {}", log_n));
+    if true {
+        gpu_fft(a, omega, log_n);
+        return;
+    }
 
     fn bitreverse(mut n: usize, l: usize) -> usize {
         let mut r = 0;
@@ -231,8 +292,6 @@ pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
         });
     }
 
-    //end_timer!(timer1);
-
     if log_n <= log_threads {
         let mut chunk = 2_usize;
         let mut twiddle_chunk = (n / 2) as usize;
@@ -265,8 +324,6 @@ pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     } else {
         recursive_butterfly_arithmetic(a, n, 1, &twiddles, 0)
     }
-
-    //end_timer!(timer);
 }
 
 pub fn recursive_butterfly_arithmetic<G: Group>(
