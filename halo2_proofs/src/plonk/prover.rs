@@ -1,3 +1,4 @@
+use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
 use rand_core::RngCore;
@@ -74,6 +75,7 @@ pub fn create_proof<
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
+    let timer = start_timer!(|| "instance");
     let instance: Vec<InstanceSingle<C>> = instances
         .iter()
         .map(|instance| -> Result<InstanceSingle<C>, Error> {
@@ -126,6 +128,8 @@ pub fn create_proof<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "advice");
     struct AdviceSingle<C: CurveAffine> {
         pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
@@ -332,6 +336,8 @@ pub fn create_proof<
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "lookups");
     let lookups: Vec<Vec<lookup::prover::Permuted<C>>> = instance
         .iter()
         .zip(advice.iter())
@@ -364,6 +370,9 @@ pub fn create_proof<
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "permutations comitted");
+
     // Commit to permutations.
     let permutations: Vec<permutation::prover::Committed<C>> = instance
         .iter()
@@ -384,6 +393,9 @@ pub fn create_proof<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "lookups commited");
+
     let lookups: Vec<Vec<lookup::prover::Committed<C>>> = lookups
         .into_iter()
         .map(|lookups| -> Result<Vec<_>, _> {
@@ -395,12 +407,16 @@ pub fn create_proof<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "vanishing commit");
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::commit(params, domain, rng, transcript)?;
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "h_poly");
     // Evaluate the h(X) polynomial
     let h_poly = pk.ev.evaluate_h(
         pk,
@@ -414,11 +430,16 @@ pub fn create_proof<
         &permutations,
     );
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "vanishing construct");
     // Construct the vanishing argument's h(X) commitments
     let vanishing = vanishing.construct(params, domain, h_poly, transcript)?;
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow(&[params.n as u64, 0, 0, 0]);
+
+    end_timer!(timer);
+    let timer = start_timer!(|| "eval poly");
 
     // Compute and hash instance evals for each circuit instance
     for instance in instance.iter() {
@@ -474,8 +495,12 @@ pub fn create_proof<
         transcript.write_scalar(*eval)?;
     }
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "eval poly vanishing");
     let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
 
+    end_timer!(timer);
+    let timer = start_timer!(|| "eval poly permutation");
     // Evaluate common permutation data
     pk.permutation.evaluate(x, transcript)?;
 
@@ -484,6 +509,9 @@ pub fn create_proof<
         .into_iter()
         .map(|permutation| -> Result<_, _> { permutation.construct().evaluate(pk, x, transcript) })
         .collect::<Result<Vec<_>, _>>()?;
+
+    end_timer!(timer);
+    let timer = start_timer!(|| "eval poly lookups");
 
     // Evaluate the lookups, if any, at omega^i x.
     let lookups: Vec<Vec<lookup::prover::Evaluated<C>>> = lookups
@@ -495,6 +523,9 @@ pub fn create_proof<
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
+
+    end_timer!(timer);
+    let timer = start_timer!(|| "multi open");
 
     let instances = instance
         .iter()
@@ -543,5 +574,8 @@ pub fn create_proof<
         // We query the h(X) polynomial at x
         .chain(vanishing.open(x));
 
-    multiopen::create_proof(params, transcript, instances).map_err(|_| Error::Opening)
+    let res = multiopen::create_proof(params, transcript, instances).map_err(|_| Error::Opening);
+    end_timer!(timer);
+
+    res
 }

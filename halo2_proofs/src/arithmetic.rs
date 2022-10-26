@@ -1,16 +1,18 @@
 //! This module provides common utilities, traits and structures for group,
 //! field and polynomial arithmetic.
 
-use std::ops::Mul;
+use std::{ops::Mul, sync::Arc};
 
 use super::multicore;
 use ark_std::{end_timer, start_timer};
 pub use ff::Field;
 use group::{
+    cofactor::CofactorCurveAffine,
     ff::{BatchInvert, PrimeField},
     Group as _,
 };
 pub use pairing::arithmetic::*;
+use pairing::bn256::G1Affine;
 use rayon::prelude::*;
 
 fn multiexp_serial<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C], acc: &mut C::Curve) {
@@ -125,6 +127,67 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
     }
 
     acc
+}
+
+pub fn gpu_multiexp2<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    use ec_gpu_gen::{
+        fft::FftKernel, multiexp::MultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let timer = start_timer!(|| "msm");
+
+    let devices = Device::all();
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let mut kern =
+        MultiexpKernel::<G1Affine>::create(programs, &devices).expect("Cannot initialize kernel!");
+    let pool = Worker::new();
+
+    let _coeffs = [Arc::new(
+        coeffs.iter().map(|x| x.to_repr()).collect::<Vec<_>>(),
+    )];
+    let _coeffs: &Arc<Vec<[u8; 32]>> = unsafe { std::mem::transmute(&_coeffs) };
+    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+    let bases = Arc::new(Vec::from(bases));
+
+    let a = [kern.multiexp(&pool, bases, _coeffs.clone(), 0).unwrap()];
+    let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
+    end_timer!(timer);
+    res[0]
+}
+
+pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    use ec_gpu_gen::{
+        fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let device = Device::all()[0];
+    let programs = ec_gpu_gen::program!(device).unwrap();
+    let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
+        .expect("Cannot initialize kernel!");
+
+    let _coeffs = coeffs.iter().map(|x| x.to_repr()).collect::<Vec<_>>();
+    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..]) };
+    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+
+    let a = [kern.multiexp(bases, _coeffs).unwrap()];
+    let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
+    res[0]
+}
+
+pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    if false && coeffs.len() > 1 << 14 {
+        gpu_multiexp(coeffs, bases)
+    } else {
+        best_multiexp(coeffs, bases)
+    }
 }
 
 /// Performs a multi-exponentiation operation.
@@ -248,7 +311,6 @@ fn test_mul_batch() {
     }
 
     assert_eq!(coeffs[1], Fr::from(1u64 << 20));
-
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
