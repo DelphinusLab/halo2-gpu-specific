@@ -161,7 +161,6 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     }
 }
 
-
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
     use pairing::bn256::Fr;
@@ -178,6 +177,7 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
         .expect("GPU FFT failed!");
 }
 
+#[cfg(test)]
 fn omega<F: PrimeField>(num_coeffs: usize) -> F {
     // Compute omega, the 2^exp primitive root of unity
     let exp = (num_coeffs as f32).log2().floor() as u32;
@@ -217,6 +217,38 @@ fn test_fft() {
                 .expect("GPU FFT failed!");
         }
     }
+}
+
+#[test]
+fn test_mul_batch() {
+    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
+    use ff::PrimeField;
+    use group::ff::Field;
+    use pairing::bn256::Fr;
+    let devices = Device::all();
+
+    let log_d = 23;
+    let d = 1 << log_d;
+    let mut coeffs = (0..d).map(|_| Fr::one()).collect::<Vec<_>>();
+    let rhs = Fr::from(2);
+
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+    if false {
+        for _ in 0..20 {
+            coeffs.par_iter_mut().for_each(|x| *x = x.double());
+        }
+    } else {
+        kern.mul_by_field(&mut coeffs, &rhs, log_d).unwrap();
+    }
+
+    assert_eq!(coeffs[1], Fr::from(1u64 << 20));
+
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size

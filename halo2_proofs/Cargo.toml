@@ -32,8 +32,8 @@ harness = false
 core_affinity = "0.5.10"
 ark-std = { version = "0.3.0", features = ["print-trace"] }
 backtrace = { version = "0.3", optional = true }
-ec-gpu-gen = { version = "0.4.0", default-features = false }
-pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256", features = ["gpu"]}
+ec-gpu-gen = { path = "../../ec-gpu/ec-gpu-gen" }
+pairing = { path = "../../pairing", package = "pairing_bn256", features = ["gpu"]}
 rayon = "1.5.1"
 ff = "0.12"
 group = "0.12"
@@ -45,6 +45,7 @@ cfg-if = "0.1"
 poseidon = { git = 'https://github.com/appliedzkp/poseidon.git', branch = 'circuit' }
 num-integer = "0.1"
 num-bigint = { version = "0.4", features = ["rand"] }
+cuda-driver-sys = "0.3.0"
 
 # Developer tooling dependencies
 plotters = { version = "0.3.0", optional = true }
@@ -58,8 +59,8 @@ tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 bumpalo = ">=3,<3.9.0"
 
 [build-dependencies]
-ec-gpu-gen = { version = "0.4.0" }
-pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256", features = ["gpu"]}
+ec-gpu-gen = { path = "../../ec-gpu/ec-gpu-gen" }
+pairing = { path = "../../pairing", package = "pairing_bn256", features = ["gpu"]}
 
 [dev-dependencies]
 assert_matches = "1.5"

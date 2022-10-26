@@ -11,6 +11,8 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use ark_std::end_timer;
+use ec_gpu_gen::rust_gpu_tools::LocalBuffer;
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},
@@ -19,7 +21,7 @@ use group::{
 use std::any::TypeId;
 use std::convert::TryInto;
 use std::num::ParseIntError;
-use std::slice;
+use std::{cmp, slice};
 use std::{
     collections::BTreeMap,
     iter,
@@ -487,6 +489,10 @@ impl<C: CurveAffine> Evaluator<C> {
         // Core expression evaluations
         let num_threads = multicore::current_num_threads();
         let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
+
+        println!("self.calculations.len() {}", self.calculations.len());
+
+        let timer = ark_std::start_timer!(|| "expressions");
         for (((advice, instance), lookups), permutation) in advice
             .iter()
             .zip(instance.iter())
@@ -556,7 +562,9 @@ impl<C: CurveAffine> Evaluator<C> {
                     });
                 }
             });
+            end_timer!(timer);
 
+            let timer = ark_std::start_timer!(|| "permutations");
             // Permutations
             let sets = &permutation.sets;
             if !sets.is_empty() {
@@ -638,64 +646,268 @@ impl<C: CurveAffine> Evaluator<C> {
                     }
                 });
             }
+            end_timer!(timer);
+
+            let timer = ark_std::start_timer!(|| "eval_h_lookups");
 
             // Lookups
-            for (n, lookup) in lookups.iter().enumerate() {
-                // Polynomials required for this lookup.
-                // Calculated here so these only have to be kept in memory for the short time
-                // they are actually needed.
-                let product_coset = pk.vk.domain.coeff_to_extended(lookup.product_poly.clone());
-                let permuted_input_coset = pk
-                    .vk
-                    .domain
-                    .coeff_to_extended(lookup.permuted_input_poly.clone());
-                let permuted_table_coset = pk
-                    .vk
-                    .domain
-                    .coeff_to_extended(lookup.permuted_table_poly.clone());
+            if true {
+                let mut buffer = vec![];
+                buffer.resize(domain.extended_len(), C::Scalar::zero());
+                let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
+                    |program, input: &mut [Fr]| -> ec_gpu_gen::EcResult<()> {
+                        let mut _values = unsafe { program.create_buffer::<Fr>(size)? };
+                        program.write_from_buffer(&mut _values, unsafe {
+                            std::mem::transmute::<_, &[Fr]>(&input[..])
+                        })?;
 
-                // Lookup constraints
-                let table = &lookup_values[n * size..(n + 1) * size];
-                parallelize(&mut values, |values, start| {
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let idx = start + i;
+                        let mut _l0 = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _l_last = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _l_active_row = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _y = unsafe { program.create_buffer::<Fr>(3)? };
+                        program.write_from_buffer(&mut _l0, unsafe {
+                            std::mem::transmute::<_, &[Fr]>(&l0.values[..])
+                        })?;
+                        program.write_from_buffer(&mut _l_last, unsafe {
+                            std::mem::transmute::<_, &[Fr]>(&l_last.values[..])
+                        })?;
+                        program.write_from_buffer(&mut _l_active_row, unsafe {
+                            std::mem::transmute::<_, &[Fr]>(&l_active_row.values[..])
+                        })?;
+                        program.write_from_buffer(&mut _y, unsafe {
+                            std::mem::transmute::<_, &[Fr]>(&[y, beta, gamma][..])
+                        })?;
 
-                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                        let r_prev = get_rotation_idx(idx, -1, rot_scale, isize);
+                        let mut _permuted_input_coset =
+                            unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _permuted_table_coset =
+                            unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _product_coset = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut _table = unsafe { program.create_buffer::<Fr>(size)? };
 
-                        let a_minus_s = permuted_input_coset[idx] - permuted_table_coset[idx];
-                        // l_0(X) * (1 - z(X)) = 0
-                        *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
-                        // l_last(X) * (z(X)^2 - z(X)) = 0
-                        *value = *value * y
-                            + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
-                                * l_last[idx]);
-                        // (1 - (l_last(X) + l_blind(X))) * (
-                        //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-                        //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
-                        //          (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
-                        // ) = 0
-                        *value = *value * y
-                            + ((product_coset[r_next]
-                                * (permuted_input_coset[idx] + beta)
-                                * (permuted_table_coset[idx] + gamma)
-                                - product_coset[idx] * table[idx])
-                                * l_active_row[idx]);
-                        // Check that the first values in the permuted input expression and permuted
-                        // fixed expression are the same.
-                        // l_0(X) * (a'(X) - s'(X)) = 0
-                        *value = *value * y + (a_minus_s * l0[idx]);
-                        // Check that each value in the permuted lookup input expression is either
-                        // equal to the value above it, or the value at the same index in the
-                        // permuted table expression.
-                        // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
-                        *value = *value * y
-                            + (a_minus_s
-                                * (permuted_input_coset[idx] - permuted_input_coset[r_prev])
-                                * l_active_row[idx]);
+                        const MAX_LOG2_RADIX: u32 = 8;
+                        const LOG2_MAX_ELEMENTS: usize = 32;
+                        const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
+
+                        let buf = vec![pk.vk.domain.get_extended_omega()];
+                        let omega: &[Fr] = unsafe { std::mem::transmute(&buf[..]) };
+                        let omega = omega[0];
+                        let log_n = domain.extended_k();
+                        let n = 1 << log_n;
+                        let mut dst_buffer = unsafe { program.create_buffer::<Fr>(n)? };
+                        let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+
+                        // Precalculate:
+                        // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
+                        let mut pq = vec![Fr::zero(); 1 << max_deg >> 1];
+                        let twiddle: Fr = omega.pow_vartime([(n >> max_deg) as u64]);
+                        pq[0] = Fr::one();
+                        if max_deg > 1 {
+                            pq[1] = twiddle;
+                            for i in 2..(1 << max_deg >> 1) {
+                                pq[i] = pq[i - 1];
+                                pq[i].mul_assign(&twiddle);
+                            }
+                        }
+                        let pq_buffer = program.create_buffer_from_slice(&pq)?;
+
+                        // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
+                        let mut omegas = vec![Fr::zero(); 32];
+                        omegas[0] = omega;
+                        for i in 1..LOG2_MAX_ELEMENTS {
+                            omegas[i] = omegas[i - 1].pow_vartime([2u64]);
+                        }
+
+                        for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                            // Lookup constraints
+                            let table = &lookup_values[lookup_idx * size..(lookup_idx + 1) * size];
+                            let product_coset = pk
+                                .vk
+                                .domain
+                                .coeff_to_extended_without_fft(lookup.product_poly.clone());
+                            let permuted_input_coset = pk
+                                .vk
+                                .domain
+                                .coeff_to_extended_without_fft(lookup.permuted_input_poly.clone());
+                            let permuted_table_coset = pk
+                                .vk
+                                .domain
+                                .coeff_to_extended_without_fft(lookup.permuted_table_poly.clone());
+
+                            program.write_from_buffer(&mut _table, unsafe {
+                                std::mem::transmute::<_, &[Fr]>(&table[..])
+                            })?;
+
+                            buffer[..permuted_input_coset.values.len()]
+                                .copy_from_slice(&permuted_input_coset[..]);
+                            program.write_from_buffer(&mut _permuted_input_coset, unsafe {
+                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
+                            })?;
+                            buffer[..permuted_input_coset.values.len()]
+                                .copy_from_slice(&permuted_table_coset[..]);
+                            program.write_from_buffer(&mut _permuted_table_coset, unsafe {
+                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
+                            })?;
+                            buffer[..permuted_input_coset.values.len()]
+                                .copy_from_slice(&product_coset[..]);
+                            program.write_from_buffer(&mut _product_coset, unsafe {
+                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
+                            })?;
+
+                            // TODO: fft: from ec-gpu lib for optimization purposes, will be move to ec-gpu.
+                            {
+                                for src_buffer in vec![
+                                    &mut _product_coset,
+                                    &mut _permuted_input_coset,
+                                    &mut _permuted_table_coset,
+                                ] {
+                                    let omegas_buffer =
+                                        program.create_buffer_from_slice(&omegas)?;
+
+                                    let mut log_p = 0u32;
+                                    // Each iteration performs a FFT round
+                                    while log_p < log_n {
+                                        // 1=>radix2, 2=>radix4, 3=>radix8, ...
+                                        let deg = cmp::min(max_deg, log_n - log_p);
+
+                                        let n = 1u32 << log_n;
+                                        let local_work_size =
+                                            1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
+                                        let global_work_size = n >> deg;
+                                        let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
+                                        let kernel = program.create_kernel(
+                                            &kernel_name,
+                                            global_work_size as usize,
+                                            local_work_size as usize,
+                                        )?;
+                                        kernel
+                                            .arg(src_buffer)
+                                            .arg(&dst_buffer)
+                                            .arg(&pq_buffer)
+                                            .arg(&omegas_buffer)
+                                            .arg(&LocalBuffer::<Fr>::new(1 << deg))
+                                            .arg(&n)
+                                            .arg(&log_p)
+                                            .arg(&deg)
+                                            .arg(&max_deg)
+                                            .run()?;
+
+                                        log_p += deg;
+                                        std::mem::swap(src_buffer, &mut dst_buffer);
+                                    }
+                                }
+                            }
+
+                            let local_work_size = 32;
+                            let global_work_size = size / local_work_size;
+                            let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                            let kernel = program.create_kernel(
+                                &kernel_name,
+                                global_work_size as usize,
+                                local_work_size as usize,
+                            )?;
+                            kernel
+                                .arg(&_values)
+                                .arg(&_table)
+                                .arg(&_permuted_input_coset)
+                                .arg(&_permuted_table_coset)
+                                .arg(&_product_coset)
+                                .arg(&_l0)
+                                .arg(&_l_last)
+                                .arg(&_l_active_row)
+                                .arg(&_y)
+                                .arg(&(rot_scale as u32))
+                                .arg(&(size as u32))
+                                .run()?;
+                        }
+
+                        program.read_into_buffer(&_values, input)?;
+
+                        Ok(())
                     }
-                });
+                );
+
+                use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
+                use ff::PrimeField;
+                use group::ff::Field;
+                use pairing::bn256::Fr;
+                let devices = Device::all();
+                let programs = devices
+                    .iter()
+                    .map(|device| ec_gpu_gen::program!(device))
+                    .collect::<Result<_, _>>()
+                    .expect("Cannot create programs!");
+                let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+                kern.kernels[0]
+                    .program
+                    .run(closures, unsafe {
+                        std::mem::transmute::<_, &mut [Fr]>(&mut values.values[..])
+                    })
+                    .unwrap();
+            } else {
+                for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                    // Lookup constraints
+                    let table = &lookup_values[lookup_idx * size..(lookup_idx + 1) * size];
+                    // Polynomials required for this lookup.
+                    // Calculated here so these only have to be kept in memory for the short time
+                    // they are actually needed.
+                    let product_coset = pk.vk.domain.coeff_to_extended(lookup.product_poly.clone());
+                    let permuted_input_coset = pk
+                        .vk
+                        .domain
+                        .coeff_to_extended(lookup.permuted_input_poly.clone());
+                    let permuted_table_coset = pk
+                        .vk
+                        .domain
+                        .coeff_to_extended(lookup.permuted_table_poly.clone());
+
+                    parallelize(&mut values, |values, start| {
+                        for (i, value) in values.iter_mut().enumerate() {
+                            let idx = start + i;
+
+                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                            let r_prev = get_rotation_idx(idx, -1, rot_scale, isize);
+
+                            let a_minus_s = permuted_input_coset[idx] - permuted_table_coset[idx];
+                            // l_0(X) * (1 - z(X)) = 0
+                            *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
+                            // l_last(X) * (z(X)^2 - z(X)) = 0
+                            *value = *value * y
+                                + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
+                                    * l_last[idx]);
+                            // (1 - (l_last(X) + l_blind(X))) * (
+                            //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
+                            //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
+                            //          (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+                            // ) = 0
+
+                            *value = *value * y
+                                + ((product_coset[r_next]
+                                    * (permuted_input_coset[idx] + beta)
+                                    * (permuted_table_coset[idx] + gamma)
+                                    - product_coset[idx] * table[idx])
+                                    * l_active_row[idx]);
+
+                            // Check that the first values in the permuted input expression and permuted
+                            // fixed expression are the same.
+                            // l_0(X) * (a'(X) - s'(X)) = 0
+                            *value = *value * y + (a_minus_s * l0[idx]);
+
+                            // Check that each value in the permuted lookup input expression is either
+                            // equal to the value above it, or the value at the same index in the
+                            // permuted table expression.
+                            // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
+                            *value = *value * y
+                                + (a_minus_s
+                                    * (permuted_input_coset[idx] - permuted_input_coset[r_prev])
+                                    * l_active_row[idx]);
+                        }
+                    });
+                }
             }
+
+            end_timer!(timer);
         }
         values
     }
