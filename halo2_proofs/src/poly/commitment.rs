@@ -5,7 +5,7 @@
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
 use crate::arithmetic::{
-    best_fft, best_multiexp, best_multiexp_gpu_cond, gpu_multiexp, parallelize, CurveAffine,
+    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine,
     CurveExt, Engine, FieldExt, Group,
 };
 use crate::helpers::CurveRead;

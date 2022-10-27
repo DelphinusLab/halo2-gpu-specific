@@ -129,6 +129,7 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
     acc
 }
 
+#[cfg(feature = "cuda")]
 pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::MultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
@@ -161,6 +162,7 @@ pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C
     res[0]
 }
 
+#[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
@@ -184,7 +186,13 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
 
 pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     if coeffs.len() > 1 << 14 {
-        gpu_multiexp(coeffs, bases)
+        cfg_if::cfg_if! {
+            if #[cfg(feature = "cuda")] {
+                gpu_multiexp(coeffs, bases)
+            } else {
+                best_multiexp(coeffs, bases)
+            }
+        }
     } else {
         best_multiexp(coeffs, bases)
     }
@@ -224,6 +232,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     }
 }
 
+#[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
     use pairing::bn256::Fr;
@@ -251,68 +260,6 @@ fn omega<F: PrimeField>(num_coeffs: usize) -> F {
     omega
 }
 
-#[test]
-fn test_fft() {
-    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
-    use ff::PrimeField;
-    use group::ff::Field;
-    use pairing::bn256::Fr;
-    let mut rng = rand::thread_rng();
-    let devices = Device::all();
-
-    let log_d = 24;
-    let d = 1 << log_d;
-    let mut coeffs = (0..d).map(|_| Fr::random(&mut rng)).collect::<Vec<_>>();
-    let omega = omega::<Fr>(coeffs.len());
-
-    let programs = devices
-        .iter()
-        .map(|device| ec_gpu_gen::program!(device))
-        .collect::<Result<_, _>>()
-        .expect("Cannot create programs!");
-    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
-
-    for _ in 0..10 {
-        if false {
-            best_fft(&mut coeffs, omega, log_d);
-        } else {
-            kern.radix_fft_many(&mut [&mut coeffs], &[omega], &[log_d])
-                .expect("GPU FFT failed!");
-        }
-    }
-}
-
-#[test]
-fn test_mul_batch() {
-    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
-    use ff::PrimeField;
-    use group::ff::Field;
-    use pairing::bn256::Fr;
-    let devices = Device::all();
-
-    let log_d = 23;
-    let d = 1 << log_d;
-    let mut coeffs = (0..d).map(|_| Fr::one()).collect::<Vec<_>>();
-    let rhs = Fr::from(2);
-
-    let programs = devices
-        .iter()
-        .map(|device| ec_gpu_gen::program!(device))
-        .collect::<Result<_, _>>()
-        .expect("Cannot create programs!");
-    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
-
-    if false {
-        for _ in 0..20 {
-            coeffs.par_iter_mut().for_each(|x| *x = x.double());
-        }
-    } else {
-        kern.mul_by_field(&mut coeffs, &rhs, log_d).unwrap();
-    }
-
-    assert_eq!(coeffs[1], Fr::from(1u64 << 20));
-}
-
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
 /// $n = 2^k$, when provided `log_n` = $k$ and an element of multiplicative
 /// order $n$ called `omega` ($\omega$). The result is that the vector `a`, when
@@ -323,13 +270,17 @@ fn test_mul_batch() {
 /// by $n$.
 ///
 /// This will use multithreading if beneficial.
-
 pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    if true {
-        gpu_fft(a, omega, log_n);
-        return;
+    cfg_if::cfg_if! {
+        if #[cfg(feature = "cuda")]{
+            return gpu_fft(a, omega, log_n);
+        } else {
+            return best_fft_cpu(a, omega, log_n);
+        }
     }
+}
 
+pub fn best_fft_cpu<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     fn bitreverse(mut n: usize, l: usize) -> usize {
         let mut r = 0;
         for _ in 0..l {
