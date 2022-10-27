@@ -490,8 +490,6 @@ impl<C: CurveAffine> Evaluator<C> {
         let num_threads = multicore::current_num_threads();
         let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
 
-        println!("self.calculations.len() {}", self.calculations.len());
-
         let timer = ark_std::start_timer!(|| "expressions");
         for (((advice, instance), lookups), permutation) in advice
             .iter()
@@ -652,38 +650,32 @@ impl<C: CurveAffine> Evaluator<C> {
 
             // Lookups
             if true {
+                // combine fft with eval_h_lookups:
+                // fft code: from ec-gpu lib.
                 let mut buffer = vec![];
                 buffer.resize(domain.extended_len(), C::Scalar::zero());
                 let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
                     |program, input: &mut [Fr]| -> ec_gpu_gen::EcResult<()> {
-                        let mut _values = unsafe { program.create_buffer::<Fr>(size)? };
-                        program.write_from_buffer(&mut _values, unsafe {
-                            std::mem::transmute::<_, &[Fr]>(&input[..])
-                        })?;
+                        macro_rules! create_buffer_from {
+                            ($x:ident, $y:expr) => {
+                                let $x = program.create_buffer_from_slice($y)?;
+                            };
+                        }
 
-                        let mut _l0 = unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _l_last = unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _l_active_row = unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _y = unsafe { program.create_buffer::<Fr>(3)? };
-                        program.write_from_buffer(&mut _l0, unsafe {
-                            std::mem::transmute::<_, &[Fr]>(&l0.values[..])
-                        })?;
-                        program.write_from_buffer(&mut _l_last, unsafe {
-                            std::mem::transmute::<_, &[Fr]>(&l_last.values[..])
-                        })?;
-                        program.write_from_buffer(&mut _l_active_row, unsafe {
-                            std::mem::transmute::<_, &[Fr]>(&l_active_row.values[..])
-                        })?;
-                        program.write_from_buffer(&mut _y, unsafe {
-                            std::mem::transmute::<_, &[Fr]>(&[y, beta, gamma][..])
-                        })?;
+                        let y_beta_gamma = vec![y, beta, gamma];
 
-                        let mut _permuted_input_coset =
+                        create_buffer_from!(values_buf, input);
+                        create_buffer_from!(l0_buf, l0);
+                        create_buffer_from!(l_last_buf, l_last);
+                        create_buffer_from!(l_active_row_buf, l_active_row);
+                        create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
+
+                        let mut permuted_input_coset_buf =
                             unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _permuted_table_coset =
+                        let mut permuted_table_coset_buf =
                             unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _product_coset = unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut _table = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut product_coset_buf = unsafe { program.create_buffer::<Fr>(size)? };
+                        let mut table_buf = unsafe { program.create_buffer::<Fr>(size)? };
 
                         const MAX_LOG2_RADIX: u32 = 8;
                         const LOG2_MAX_ELEMENTS: usize = 32;
@@ -699,7 +691,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         // Precalculate:
                         // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
-                        let mut pq = vec![Fr::zero(); 1 << max_deg >> 1];
+                        let mut pq = vec![Fr::zero(); 1 << (max_deg - 1)];
                         let twiddle: Fr = omega.pow_vartime([(n >> max_deg) as u64]);
                         pq[0] = Fr::one();
                         if max_deg > 1 {
@@ -712,10 +704,9 @@ impl<C: CurveAffine> Evaluator<C> {
                         let pq_buffer = program.create_buffer_from_slice(&pq)?;
 
                         // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
-                        let mut omegas = vec![Fr::zero(); 32];
-                        omegas[0] = omega;
-                        for i in 1..LOG2_MAX_ELEMENTS {
-                            omegas[i] = omegas[i - 1].pow_vartime([2u64]);
+                        let mut omegas = vec![omega];
+                        for _ in 1..LOG2_MAX_ELEMENTS {
+                            omegas.push(omegas.last().unwrap().square());
                         }
 
                         for (lookup_idx, lookup) in lookups.iter().enumerate() {
@@ -734,33 +725,21 @@ impl<C: CurveAffine> Evaluator<C> {
                                 .domain
                                 .coeff_to_extended_without_fft(lookup.permuted_table_poly.clone());
 
-                            program.write_from_buffer(&mut _table, unsafe {
+                            program.write_from_buffer(&mut table_buf, unsafe {
                                 std::mem::transmute::<_, &[Fr]>(&table[..])
                             })?;
 
-                            buffer[..permuted_input_coset.values.len()]
-                                .copy_from_slice(&permuted_input_coset[..]);
-                            program.write_from_buffer(&mut _permuted_input_coset, unsafe {
-                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
-                            })?;
-                            buffer[..permuted_input_coset.values.len()]
-                                .copy_from_slice(&permuted_table_coset[..]);
-                            program.write_from_buffer(&mut _permuted_table_coset, unsafe {
-                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
-                            })?;
-                            buffer[..permuted_input_coset.values.len()]
-                                .copy_from_slice(&product_coset[..]);
-                            program.write_from_buffer(&mut _product_coset, unsafe {
-                                std::mem::transmute::<_, &[Fr]>(&buffer[..])
-                            })?;
-
-                            // TODO: fft: from ec-gpu lib for optimization purposes, will be move to ec-gpu.
                             {
-                                for src_buffer in vec![
-                                    &mut _product_coset,
-                                    &mut _permuted_input_coset,
-                                    &mut _permuted_table_coset,
+                                for (src_buffer, data) in vec![
+                                    (&mut product_coset_buf, &product_coset),
+                                    (&mut permuted_input_coset_buf, &permuted_input_coset),
+                                    (&mut permuted_table_coset_buf, &permuted_table_coset),
                                 ] {
+                                    buffer[..data.values.len()].copy_from_slice(&data[..]);
+                                    program.write_from_buffer(src_buffer, unsafe {
+                                        std::mem::transmute::<_, &[Fr]>(&buffer[..])
+                                    })?;
+
                                     let omegas_buffer =
                                         program.create_buffer_from_slice(&omegas)?;
 
@@ -807,21 +786,21 @@ impl<C: CurveAffine> Evaluator<C> {
                                 local_work_size as usize,
                             )?;
                             kernel
-                                .arg(&_values)
-                                .arg(&_table)
-                                .arg(&_permuted_input_coset)
-                                .arg(&_permuted_table_coset)
-                                .arg(&_product_coset)
-                                .arg(&_l0)
-                                .arg(&_l_last)
-                                .arg(&_l_active_row)
-                                .arg(&_y)
+                                .arg(&values_buf)
+                                .arg(&table_buf)
+                                .arg(&permuted_input_coset_buf)
+                                .arg(&permuted_table_coset_buf)
+                                .arg(&product_coset_buf)
+                                .arg(&l0_buf)
+                                .arg(&l_last_buf)
+                                .arg(&l_active_row_buf)
+                                .arg(&y_beta_gamma_buf)
                                 .arg(&(rot_scale as u32))
                                 .arg(&(size as u32))
                                 .run()?;
                         }
 
-                        program.read_into_buffer(&_values, input)?;
+                        program.read_into_buffer(&values_buf, input)?;
 
                         Ok(())
                     }

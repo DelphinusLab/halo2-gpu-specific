@@ -129,7 +129,7 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
     acc
 }
 
-pub fn gpu_multiexp2<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::MultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
     };
@@ -183,7 +183,7 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
 }
 
 pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    if false && coeffs.len() > 1 << 14 {
+    if coeffs.len() > 1 << 14 {
         gpu_multiexp(coeffs, bases)
     } else {
         best_multiexp(coeffs, bases)
