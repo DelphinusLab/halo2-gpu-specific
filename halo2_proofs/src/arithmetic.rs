@@ -249,17 +249,6 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
         .expect("GPU FFT failed!");
 }
 
-#[cfg(test)]
-fn omega<F: PrimeField>(num_coeffs: usize) -> F {
-    // Compute omega, the 2^exp primitive root of unity
-    let exp = (num_coeffs as f32).log2().floor() as u32;
-    let mut omega = F::root_of_unity();
-    for _ in exp..F::S {
-        omega = omega.square();
-    }
-    omega
-}
-
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
 /// $n = 2^k$, when provided `log_n` = $k$ and an element of multiplicative
 /// order $n$ called `omega` ($\omega$). The result is that the vector `a`, when
@@ -588,7 +577,7 @@ pub fn lagrange_interpolate<F: FieldExt>(points: &[F], evals: &[F]) -> Vec<F> {
     }
 }
 
-pub(crate) fn evaluate_vanishing_polynomial<F: FieldExt>(roots: &[F], z: F) -> F {
+pub(crate) fn _evaluate_vanishing_polynomial<F: FieldExt>(roots: &[F], z: F) -> F {
     fn evaluate<F: FieldExt>(roots: &[F], z: F) -> F {
         roots.iter().fold(F::one(), |acc, point| (z - point) * acc)
     }

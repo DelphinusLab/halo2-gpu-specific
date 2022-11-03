@@ -4,7 +4,6 @@
 use blake2b_simd::{Params as Blake2bParams, State as Blake2bState};
 use group::ff::PrimeField;
 use num_bigint::BigUint;
-use poseidon::Poseidon;
 use std::convert::TryInto;
 
 use crate::arithmetic::{BaseExt, Coordinates, CurveAffine, FieldExt};
