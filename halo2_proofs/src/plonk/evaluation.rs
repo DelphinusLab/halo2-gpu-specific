@@ -489,13 +489,13 @@ impl<C: CurveAffine> Evaluator<C> {
         let num_threads = multicore::current_num_threads();
         let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
 
-        let timer = ark_std::start_timer!(|| "expressions");
         for (((advice, instance), lookups), permutation) in advice
             .iter()
             .zip(instance.iter())
             .zip(lookups.iter())
             .zip(permutations.iter())
         {
+            let timer = ark_std::start_timer!(|| "expressions");
             multicore::scope(|scope| {
                 let chunk_size = (size + num_threads - 1) / num_threads;
                 for (thread_idx, values) in values.chunks_mut(chunk_size).enumerate() {
