@@ -27,6 +27,7 @@ use std::{
     iter,
     ops::{Mul, MulAssign},
 };
+use rayon::prelude::ParallelSliceMut;
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine> {
@@ -388,7 +389,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     permuted_input_expression.truncate(usable_rows);
 
     // Sort input lookup expression values
-    permuted_input_expression.sort();
+    permuted_input_expression.par_sort_unstable();
 
     // A BTreeMap of each unique element in the table expression and its count
     let mut leftover_table_map: BTreeMap<C::Scalar, u32> = table_expression
