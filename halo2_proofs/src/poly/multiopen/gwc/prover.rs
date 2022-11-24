@@ -10,6 +10,7 @@ use group::Curve;
 use rayon::iter::*;
 use std::io;
 use std::marker::PhantomData;
+use std::sync::Mutex;
 
 /// Create a multi-opening proof
 pub fn create_proof<'a, I, C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
@@ -29,6 +30,8 @@ where
     };
 
     let mut ws = vec![C::identity(); commitment_data.len()];
+
+    let lock = Mutex::new(0);
 
     commitment_data
         .par_iter()
@@ -51,6 +54,8 @@ where
                 values: kate_division(&poly_batch.values, z),
                 _marker: PhantomData,
             };
+
+            let _guard = lock.lock().unwrap();
             *w = params.commit(&witness_poly).to_affine();
         });
 
