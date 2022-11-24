@@ -2,7 +2,10 @@ use std::iter;
 
 use ff::Field;
 use group::Curve;
+use rand::rngs::ThreadRng;
+use rand::thread_rng;
 use rand_core::RngCore;
+use rayon::prelude::ParallelIterator;
 
 use super::Argument;
 use crate::poly::Rotation;
@@ -17,6 +20,7 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use rayon::iter::IntoParallelRefMutIterator;
 
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     random_poly: Polynomial<C::Scalar, Coeff>,
@@ -41,9 +45,19 @@ impl<C: CurveAffine> Argument<C> {
     ) -> Result<Committed<C>, Error> {
         // Sample a random polynomial of degree n - 1
         let mut random_poly = domain.empty_coeff();
-        for coeff in random_poly.iter_mut() {
-            *coeff = C::Scalar::random(&mut rng);
-        }
+
+        let random = vec![0; domain.k() as usize]
+            .iter()
+            .map(|_| C::ScalarExt::random(&mut rng))
+            .collect::<Vec<_>>();
+
+        random_poly.par_iter_mut().for_each(|coeff| {
+            let mut rng = thread_rng();
+            *coeff = (C::ScalarExt::random(&mut rng)
+                + random[rng.next_u64() as usize % domain.k() as usize])
+                * (C::ScalarExt::random(&mut rng)
+                    + random[rng.next_u64() as usize % domain.k() as usize])
+        });
 
         // Commit
         let c = params.commit(&random_poly).to_affine();
