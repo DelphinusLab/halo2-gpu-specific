@@ -2,7 +2,7 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{best_fft, parallelize, FieldExt, Group},
+    arithmetic::{best_fft, parallelize, FieldExt, Group, batch_invert},
     plonk::Assigned,
 };
 
@@ -464,7 +464,7 @@ impl<G: Group> EvaluationDomain<G> {
                 let result = x - self.rotate_omega(G::Scalar::one(), rotation);
                 results.push(result);
             }
-            results.iter_mut().batch_invert();
+            batch_invert(&mut results);
         }
 
         let common = (xn - G::Scalar::one()) * self.barycentric_weight;

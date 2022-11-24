@@ -1,14 +1,18 @@
+use ark_std::{end_timer, start_timer};
 use group::{
     ff::{BatchInvert, Field},
     Curve,
 };
 use rand_core::RngCore;
+use rayon::prelude::{IntoParallelRefMutIterator, IndexedParallelIterator, ParallelIterator};
 use std::iter::{self, ExactSizeIterator};
 
 use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
 use super::{Argument, ProvingKey};
 use crate::{
-    arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
+    arithmetic::{
+        batch_invert, eval_polynomial, mul_acc, parallelize, BaseExt, CurveAffine, FieldExt,
+    },
     plonk::{self, Error},
     poly::{
         commitment::Params, multiopen::ProverQuery, Coeff, ExtendedLagrangeCoeff, LagrangeCoeff,
@@ -109,7 +113,7 @@ impl Argument {
             }
 
             // Invert to obtain the denominator for the permutation product polynomial
-            modified_values.batch_invert();
+            batch_invert(&mut modified_values);
 
             // Iterate over each column again, this time finishing the computation
             // of the entire fraction by computing the numerators
@@ -145,13 +149,16 @@ impl Argument {
 
             // Compute the evaluations of the permutation product polynomial
             // over our domain, starting with z[0] = 1
-            let mut z = vec![last_z];
-            for row in 1..(params.n as usize) {
-                let mut tmp = z[row - 1];
 
-                tmp *= &modified_values[row - 1];
-                z.push(tmp);
-            }
+            let mut z = vec![C::Scalar::zero(); params.n as usize];
+            z.par_iter_mut().enumerate().for_each(|(i, z)| {
+                if i > 0 {
+                    *z = modified_values[i - 1];
+                }
+            });
+            z[0] = last_z;
+            mul_acc(&mut z);
+
             let mut z = domain.lagrange_from_vec(z);
             // Set blinding factors
             for z in &mut z[params.n as usize - blinding_factors..] {

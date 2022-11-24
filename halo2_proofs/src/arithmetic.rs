@@ -519,6 +519,44 @@ fn log2_floor(num: usize) -> u32 {
     pow
 }
 
+pub fn mul_acc<F: FieldExt>(f: &mut [F]) {
+    let num_threads = multicore::current_num_threads();
+    let len = f.len();
+
+    if len < num_threads * 16 {
+        for i in 0..f.len() - 1 {
+            f[i + 1] = f[i] * f[i + 1];
+        }
+    } else {
+        let chunk_size = len / 4;
+        let chunk_acc = f
+            .par_chunks_mut(chunk_size)
+            .map(|chunk| {
+                chunk[0] = chunk[0];
+                for j in 1..chunk.len() {
+                    chunk[j] = chunk[j - 1] * chunk[j];
+                }
+                chunk.last().unwrap().clone()
+            })
+            .collect::<Vec<_>>();
+
+        let mut acc = chunk_acc[0];
+        for (chunk, curr_acc) in f.chunks_mut(chunk_size).zip(chunk_acc.into_iter()).skip(1) {
+            chunk.par_iter_mut().for_each(|p| {
+                *p = *p * acc;
+            });
+
+            acc *= curr_acc;
+        }
+    }
+}
+
+pub fn batch_invert<F: FieldExt>(f: &mut [F]) {
+    parallelize(f, |start, _| {
+        start.batch_invert();
+    });
+}
+
 /// Returns coefficients of an n - 1 degree polynomial given a set of n points
 /// and their evaluations. This function will panic if two values in `points`
 /// are the same.
@@ -541,8 +579,9 @@ pub fn lagrange_interpolate<F: FieldExt>(points: &[F], evals: &[F]) -> Vec<F> {
             }
             denoms.push(denom);
         }
+
         // Compute (x_j - x_k)^(-1) for each j != i
-        denoms.iter_mut().flat_map(|v| v.iter_mut()).batch_invert();
+        denoms.iter_mut().for_each(|v| batch_invert(v));
 
         let mut final_poly = vec![F::zero(); points.len()];
         for (j, (denoms, eval)) in denoms.into_iter().zip(evals.iter()).enumerate() {
