@@ -175,7 +175,7 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
         .expect("Cannot initialize kernel!");
 
-    let _coeffs = coeffs.iter().map(|x| x.to_repr()).collect::<Vec<_>>();
+    let _coeffs = coeffs.par_iter().map(|x| x.to_repr()).collect::<Vec<_>>();
     let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..]) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
