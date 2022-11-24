@@ -1,9 +1,11 @@
+use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
+use rayon::prelude::*;
 
 use super::{Argument, ProvingKey, VerifyingKey};
 use crate::{
-    arithmetic::{CurveAffine, FieldExt},
+    arithmetic::{mul_acc, parallelize, CurveAffine, FieldExt},
     plonk::{Any, Column, Error},
     poly::{
         commitment::{Blind, Params},
@@ -153,14 +155,10 @@ impl Assembly {
         p: &Argument,
     ) -> ProvingKey<C> {
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-        let mut omega_powers = Vec::with_capacity(params.n as usize);
-        {
-            let mut cur = C::Scalar::one();
-            for _ in 0..params.n {
-                omega_powers.push(cur);
-                cur *= &domain.get_omega();
-            }
-        }
+
+        let mut omega_powers = vec![domain.get_omega(); params.n as usize];
+        omega_powers[0] = C::ScalarExt::one();
+        mul_acc(&mut omega_powers);
 
         // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
         let mut deltaomega = Vec::with_capacity(p.columns.len());
@@ -168,10 +166,7 @@ impl Assembly {
             let mut cur = C::Scalar::one();
             for _ in 0..p.columns.len() {
                 let mut omega_powers = omega_powers.clone();
-                for o in &mut omega_powers {
-                    *o *= &cur;
-                }
-
+                omega_powers.par_iter_mut().for_each(|o| *o *= &cur);
                 deltaomega.push(omega_powers);
 
                 cur *= &C::Scalar::DELTA;
@@ -180,23 +175,39 @@ impl Assembly {
 
         // Compute permutation polynomials, convert to coset form.
         let mut permutations = vec![];
-        let mut polys = vec![];
-        let mut cosets = vec![];
         for i in 0..p.columns.len() {
             // Computes the permutation polynomial based on the permutation
             // description in the assembly.
             let mut permutation_poly = domain.empty_lagrange();
-            for (j, p) in permutation_poly.iter_mut().enumerate() {
-                let (permuted_i, permuted_j) = self.mapping[i][j];
-                *p = deltaomega[permuted_i][permuted_j];
-            }
+
+            parallelize(&mut permutation_poly, |permutation_poly, start| {
+                permutation_poly.iter_mut().enumerate().for_each(|(j, p)| {
+                    let j = start + j;
+                    let (permuted_i, permuted_j) = self.mapping[i][j];
+                    *p = deltaomega[permuted_i][permuted_j];
+                });
+            });
 
             // Store permutation polynomial and precompute its coset evaluation
             permutations.push(permutation_poly.clone());
-            let poly = domain.lagrange_to_coeff(permutation_poly);
-            polys.push(poly.clone());
-            cosets.push(domain.coeff_to_extended(poly));
         }
+
+        let (polys, cosets) = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| {
+                let polys: Vec<_> = permutations
+                    .par_iter()
+                    .map(|permutation_poly| domain.lagrange_to_coeff(permutation_poly.clone()))
+                    .collect();
+                let cosets = polys
+                    .par_iter()
+                    .map(|poly| domain.coeff_to_extended(poly.clone()))
+                    .collect();
+                (polys, cosets)
+            });
+
         ProvingKey {
             permutations,
             polys,
