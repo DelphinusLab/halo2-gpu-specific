@@ -7,6 +7,7 @@ use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
 use ff::Field;
 use group::Curve;
+use rayon::iter::*;
 use std::io;
 use std::marker::PhantomData;
 
@@ -27,27 +28,36 @@ where
         _marker: PhantomData,
     };
 
-    for commitment_at_a_point in commitment_data.iter() {
-        let mut poly_batch = zero();
-        let mut eval_batch = C::Scalar::zero();
-        let z = commitment_at_a_point.point;
-        for query in commitment_at_a_point.queries.iter() {
-            assert_eq!(query.get_point(), z);
+    let mut ws = vec![C::identity(); commitment_data.len()];
 
-            let poly = query.get_commitment().poly;
-            let eval = query.get_eval();
-            poly_batch = poly_batch * *v + poly;
-            eval_batch = eval_batch * *v + eval;
-        }
+    commitment_data
+        .par_iter()
+        .zip(ws.par_iter_mut())
+        .for_each(|(commitment_at_a_point, w)| {
+            let mut poly_batch = zero();
+            let mut eval_batch = C::Scalar::zero();
+            let z = commitment_at_a_point.point;
+            for query in commitment_at_a_point.queries.iter() {
+                assert_eq!(query.get_point(), z);
 
-        let poly_batch = &poly_batch - eval_batch;
-        let witness_poly = Polynomial {
-            values: kate_division(&poly_batch.values, z),
-            _marker: PhantomData,
-        };
-        let w = params.commit(&witness_poly).to_affine();
+                let poly = query.get_commitment().poly;
+                let eval = query.get_eval();
+                poly_batch = poly_batch * *v + poly;
+                eval_batch = eval_batch * *v + eval;
+            }
+
+            let poly_batch = &poly_batch - eval_batch;
+            let witness_poly = Polynomial {
+                values: kate_division(&poly_batch.values, z),
+                _marker: PhantomData,
+            };
+            *w = params.commit(&witness_poly).to_affine();
+        });
+
+    for w in ws {
         transcript.write_point(w)?;
     }
+
     Ok(())
 }
 
