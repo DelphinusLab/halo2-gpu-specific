@@ -11,7 +11,7 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
-use ark_std::end_timer;
+use ark_std::{end_timer, start_timer};
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},
@@ -135,7 +135,7 @@ pub enum ProveExpression<F> {
     Product(Box<ProveExpression<F>>, Box<ProveExpression<F>>),
     /// This is a scaled polynomial
     Scaled(Box<ProveExpression<F>>, F),
-    Y,
+    Y(F, u32),
 }
 
 impl<F: FieldExt> ProveExpression<F> {
@@ -186,9 +186,135 @@ impl<F: FieldExt> ProveExpression<F> {
 
     pub(crate) fn add_gate(self, e: &Expression<F>) -> Self {
         Self::Sum(
-            Box::new(Self::Product(Box::new(self), Box::new(Self::Y))),
+            Box::new(Self::Product(
+                Box::new(self),
+                Box::new(Self::Y(F::zero(), 1)),
+            )),
             Box::new(Self::from_expr(e)),
         )
+    }
+
+    fn ___reconstruct(coeff: (F, u32)) -> Self {
+        Self::Y(coeff.0, coeff.1)
+    }
+
+    fn ____reconstruct(u: ProveExpressionUnit, c: u32) -> Self {
+        if c == 1 {
+            Self::Unit(u)
+        } else {
+            Self::Product(
+                Box::new(Self::Unit(u.clone())),
+                Box::new(Self::____reconstruct(u, c - 1)),
+            )
+        }
+    }
+
+    fn __reconstruct(mut us: BTreeMap<ProveExpressionUnit, u32>, coeff: (F, u32)) -> Self {
+        if us.len() == 0 {
+            Self::___reconstruct(coeff)
+        } else {
+            let p = us.pop_first().unwrap();
+            Self::Product(
+                Box::new(Self::____reconstruct(p.0, p.1)),
+                Box::new(Self::__reconstruct(us, coeff)),
+            )
+        }
+    }
+
+    fn _reconstruct(mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, (F, u32))>) -> Self {
+        if tree.len() == 1 {
+            let u = tree.pop().unwrap();
+            return Self::__reconstruct(u.0, u.1);
+        }
+
+        // find max
+        let mut map = BTreeMap::new();
+
+        for (us, _) in tree.iter() {
+            for (u, _) in us {
+                if let Some(c) = map.get_mut(u) {
+                    *c = *c + 1;
+                } else {
+                    map.insert(u, 1);
+                }
+            }
+        }
+
+        let mut max_u = (*map.first_entry().unwrap().key()).clone();
+        let mut max_c = 0;
+
+        for (u, c) in map {
+            if c > max_c {
+                max_c = c;
+                max_u = u.clone();
+            }
+        }
+
+        let mut l = vec![];
+        let mut r = vec![];
+
+        for (mut k, v) in tree {
+            let c = k.remove(&max_u);
+            match c {
+                Some(1) => {
+                    l.push((k, v));
+                }
+                Some(c) => {
+                    k.insert(max_u.clone(), c - 1);
+                    l.push((k, v));
+                }
+                None => {
+                    r.push((k, v));
+                }
+            }
+        }
+
+        let l = Self::_reconstruct(l);
+        let l = Self::Product(Box::new(Self::Unit(max_u)), Box::new(l));
+        if r.len() == 0 {
+            l
+        } else {
+            let r = Self::_reconstruct(r);
+            Self::Sum(Box::new(l), Box::new(r))
+        }
+    }
+
+    pub(crate) fn reconstruct(tree: BTreeMap<Vec<ProveExpressionUnit>, (F, u32)>) -> Self {
+        let tree = tree
+            .into_iter()
+            .map(|(us, v)| {
+                let mut map = BTreeMap::new();
+                for u in us {
+                    if let Some(c) = map.get_mut(&u) {
+                        *c = *c + 1;
+                    } else {
+                        map.insert(u, 1);
+                    }
+                }
+                (map, v)
+            })
+            .collect();
+
+        Self::_reconstruct(tree)
+    }
+
+    pub(crate) fn get_degree(&self) -> (u32, u32) {
+        match self {
+            ProveExpression::Constant(_) => unreachable!(),
+            ProveExpression::Unit(_) => (1, 0),
+            ProveExpression::Sum(l, r) => {
+                let l = l.get_degree();
+                let r = r.get_degree();
+                (l.0 + r.0 + 1, l.0 + r.0)
+            },
+            ProveExpression::Product(l, r) => {
+                let l = l.get_degree();
+                let r = r.get_degree();
+                (l.0 + r.0 + 1, l.0 + r.0)
+            },
+            ProveExpression::Scaled(_, _) => unreachable!(),
+            ProveExpression::Y(_, _) => (0, 0),
+        }
     }
 
     // u32 is order of y
@@ -248,7 +374,9 @@ impl<F: FieldExt> ProveExpression<F> {
                 }
                 l
             }
-            ProveExpression::Y => BTreeMap::from_iter(vec![(vec![], (F::one(), 1))].into_iter()),
+            ProveExpression::Y(f, order) => {
+                BTreeMap::from_iter(vec![(vec![], (f, order))].into_iter())
+            }
         }
     }
 }
@@ -459,12 +587,11 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         let e = e.flatten();
-        let degree = e.iter().fold(1, |acc, x| { acc + x.0.len() + 2});
-        println!("flatten len {} total_degree {}", e.len(), degree);
-        for (k, v) in e {
-            println!("{:?}", v);
-            println!("{:?}", k);
-        }
+
+        let timer = start_timer!(|| "reconstruct start");
+        let c = ProveExpression::reconstruct(e);
+        println!("{:?}", c.get_degree());
+        end_timer!(timer);
 
         ev
     }
