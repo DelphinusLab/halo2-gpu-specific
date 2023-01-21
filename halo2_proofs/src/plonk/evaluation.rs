@@ -253,6 +253,8 @@ pub struct Evaluator<C: CurveAffine> {
     pub value_parts: Vec<ValueSource>,
     /// Lookup results
     pub lookup_results: Vec<Calculation>,
+    /// GPU
+    pub expressions: Vec<ProveExpression<C::ScalarExt>>,
 }
 
 /// CaluclationInfo
@@ -311,6 +313,8 @@ impl<C: CurveAffine> Evaluator<C> {
         let c = ProveExpression::reconstruct(e);
         println!("{:?}", c.get_degree());
         end_timer!(timer);
+
+        ev.expressions.push(c);
 
         ev
     }
@@ -731,6 +735,8 @@ impl<C: CurveAffine> Evaluator<C> {
     pub(in crate::plonk) fn evaluate_h(
         &self,
         pk: &ProvingKey<C>,
+        advice_poly: Vec<&Vec<Polynomial<C::ScalarExt, Coeff>>>,
+        instance_poly: Vec<&Vec<Polynomial<C::ScalarExt, Coeff>>>,
         advice: Vec<&Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
         instance: Vec<&Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
         y: C::ScalarExt,
@@ -740,6 +746,11 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
+        
+        let timer = start_timer!(|| "expressions gpu eval");
+        let new_values = pk.ev.expressions[0].eval_gpu(pk, advice_poly, instance_poly, y);
+        end_timer!(timer);
+
         let domain = &pk.vk.domain;
         let size = domain.extended_len();
         let rot_scale = 1 << (domain.extended_k() - domain.k());
@@ -836,6 +847,13 @@ impl<C: CurveAffine> Evaluator<C> {
                 }
             });
             end_timer!(timer);
+
+            for i in 0..new_values.len() {
+                if new_values.values[i] != values.values[i] {
+                    println!("unequal {} {:?} {:?}", i, new_values.values[i], values.values[i]);
+                    assert!(false);
+                }
+            }
 
             let timer = ark_std::start_timer!(|| "permutations");
             // Permutations

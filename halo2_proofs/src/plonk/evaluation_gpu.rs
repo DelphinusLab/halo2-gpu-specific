@@ -80,8 +80,8 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
-        advice: &Vec<Polynomial<F, LagrangeCoeff>>,
-        instance: &Vec<Polynomial<F, LagrangeCoeff>>,
+        advice: &Vec<Polynomial<F, Coeff>>,
+        instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
     ) -> EcResult<(Buffer<F>, i32)> {
         let origin_size = 1u32 << pk.vk.domain.k();
@@ -141,68 +141,45 @@ impl<F: FieldExt> ProveExpression<F> {
                 kernel.arg(&values).arg(&c).run()?;
                 Ok((values, 0))
             }
-            ProveExpression::Unit(u) => match u {
-                ProveExpressionUnit::Fixed {
-                    column_index,
-                    rotation,
-                } => {
-                    let origin_values =
-                        program.create_buffer_from_slice(&pk.fixed_polys[*column_index].values)?;
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(&origin_values)
-                        .arg(&values)
-                        .arg(&origin_size)
-                        .run()?;
-                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
-                }
-                ProveExpressionUnit::Advice {
-                    column_index,
-                    rotation,
-                } => {
-                    let origin_values =
-                        program.create_buffer_from_slice(&advice[*column_index].values)?;
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(&origin_values)
-                        .arg(&values)
-                        .arg(&origin_size)
-                        .run()?;
-                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
-                }
-                ProveExpressionUnit::Instance {
-                    column_index,
-                    rotation,
-                } => {
-                    let origin_values =
-                        program.create_buffer_from_slice(&instance[*column_index].values)?;
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(&origin_values)
-                        .arg(&values)
-                        .arg(&origin_size)
-                        .run()?;
-                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
-                }
-            },
+            ProveExpression::Unit(u) => {
+                let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                let (origin_values, rotation) = match u {
+                    ProveExpressionUnit::Fixed {
+                        column_index,
+                        rotation,
+                    } => (
+                        program.create_buffer_from_slice(&pk.fixed_polys[*column_index].values)?,
+                        rotation,
+                    ),
+                    ProveExpressionUnit::Advice {
+                        column_index,
+                        rotation,
+                    } => (
+                        program.create_buffer_from_slice(&advice[*column_index].values)?,
+                        rotation,
+                    ),
+                    ProveExpressionUnit::Instance {
+                        column_index,
+                        rotation,
+                    } => (
+                        program.create_buffer_from_slice(&instance[*column_index].values)?,
+                        rotation,
+                    ),
+                };
+
+                let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&origin_values)
+                    .arg(&values)
+                    .arg(&origin_size)
+                    .run()?;
+                Ok((Self::do_fft(pk, program, values)?, rotation.0))
+            }
             ProveExpression::Scaled(_, _) => unreachable!(),
             ProveExpression::Constant(_) => unreachable!(),
         }
@@ -286,8 +263,8 @@ impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         pk: &ProvingKey<C>,
-        advice: Vec<&Vec<Polynomial<F, LagrangeCoeff>>>,
-        instance: Vec<&Vec<Polynomial<F, LagrangeCoeff>>>,
+        advice: Vec<&Vec<Polynomial<F, Coeff>>>,
+        instance: Vec<&Vec<Polynomial<F, Coeff>>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
         use pairing::bn256::Fr;
@@ -369,7 +346,7 @@ impl<F: FieldExt> ProveExpression<F> {
         Self::Sum(
             Box::new(Self::Product(
                 Box::new(self),
-                Box::new(Self::Y(F::zero(), 1)),
+                Box::new(Self::Y(F::one(), 1)),
             )),
             Box::new(Self::from_expr(e)),
         )
@@ -503,9 +480,9 @@ impl<F: FieldExt> ProveExpression<F> {
         match self {
             ProveExpression::Constant(c) => {
                 if c == F::zero() {
-                    BTreeMap::from_iter(vec![(vec![], (c, 0))].into_iter())
-                } else {
                     BTreeMap::new()
+                } else {
+                    BTreeMap::from_iter(vec![(vec![], (c, 0))].into_iter())
                 }
             }
             ProveExpression::Unit(u) => {
