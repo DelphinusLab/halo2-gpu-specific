@@ -19,6 +19,7 @@ mod assigned;
 mod circuit;
 mod error;
 mod evaluation;
+mod evaluation_gpu;
 mod keygen;
 mod lookup;
 pub(crate) mod permutation;

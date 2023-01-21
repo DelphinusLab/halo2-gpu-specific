@@ -6,7 +6,7 @@ use crate::{
     plonk::Assigned,
 };
 
-use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation};
+use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation, PreparedExtendedLagrangeCoeff};
 
 use ark_std::{start_timer, end_timer};
 use group::ff::{BatchInvert, Field, PrimeField};
@@ -246,7 +246,10 @@ impl<G: Group> EvaluationDomain<G> {
     ) -> Polynomial<G, ExtendedLagrangeCoeff> {
         assert_eq!(a.values.len(), 1 << self.k);
 
+        //let timer = start_timer!(|| format!("prepare {}", self.k));
         self.distribute_powers_zeta(&mut a.values, true);
+        //end_timer!(timer);
+
         a.values.resize(self.extended_len(), G::group_zero());
         best_fft(&mut a.values, self.extended_omega, self.extended_k);
 
@@ -259,7 +262,7 @@ impl<G: Group> EvaluationDomain<G> {
     pub fn coeff_to_extended_without_fft(
         &self,
         mut a: Polynomial<G, Coeff>,
-    ) -> Polynomial<G, ExtendedLagrangeCoeff> {
+    ) -> Polynomial<G, PreparedExtendedLagrangeCoeff> {
         assert_eq!(a.values.len(), 1 << self.k);
 
         self.distribute_powers_zeta(&mut a.values, true);

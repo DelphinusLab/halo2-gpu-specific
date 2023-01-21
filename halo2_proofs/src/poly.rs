@@ -49,6 +49,13 @@ impl Basis for LagrangeCoeff {}
 pub struct ExtendedLagrangeCoeff;
 impl Basis for ExtendedLagrangeCoeff {}
 
+
+/// The polynomial is defined as coefficients of Lagrange basis polynomials in
+/// an extended size domain which supports multiplication
+#[derive(Clone, Copy, Debug)]
+pub struct PreparedExtendedLagrangeCoeff;
+impl Basis for PreparedExtendedLagrangeCoeff {}
+
 /// Represents a univariate polynomial defined over a field and a particular
 /// basis.
 #[derive(Clone, Debug)]
