@@ -15,7 +15,10 @@ use crate::{
 use ark_std::{end_timer, start_timer};
 use ec_gpu_gen::fft::FftKernel;
 use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
+use ec_gpu_gen::rust_gpu_tools::cuda::Program;
 use ec_gpu_gen::rust_gpu_tools::Device;
+use ec_gpu_gen::rust_gpu_tools::LocalBuffer;
+use ec_gpu_gen::EcResult;
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},
@@ -76,11 +79,208 @@ impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         pk: &ProvingKey<C>,
-        advice: Vec<&Vec<Polynomial<F, LagrangeCoeff>>>,
-        instance: Vec<&Vec<Polynomial<F, LagrangeCoeff>>>,
-        y: F,
-    ) -> Buffer<F> {
-        unimplemented!()
+        program: &Program,
+        advice: &Vec<Polynomial<F, LagrangeCoeff>>,
+        instance: &Vec<Polynomial<F, LagrangeCoeff>>,
+        y: &mut Vec<F>,
+    ) -> EcResult<(Buffer<F>, i32)> {
+        let origin_size = 1u32 << pk.vk.domain.k();
+        let size = 1u32 << pk.vk.domain.extended_k();
+        let local_work_size = 32;
+        let global_work_size = size / local_work_size;
+
+        match self {
+            ProveExpression::Sum(l, r) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y)?;
+                let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&l.0)
+                    .arg(&r.0)
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .run()?;
+                Ok((l.0, 0))
+            }
+            ProveExpression::Product(l, r) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y)?;
+                let kernel_name = format!("{}_eval_mul", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&l.0)
+                    .arg(&r.0)
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .run()?;
+                Ok((l.0, 0))
+            }
+            ProveExpression::Y(f, order) => {
+                for _ in (y.len() as u32)..order + 1 {
+                    y.push(y[1] * y.last().unwrap());
+                }
+                let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                let c = program.create_buffer_from_slice(&vec![y[*order as usize] * f])?;
+                let kernel_name = format!("{}_eval_constant", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel.arg(&values).arg(&c).run()?;
+                Ok((values, 0))
+            }
+            ProveExpression::Unit(u) => match u {
+                ProveExpressionUnit::Fixed {
+                    column_index,
+                    rotation,
+                } => {
+                    let origin_values =
+                        program.create_buffer_from_slice(&pk.fixed_polys[*column_index].values)?;
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&origin_values)
+                        .arg(&values)
+                        .arg(&origin_size)
+                        .run()?;
+                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
+                }
+                ProveExpressionUnit::Advice {
+                    column_index,
+                    rotation,
+                } => {
+                    let origin_values =
+                        program.create_buffer_from_slice(&advice[*column_index].values)?;
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&origin_values)
+                        .arg(&values)
+                        .arg(&origin_size)
+                        .run()?;
+                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
+                }
+                ProveExpressionUnit::Instance {
+                    column_index,
+                    rotation,
+                } => {
+                    let origin_values =
+                        program.create_buffer_from_slice(&instance[*column_index].values)?;
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&origin_values)
+                        .arg(&values)
+                        .arg(&origin_size)
+                        .run()?;
+                    Ok((Self::do_fft(pk, program, values)?, rotation.0))
+                }
+            },
+            ProveExpression::Scaled(_, _) => unreachable!(),
+            ProveExpression::Constant(_) => unreachable!(),
+        }
+    }
+
+    pub(crate) fn do_fft<C: CurveAffine<ScalarExt = F>>(
+        pk: &ProvingKey<C>,
+        program: &Program,
+        values: Buffer<F>,
+    ) -> EcResult<Buffer<F>> {
+        let log_n = pk.vk.domain.extended_k();
+        let n = 1 << log_n;
+        let omega = pk.vk.domain.get_omega();
+        const MAX_LOG2_RADIX: u32 = 8;
+        const LOG2_MAX_ELEMENTS: usize = 32;
+        const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
+
+        let mut src_buffer = values;
+        let mut dst_buffer = unsafe { program.create_buffer::<F>(n)? };
+        // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
+        let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+
+        // Precalculate:
+        // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
+        let mut pq = vec![F::zero(); 1 << max_deg >> 1];
+        let twiddle = omega.pow_vartime([(n >> max_deg) as u64]);
+        pq[0] = F::one();
+        if max_deg > 1 {
+            pq[1] = twiddle;
+            for i in 2..(1 << max_deg >> 1) {
+                pq[i] = pq[i - 1];
+                pq[i].mul_assign(&twiddle);
+            }
+        }
+        let pq_buffer = program.create_buffer_from_slice(&pq)?;
+
+        // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
+        let mut omegas = vec![F::zero(); 32];
+        omegas[0] = omega;
+        for i in 1..LOG2_MAX_ELEMENTS {
+            omegas[i] = omegas[i - 1].pow_vartime([2u64]);
+        }
+        let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
+
+        //let timer = start_timer!(|| format!("fft main {}", log_n));
+        // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
+        let mut log_p = 0u32;
+        // Each iteration performs a FFT round
+        while log_p < log_n {
+            // 1=>radix2, 2=>radix4, 3=>radix8, ...
+            let deg = cmp::min(max_deg, log_n - log_p);
+
+            let n = 1u32 << log_n;
+            let local_work_size = 1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
+            let global_work_size = n >> deg;
+            let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(&src_buffer)
+                .arg(&dst_buffer)
+                .arg(&pq_buffer)
+                .arg(&omegas_buffer)
+                .arg(&LocalBuffer::<F>::new(1 << deg))
+                .arg(&n)
+                .arg(&log_p)
+                .arg(&deg)
+                .arg(&max_deg)
+                .run()?;
+
+            log_p += deg;
+            std::mem::swap(&mut src_buffer, &mut dst_buffer);
+        }
+
+        Ok(src_buffer)
     }
 
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
@@ -94,14 +294,16 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let mut values = pk.vk.domain.empty_extended();
 
-        let closures =
-            ec_gpu_gen::rust_gpu_tools::program_closures!(
-                |program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
-                    let values_buf = self._eval_gpu(pk, advice, instance, y);
-                    program.read_into_buffer(&values_buf, input)?;
-                    Ok(())
-                }
-            );
+        let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
+                                                                      input: &mut [F]|
+         -> ec_gpu_gen::EcResult<
+            (),
+        > {
+            let mut ys = vec![F::one(), y];
+            let values_buf = self._eval_gpu(pk, program, advice[0], instance[0], &mut ys)?;
+            program.read_into_buffer(&values_buf.0, input)?;
+            Ok(())
+        });
 
         let devices = Device::all();
         let programs = devices
