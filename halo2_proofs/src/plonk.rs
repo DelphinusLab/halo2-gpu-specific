@@ -138,6 +138,8 @@ pub struct ProvingKey<C: CurveAffine> {
     l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+
+    #[cfg(not(feature = "cuda"))]
     fixed_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     permutation: permutation::ProvingKey<C>,
     ev: Evaluator<C>,

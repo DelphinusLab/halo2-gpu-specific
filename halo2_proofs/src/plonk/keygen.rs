@@ -292,6 +292,7 @@ where
         .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
         .collect();
 
+    #[cfg(not(feature = "cuda"))]
     let fixed_cosets = fixed_polys
         .iter()
         .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
@@ -344,6 +345,8 @@ where
         l_active_row,
         fixed_values: fixed,
         fixed_polys,
+
+        #[cfg(not(feature = "cuda"))]
         fixed_cosets,
         permutation: permutation_pk,
         ev,

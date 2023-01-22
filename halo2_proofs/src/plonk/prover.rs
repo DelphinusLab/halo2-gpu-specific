@@ -72,6 +72,8 @@ pub fn create_proof<
     struct InstanceSingle<C: CurveAffine> {
         pub instance_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+
+        #[cfg(not(feature = "cuda"))]
         pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
@@ -115,6 +117,7 @@ pub fn create_proof<
                 })
                 .collect();
 
+            #[cfg(not(feature = "cuda"))]
             let instance_cosets: Vec<_> = instance_polys
                 .iter()
                 .map(|poly| domain.coeff_to_extended(poly.clone()))
@@ -123,6 +126,8 @@ pub fn create_proof<
             Ok(InstanceSingle {
                 instance_values,
                 instance_polys,
+
+                #[cfg(not(feature = "cuda"))]
                 instance_cosets,
             })
         })
@@ -133,6 +138,8 @@ pub fn create_proof<
     struct AdviceSingle<C: CurveAffine> {
         pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+
+        #[cfg(not(feature = "cuda"))]
         pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
@@ -320,14 +327,17 @@ pub fn create_proof<
                 .map(|poly| domain.lagrange_to_coeff(poly))
                 .collect();
 
+            #[cfg(not(feature = "cuda"))]
             let advice_cosets: Vec<_> = advice_polys
                 .iter()
                 .map(|poly| domain.coeff_to_extended(poly.clone()))
                 .collect();
- 
+
             Ok(AdviceSingle {
                 advice_values: advice,
                 advice_polys,
+
+                #[cfg(not(feature = "cuda"))]
                 advice_cosets,
             })
         })
@@ -418,10 +428,23 @@ pub fn create_proof<
     end_timer!(timer);
     let timer = start_timer!(|| "h_poly");
     // Evaluate the h(X) polynomial
+
+    #[cfg(feature = "cuda")]
     let h_poly = pk.ev.evaluate_h(
         pk,
         advice.iter().map(|a| &a.advice_polys).collect(),
         instance.iter().map(|i| &i.instance_polys).collect(),
+        *y,
+        *beta,
+        *gamma,
+        *theta,
+        &lookups,
+        &permutations,
+    );
+
+    #[cfg(not(feature = "cuda"))]
+    let h_poly = pk.ev.evaluate_h(
+        pk,
         advice.iter().map(|a| &a.advice_cosets).collect(),
         instance.iter().map(|i| &i.instance_cosets).collect(),
         *y,

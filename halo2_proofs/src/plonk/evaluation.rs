@@ -759,8 +759,6 @@ impl<C: CurveAffine> Evaluator<C> {
         pk: &ProvingKey<C>,
         advice_poly: Vec<&Vec<Polynomial<C::ScalarExt, Coeff>>>,
         instance_poly: Vec<&Vec<Polynomial<C::ScalarExt, Coeff>>>,
-        advice: Vec<&Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
-        instance: Vec<&Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>>>,
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
@@ -778,7 +776,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let domain = &pk.vk.domain;
         let size = domain.extended_len();
         let rot_scale = 1 << (domain.extended_k() - domain.k());
-        let fixed = &pk.fixed_cosets[..];
+        let fixed = &pk.fixed_polys[..];
         let extended_omega = domain.get_extended_omega();
         //let num_lookups = pk.vk.cs.lookups.len();
         let isize = size as i32;
@@ -807,6 +805,33 @@ impl<C: CurveAffine> Evaluator<C> {
 
             let first_set = sets.first().unwrap();
             let last_set = sets.last().unwrap();
+
+            let mut fixed_map = BTreeMap::new();
+            let mut advice_map = BTreeMap::new();
+            let mut instance_map = BTreeMap::new();
+
+            for column in p.columns.iter() {
+                match column.column_type() {
+                    Any::Advice => {
+                        advice_map.insert(
+                            column.index(),
+                            domain.coeff_to_extended(advice_poly[0][column.index()].clone()),
+                        );
+                    }
+                    Any::Fixed => {
+                        fixed_map.insert(
+                            column.index(),
+                            domain.coeff_to_extended(fixed[column.index()].clone()),
+                        );
+                    }
+                    Any::Instance => {
+                        instance_map.insert(
+                            column.index(),
+                            domain.coeff_to_extended(instance_poly[0][column.index()].clone()),
+                        );
+                    }
+                }
+            }
 
             // Permutation constraints
             parallelize(&mut values, |values, start| {
@@ -853,9 +878,9 @@ impl<C: CurveAffine> Evaluator<C> {
                         for (values, permutation) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
-                                Any::Advice => &advice[0][column.index()],
-                                Any::Fixed => &fixed[column.index()],
-                                Any::Instance => &instance[0][column.index()],
+                                Any::Advice => advice_map.get(&column.index()).unwrap(),
+                                Any::Fixed => fixed_map.get(&column.index()).unwrap(),
+                                Any::Instance => instance_map.get(&column.index()).unwrap(),
                             })
                             .zip(cosets.iter())
                         {
@@ -864,9 +889,9 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         let mut right = set.permutation_product_coset[idx];
                         for values in columns.iter().map(|&column| match column.column_type() {
-                            Any::Advice => &advice[0][column.index()],
-                            Any::Fixed => &fixed[column.index()],
-                            Any::Instance => &instance[0][column.index()],
+                            Any::Advice => advice_map.get(&column.index()).unwrap(),
+                            Any::Fixed => fixed_map.get(&column.index()).unwrap(),
+                            Any::Instance => instance_map.get(&column.index()).unwrap(),
                         }) {
                             right *= values[idx] + current_delta + gamma;
                             current_delta *= &C::Scalar::DELTA;
