@@ -5,6 +5,7 @@ use crate::poly::Rotation;
 use crate::poly::{commitment::Params, Coeff, Polynomial};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
+use ark_std::{start_timer, end_timer};
 use ff::Field;
 use group::Curve;
 use rayon::iter::*;
@@ -56,7 +57,9 @@ where
             };
 
             let _guard = lock.lock().unwrap();
+            let timer = start_timer!(|| "start commit");
             *w = params.commit(&witness_poly).to_affine();
+            end_timer!(timer);
         });
 
     for w in ws {

@@ -1,4 +1,6 @@
+use super::{ConstraintSystem, Expression};
 use crate::multicore;
+use crate::plonk::evaluation_gpu::ProveExpression;
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -18,19 +20,19 @@ use group::{
     ff::{BatchInvert, Field},
     Curve,
 };
+use num_bigint::BigUint;
 use std::any::TypeId;
 use std::collections::BTreeSet;
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
+use std::str::FromStr;
 use std::{cmp, slice};
 use std::{
     collections::BTreeMap,
     iter,
     ops::{Index, Mul, MulAssign},
 };
-use crate::plonk::evaluation_gpu::ProveExpression;
-use super::{ConstraintSystem, Expression};
 
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
 fn get_rotation_idx(idx: usize, rot: i32, rot_scale: i32, isize: i32) -> usize {
@@ -276,6 +278,7 @@ impl<C: CurveAffine> Evaluator<C> {
         ev.add_constant(&C::ScalarExt::one());
 
         // Custom gates
+        
         for gate in cs.gates.iter() {
             for poly in gate.polynomials().iter() {
                 let vs = ev.add_expression(poly);
@@ -283,6 +286,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 e = e.add_gate(poly);
             }
         }
+        e = ProveExpression::reconstruct(e.flatten());
 
         // Lookups
         for lookup in cs.lookups.iter() {
@@ -307,6 +311,10 @@ impl<C: CurveAffine> Evaluator<C> {
                 .push(Calculation::LcBeta(compressed_input_coset, right_gamma));
         }
 
+        println!("expression {:?}", e);
+        ev.expressions.push(e);
+
+        /*
         let e = e.flatten();
 
         let timer = start_timer!(|| "reconstruct start");
@@ -315,6 +323,7 @@ impl<C: CurveAffine> Evaluator<C> {
         end_timer!(timer);
 
         ev.expressions.push(c);
+        */
 
         ev
     }
@@ -746,7 +755,6 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        
         let timer = start_timer!(|| "expressions gpu eval");
         let new_values = pk.ev.expressions[0].eval_gpu(pk, advice_poly, instance_poly, y);
         end_timer!(timer);
@@ -850,7 +858,11 @@ impl<C: CurveAffine> Evaluator<C> {
 
             for i in 0..new_values.len() {
                 if new_values.values[i] != values.values[i] {
-                    println!("unequal {} {:?} {:?}", i, new_values.values[i], values.values[i]);
+                    println!(
+                        "unequal {} {:?} {:?}",
+                        i, new_values.values[i], values.values[i]
+                    );
+                    //println!("{:?}", new_values.values);
                     assert!(false);
                 }
             }
