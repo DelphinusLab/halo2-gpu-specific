@@ -531,6 +531,16 @@ impl<F: FieldExt> ProveExpression<F> {
         }
     }
 
+    fn _reconstruct_pure(mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>) -> Self {
+        if tree.len() == 1 {
+            let u = tree.pop().unwrap();
+            return Self::__reconstruct(u.0, u.1);
+        }
+
+        let e = tree.pop().unwrap();
+        Self::Sum(Box::new(Self::_reconstruct(tree)), Box::new(Self::__reconstruct(e.0, e.1)))
+    }
+
     fn _reconstruct(mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>) -> Self {
         if tree.len() == 1 {
             let u = tree.pop().unwrap();
@@ -583,11 +593,11 @@ impl<F: FieldExt> ProveExpression<F> {
         }
 
         let l = Self::_reconstruct(l);
-        let l = Self::Product(Box::new(Self::Unit(max_u)), Box::new(l));
+        let l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
         if r.len() == 0 {
             l
         } else {
-            let r = Self::_reconstruct(r);
+            let r = Self::_reconstruct_pure(r);
             Self::Sum(Box::new(l), Box::new(r))
         }
     }
@@ -611,20 +621,36 @@ impl<F: FieldExt> ProveExpression<F> {
         Self::_reconstruct(tree)
     }
 
-    pub(crate) fn get_degree(&self) -> (u32, u32) {
+    pub(crate) fn get_complexity(&self) -> (u32, u32) {
         match self {
-            ProveExpression::Unit(_) => (1, 0),
+            ProveExpression::Unit(_) => (0, 1),
             ProveExpression::Sum(l, r) => {
-                let l = l.get_degree();
-                let r = r.get_degree();
+                let l = l.get_complexity();
+                let r = r.get_complexity();
                 (l.0 + r.0 + 1, l.0 + r.0)
             }
             ProveExpression::Product(l, r) => {
-                let l = l.get_degree();
-                let r = r.get_degree();
+                let l = l.get_complexity();
+                let r = r.get_complexity();
                 (l.0 + r.0 + 1, l.0 + r.0)
             }
-            ProveExpression::Y(_) => (0, 0),
+            ProveExpression::Y(_) => (1, 0),
+        }
+    }
+
+
+    pub(crate) fn get_r_deep(&self) -> u32 {
+        match self {
+            ProveExpression::Unit(_) => 0,
+            ProveExpression::Sum(l, r) => {
+                let r = r.get_r_deep();
+                r + 1
+            }
+            ProveExpression::Product(l, r) => {
+                let r = r.get_r_deep();
+                r + 1
+            }
+            ProveExpression::Y(_) => 0,
         }
     }
 

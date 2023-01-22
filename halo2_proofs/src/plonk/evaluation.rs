@@ -288,6 +288,8 @@ impl<C: CurveAffine> Evaluator<C> {
             }
         }
         e = ProveExpression::reconstruct(e.flatten());
+        println!("complexity is {:?}", e.get_complexity());
+        println!("r deep is {}", e.get_r_deep());
 
         // Lookups
         for lookup in cs.lookups.iter() {
