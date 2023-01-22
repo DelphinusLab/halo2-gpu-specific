@@ -324,7 +324,7 @@ pub fn create_proof<
                 .iter()
                 .map(|poly| domain.coeff_to_extended(poly.clone()))
                 .collect();
-
+ 
             Ok(AdviceSingle {
                 advice_values: advice,
                 advice_polys,

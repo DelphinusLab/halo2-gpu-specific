@@ -1,6 +1,6 @@
 use super::{ConstraintSystem, Expression};
 use crate::multicore;
-use crate::plonk::evaluation_gpu::ProveExpression;
+use crate::plonk::evaluation_gpu::{LookupProveExpression, ProveExpression};
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -256,7 +256,8 @@ pub struct Evaluator<C: CurveAffine> {
     /// Lookup results
     pub lookup_results: Vec<Calculation>,
     /// GPU
-    pub expressions: Vec<ProveExpression<C::ScalarExt>>,
+    pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
+    pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
 }
 
 /// CaluclationInfo
@@ -278,7 +279,7 @@ impl<C: CurveAffine> Evaluator<C> {
         ev.add_constant(&C::ScalarExt::one());
 
         // Custom gates
-        
+
         for gate in cs.gates.iter() {
             for poly in gate.polynomials().iter() {
                 let vs = ev.add_expression(poly);
@@ -311,20 +312,32 @@ impl<C: CurveAffine> Evaluator<C> {
                 .push(Calculation::LcBeta(compressed_input_coset, right_gamma));
         }
 
-        println!("expression {:?}", e);
-        ev.expressions.push(e);
+        // Lookups in GPU
+        for lookup in cs.lookups.iter() {
+            let evaluate_lc = |expressions: &Vec<Expression<_>>| {
+                let parts = expressions
+                    .iter()
+                    .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
+                    .collect::<Vec<_>>();
+                let mut lc = parts[0].clone();
+                for part in parts.into_iter().skip(1) {
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
+                }
+                lc
+            };
+            // Input coset
+            let compressed_input_coset = evaluate_lc(&lookup.input_expressions);
+            // table coset
+            let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
+            // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
+            let right_gamma = LookupProveExpression::AddGamma(Box::new(compressed_table_coset));
+            ev.gpu_lookup_expr.push(LookupProveExpression::LcBeta(
+                Box::new(compressed_input_coset),
+                Box::new(right_gamma),
+            ));
+        }
 
-        /*
-        let e = e.flatten();
-
-        let timer = start_timer!(|| "reconstruct start");
-        let c = ProveExpression::reconstruct(e);
-        println!("{:?}", c.get_degree());
-        end_timer!(timer);
-
-        ev.expressions.push(c);
-        */
-
+        ev.gpu_gates_expr.push(e);
         ev
     }
 
@@ -755,8 +768,11 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
+        assert!(advice_poly.len() == 1);
+
         let timer = start_timer!(|| "expressions gpu eval");
-        let new_values = pk.ev.expressions[0].eval_gpu(pk, advice_poly, instance_poly, y);
+        let mut values =
+            pk.ev.gpu_gates_expr[0].eval_gpu(pk, &advice_poly[0], &instance_poly[0], y);
         end_timer!(timer);
 
         let domain = &pk.vk.domain;
@@ -764,7 +780,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let rot_scale = 1 << (domain.extended_k() - domain.k());
         let fixed = &pk.fixed_cosets[..];
         let extended_omega = domain.get_extended_omega();
-        let num_lookups = pk.vk.cs.lookups.len();
+        //let num_lookups = pk.vk.cs.lookups.len();
         let isize = size as i32;
         let one = C::ScalarExt::one();
         let l0 = &pk.l0;
@@ -772,367 +788,288 @@ impl<C: CurveAffine> Evaluator<C> {
         let l_active_row = &pk.l_active_row;
         let p = &pk.vk.cs.permutation;
 
-        let mut values = domain.empty_extended();
-        let mut lookup_values = vec![C::Scalar::zero(); size * num_lookups];
+        // let mut values = domain.empty_extended();
+        // let mut lookup_values = vec![C::Scalar::zero(); size * num_lookups];
 
         // Core expression evaluations
-        let num_threads = multicore::current_num_threads();
-        let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
+        //let num_threads = multicore::current_num_threads();
+        //let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
 
-        for (((advice, instance), lookups), permutation) in advice
-            .iter()
-            .zip(instance.iter())
-            .zip(lookups.iter())
-            .zip(permutations.iter())
-        {
-            let timer = ark_std::start_timer!(|| "expressions");
-            println!(
-                "self.calculations.len() {} num_lookups {}",
-                self.calculations.len(),
-                num_lookups
-            );
-            multicore::scope(|scope| {
-                let chunk_size = (size + num_threads - 1) / num_threads;
-                for (thread_idx, values) in values.chunks_mut(chunk_size).enumerate() {
-                    let start = thread_idx * chunk_size;
-                    scope.spawn(move |_| {
-                        let table_values = table_values_box.unwrap();
-                        let mut rotations = vec![0usize; self.rotations.len()];
-                        let mut intermediates: Vec<C::ScalarExt> =
-                            vec![C::ScalarExt::zero(); self.calculations.len()];
-                        for (i, value) in values.iter_mut().enumerate() {
-                            let idx = start + i;
+        let timer = ark_std::start_timer!(|| "permutations");
+        // Permutations
+        let permutation = &permutations[0];
+        let sets = &permutation.sets;
+        if !sets.is_empty() {
+            let blinding_factors = pk.vk.cs.blinding_factors();
+            let last_rotation = Rotation(-((blinding_factors + 1) as i32));
+            let chunk_len = pk.vk.cs.degree() - 2;
+            let delta_start = beta * &C::Scalar::ZETA;
 
-                            // All rotation index values
-                            for (rot_idx, rot) in self.rotations.iter().enumerate() {
-                                rotations[rot_idx] = get_rotation_idx(idx, *rot, rot_scale, isize);
-                            }
+            let first_set = sets.first().unwrap();
+            let last_set = sets.last().unwrap();
 
-                            // All calculations, with cached intermediate results
-                            for (i_idx, calc) in self.calculations.iter().enumerate() {
-                                intermediates[i_idx] = calc.calculation.evaluate(
-                                    &rotations,
-                                    &self.constants,
-                                    &intermediates,
-                                    fixed,
-                                    advice,
-                                    instance,
-                                    &beta,
-                                    &gamma,
-                                    &theta,
-                                );
-                            }
+            // Permutation constraints
+            parallelize(&mut values, |values, start| {
+                let mut beta_term = extended_omega.pow_vartime(&[start as u64, 0, 0, 0]);
+                for (i, value) in values.iter_mut().enumerate() {
+                    let idx = start + i;
+                    let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                    let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
-                            // Accumulate value parts
-                            for value_part in self.value_parts.iter() {
-                                *value = *value * y
-                                    + value_part.get(
-                                        &rotations,
-                                        &self.constants,
-                                        &intermediates,
-                                        fixed,
-                                        advice,
-                                        instance,
-                                    );
-                            }
-
-                            // Values required for the lookups
-                            for (t, table_result) in self.lookup_results.iter().enumerate() {
-                                table_values[t * size + idx] = table_result.evaluate(
-                                    &rotations,
-                                    &self.constants,
-                                    &intermediates,
-                                    fixed,
-                                    advice,
-                                    instance,
-                                    &beta,
-                                    &gamma,
-                                    &theta,
-                                );
-                            }
+                    // Enforce only for the first set.
+                    // l_0(X) * (1 - z_0(X)) = 0
+                    *value =
+                        *value * y + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
+                    // Enforce only for the last set.
+                    // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
+                    *value = *value * y
+                        + ((last_set.permutation_product_coset[idx]
+                            * last_set.permutation_product_coset[idx]
+                            - last_set.permutation_product_coset[idx])
+                            * l_last[idx]);
+                    // Except for the first set, enforce.
+                    // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
+                    for (set_idx, set) in sets.iter().enumerate() {
+                        if set_idx != 0 {
+                            *value = *value * y
+                                + ((set.permutation_product_coset[idx]
+                                    - permutation.sets[set_idx - 1].permutation_product_coset
+                                        [r_last])
+                                    * l0[idx]);
                         }
-                    });
+                    }
+                    // And for all the sets we enforce:
+                    // (1 - (l_last(X) + l_blind(X))) * (
+                    //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
+                    // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
+                    // )
+                    let mut current_delta = delta_start * beta_term;
+                    for ((set, columns), cosets) in sets
+                        .iter()
+                        .zip(p.columns.chunks(chunk_len))
+                        .zip(pk.permutation.cosets.chunks(chunk_len))
+                    {
+                        let mut left = set.permutation_product_coset[r_next];
+                        for (values, permutation) in columns
+                            .iter()
+                            .map(|&column| match column.column_type() {
+                                Any::Advice => &advice[0][column.index()],
+                                Any::Fixed => &fixed[column.index()],
+                                Any::Instance => &instance[0][column.index()],
+                            })
+                            .zip(cosets.iter())
+                        {
+                            left *= values[idx] + beta * permutation[idx] + gamma;
+                        }
+
+                        let mut right = set.permutation_product_coset[idx];
+                        for values in columns.iter().map(|&column| match column.column_type() {
+                            Any::Advice => &advice[0][column.index()],
+                            Any::Fixed => &fixed[column.index()],
+                            Any::Instance => &instance[0][column.index()],
+                        }) {
+                            right *= values[idx] + current_delta + gamma;
+                            current_delta *= &C::Scalar::DELTA;
+                        }
+
+                        *value = *value * y + ((left - right) * l_active_row[idx]);
+                    }
+                    beta_term *= &extended_omega;
                 }
             });
-            end_timer!(timer);
+        }
+        end_timer!(timer);
 
-            for i in 0..new_values.len() {
-                if new_values.values[i] != values.values[i] {
-                    println!(
-                        "unequal {} {:?} {:?}",
-                        i, new_values.values[i], values.values[i]
-                    );
-                    //println!("{:?}", new_values.values);
-                    assert!(false);
-                }
-            }
+        let timer = ark_std::start_timer!(|| "eval_h_lookups");
+        let lookups = &lookups[0];
+        {
+            use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer};
+            use ff::PrimeField;
+            use group::ff::Field;
+            use pairing::bn256::Fr;
 
-            let timer = ark_std::start_timer!(|| "permutations");
-            // Permutations
-            let sets = &permutation.sets;
-            if !sets.is_empty() {
-                let blinding_factors = pk.vk.cs.blinding_factors();
-                let last_rotation = Rotation(-((blinding_factors + 1) as i32));
-                let chunk_len = pk.vk.cs.degree() - 2;
-                let delta_start = beta * &C::Scalar::ZETA;
-
-                let first_set = sets.first().unwrap();
-                let last_set = sets.last().unwrap();
-
-                // Permutation constraints
-                parallelize(&mut values, |values, start| {
-                    let mut beta_term = extended_omega.pow_vartime(&[start as u64, 0, 0, 0]);
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let idx = start + i;
-                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
-
-                        // Enforce only for the first set.
-                        // l_0(X) * (1 - z_0(X)) = 0
-                        *value = *value * y
-                            + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                        // Enforce only for the last set.
-                        // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
-                        *value = *value * y
-                            + ((last_set.permutation_product_coset[idx]
-                                * last_set.permutation_product_coset[idx]
-                                - last_set.permutation_product_coset[idx])
-                                * l_last[idx]);
-                        // Except for the first set, enforce.
-                        // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-                        for (set_idx, set) in sets.iter().enumerate() {
-                            if set_idx != 0 {
-                                *value = *value * y
-                                    + ((set.permutation_product_coset[idx]
-                                        - permutation.sets[set_idx - 1].permutation_product_coset
-                                            [r_last])
-                                        * l0[idx]);
-                            }
-                        }
-                        // And for all the sets we enforce:
-                        // (1 - (l_last(X) + l_blind(X))) * (
-                        //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
-                        // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
-                        // )
-                        let mut current_delta = delta_start * beta_term;
-                        for ((set, columns), cosets) in sets
-                            .iter()
-                            .zip(p.columns.chunks(chunk_len))
-                            .zip(pk.permutation.cosets.chunks(chunk_len))
-                        {
-                            let mut left = set.permutation_product_coset[r_next];
-                            for (values, permutation) in columns
-                                .iter()
-                                .map(|&column| match column.column_type() {
-                                    Any::Advice => &advice[column.index()],
-                                    Any::Fixed => &fixed[column.index()],
-                                    Any::Instance => &instance[column.index()],
-                                })
-                                .zip(cosets.iter())
-                            {
-                                left *= values[idx] + beta * permutation[idx] + gamma;
-                            }
-
-                            let mut right = set.permutation_product_coset[idx];
-                            for values in columns.iter().map(|&column| match column.column_type() {
-                                Any::Advice => &advice[column.index()],
-                                Any::Fixed => &fixed[column.index()],
-                                Any::Instance => &instance[column.index()],
-                            }) {
-                                right *= values[idx] + current_delta + gamma;
-                                current_delta *= &C::Scalar::DELTA;
-                            }
-
-                            *value = *value * y + ((left - right) * l_active_row[idx]);
-                        }
-                        beta_term *= &extended_omega;
+            // combine fft with eval_h_lookups:
+            // fft code: from ec-gpu lib.
+            let mut buffer = vec![];
+            buffer.resize(domain.extended_len(), C::Scalar::zero());
+            let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
+                |program, input: &mut [Fr]| -> ec_gpu_gen::EcResult<()> {
+                    macro_rules! create_buffer_from {
+                        ($x:ident, $y:expr) => {
+                            let $x = program.create_buffer_from_slice($y)?;
+                        };
                     }
-                });
-            }
-            end_timer!(timer);
 
-            let timer = ark_std::start_timer!(|| "eval_h_lookups");
+                    let y_beta_gamma = vec![y, beta, gamma];
 
-            {
-                use ec_gpu_gen::{
-                    fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer,
-                };
-                use ff::PrimeField;
-                use group::ff::Field;
-                use pairing::bn256::Fr;
+                    create_buffer_from!(values_buf, input);
+                    create_buffer_from!(l0_buf, l0);
+                    create_buffer_from!(l_last_buf, l_last);
+                    create_buffer_from!(l_active_row_buf, l_active_row);
+                    create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
-                // combine fft with eval_h_lookups:
-                // fft code: from ec-gpu lib.
-                let mut buffer = vec![];
-                buffer.resize(domain.extended_len(), C::Scalar::zero());
-                let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
-                    |program, input: &mut [Fr]| -> ec_gpu_gen::EcResult<()> {
-                        macro_rules! create_buffer_from {
-                            ($x:ident, $y:expr) => {
-                                let $x = program.create_buffer_from_slice($y)?;
-                            };
+                    let mut permuted_input_coset_buf =
+                        unsafe { program.create_buffer::<Fr>(size)? };
+                    let mut permuted_table_coset_buf =
+                        unsafe { program.create_buffer::<Fr>(size)? };
+                    let mut product_coset_buf = unsafe { program.create_buffer::<Fr>(size)? };
+
+                    const MAX_LOG2_RADIX: u32 = 8;
+                    const LOG2_MAX_ELEMENTS: usize = 32;
+                    const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
+
+                    let buf = vec![pk.vk.domain.get_extended_omega()];
+                    let omega: &[Fr] = unsafe { std::mem::transmute(&buf[..]) };
+                    let omega = omega[0];
+                    let log_n = domain.extended_k();
+                    let n = 1 << log_n;
+                    let mut dst_buffer = unsafe { program.create_buffer::<Fr>(n)? };
+                    let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+
+                    // Precalculate:
+                    // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
+                    let mut pq = vec![Fr::zero(); 1 << (max_deg - 1)];
+                    let twiddle: Fr = omega.pow_vartime([(n >> max_deg) as u64]);
+                    pq[0] = Fr::one();
+                    if max_deg > 1 {
+                        pq[1] = twiddle;
+                        for i in 2..(1 << max_deg >> 1) {
+                            pq[i] = pq[i - 1];
+                            pq[i].mul_assign(&twiddle);
                         }
+                    }
+                    let pq_buffer = program.create_buffer_from_slice(&pq)?;
 
-                        let y_beta_gamma = vec![y, beta, gamma];
+                    // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
+                    let mut omegas = vec![omega];
+                    for _ in 1..LOG2_MAX_ELEMENTS {
+                        omegas.push(omegas.last().unwrap().square());
+                    }
 
-                        create_buffer_from!(values_buf, input);
-                        create_buffer_from!(l0_buf, l0);
-                        create_buffer_from!(l_last_buf, l_last);
-                        create_buffer_from!(l_active_row_buf, l_active_row);
-                        create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
-
-                        let mut permuted_input_coset_buf =
-                            unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut permuted_table_coset_buf =
-                            unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut product_coset_buf = unsafe { program.create_buffer::<Fr>(size)? };
-                        let mut table_buf = unsafe { program.create_buffer::<Fr>(size)? };
-
-                        const MAX_LOG2_RADIX: u32 = 8;
-                        const LOG2_MAX_ELEMENTS: usize = 32;
-                        const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
-
-                        let buf = vec![pk.vk.domain.get_extended_omega()];
-                        let omega: &[Fr] = unsafe { std::mem::transmute(&buf[..]) };
-                        let omega = omega[0];
-                        let log_n = domain.extended_k();
-                        let n = 1 << log_n;
-                        let mut dst_buffer = unsafe { program.create_buffer::<Fr>(n)? };
-                        let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
-
-                        // Precalculate:
-                        // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
-                        let mut pq = vec![Fr::zero(); 1 << (max_deg - 1)];
-                        let twiddle: Fr = omega.pow_vartime([(n >> max_deg) as u64]);
-                        pq[0] = Fr::one();
-                        if max_deg > 1 {
-                            pq[1] = twiddle;
-                            for i in 2..(1 << max_deg >> 1) {
-                                pq[i] = pq[i - 1];
-                                pq[i].mul_assign(&twiddle);
-                            }
-                        }
-                        let pq_buffer = program.create_buffer_from_slice(&pq)?;
-
-                        // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
-                        let mut omegas = vec![omega];
-                        for _ in 1..LOG2_MAX_ELEMENTS {
-                            omegas.push(omegas.last().unwrap().square());
-                        }
-
-                        for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                    for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                        /*
                             // Lookup constraints
                             let table = &lookup_values[lookup_idx * size..(lookup_idx + 1) * size];
-                            let product_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.product_poly.clone());
-                            let permuted_input_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.permuted_input_poly.clone());
-                            let permuted_table_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.permuted_table_poly.clone());
+                        */
+                        let mut ys = vec![C::ScalarExt::one(), y];
+                        let table_buf = pk.ev.gpu_lookup_expr[lookup_idx]
+                            ._eval_gpu(
+                                pk,
+                                program,
+                                &advice_poly[0],
+                                &instance_poly[0],
+                                &mut ys,
+                                beta,
+                                theta,
+                                gamma,
+                            )
+                            .unwrap()
+                            .0;
+                        let product_coset = pk
+                            .vk
+                            .domain
+                            .coeff_to_extended_without_fft(lookup.product_poly.clone());
+                        let permuted_input_coset = pk
+                            .vk
+                            .domain
+                            .coeff_to_extended_without_fft(lookup.permuted_input_poly.clone());
+                        let permuted_table_coset = pk
+                            .vk
+                            .domain
+                            .coeff_to_extended_without_fft(lookup.permuted_table_poly.clone());
 
-                            program.write_from_buffer(&mut table_buf, unsafe {
-                                std::mem::transmute::<_, &[Fr]>(&table[..])
-                            })?;
+                        {
+                            for (src_buffer, data) in vec![
+                                (&mut product_coset_buf, &product_coset),
+                                (&mut permuted_input_coset_buf, &permuted_input_coset),
+                                (&mut permuted_table_coset_buf, &permuted_table_coset),
+                            ] {
+                                buffer[..data.values.len()].copy_from_slice(&data[..]);
+                                program.write_from_buffer(src_buffer, unsafe {
+                                    std::mem::transmute::<_, &[Fr]>(&buffer[..])
+                                })?;
 
-                            {
-                                for (src_buffer, data) in vec![
-                                    (&mut product_coset_buf, &product_coset),
-                                    (&mut permuted_input_coset_buf, &permuted_input_coset),
-                                    (&mut permuted_table_coset_buf, &permuted_table_coset),
-                                ] {
-                                    buffer[..data.values.len()].copy_from_slice(&data[..]);
-                                    program.write_from_buffer(src_buffer, unsafe {
-                                        std::mem::transmute::<_, &[Fr]>(&buffer[..])
-                                    })?;
+                                let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
 
-                                    let omegas_buffer =
-                                        program.create_buffer_from_slice(&omegas)?;
+                                let mut log_p = 0u32;
+                                // Each iteration performs a FFT round
+                                while log_p < log_n {
+                                    // 1=>radix2, 2=>radix4, 3=>radix8, ...
+                                    let deg = cmp::min(max_deg, log_n - log_p);
 
-                                    let mut log_p = 0u32;
-                                    // Each iteration performs a FFT round
-                                    while log_p < log_n {
-                                        // 1=>radix2, 2=>radix4, 3=>radix8, ...
-                                        let deg = cmp::min(max_deg, log_n - log_p);
+                                    let n = 1u32 << log_n;
+                                    let local_work_size =
+                                        1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
+                                    let global_work_size = n >> deg;
+                                    let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(src_buffer)
+                                        .arg(&dst_buffer)
+                                        .arg(&pq_buffer)
+                                        .arg(&omegas_buffer)
+                                        .arg(&LocalBuffer::<Fr>::new(1 << deg))
+                                        .arg(&n)
+                                        .arg(&log_p)
+                                        .arg(&deg)
+                                        .arg(&max_deg)
+                                        .run()?;
 
-                                        let n = 1u32 << log_n;
-                                        let local_work_size =
-                                            1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
-                                        let global_work_size = n >> deg;
-                                        let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
-                                        let kernel = program.create_kernel(
-                                            &kernel_name,
-                                            global_work_size as usize,
-                                            local_work_size as usize,
-                                        )?;
-                                        kernel
-                                            .arg(src_buffer)
-                                            .arg(&dst_buffer)
-                                            .arg(&pq_buffer)
-                                            .arg(&omegas_buffer)
-                                            .arg(&LocalBuffer::<Fr>::new(1 << deg))
-                                            .arg(&n)
-                                            .arg(&log_p)
-                                            .arg(&deg)
-                                            .arg(&max_deg)
-                                            .run()?;
-
-                                        log_p += deg;
-                                        std::mem::swap(src_buffer, &mut dst_buffer);
-                                    }
+                                    log_p += deg;
+                                    std::mem::swap(src_buffer, &mut dst_buffer);
                                 }
                             }
-
-                            let local_work_size = 32;
-                            let global_work_size = size / local_work_size;
-                            let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
-                            let kernel = program.create_kernel(
-                                &kernel_name,
-                                global_work_size as usize,
-                                local_work_size as usize,
-                            )?;
-                            kernel
-                                .arg(&values_buf)
-                                .arg(&table_buf)
-                                .arg(&permuted_input_coset_buf)
-                                .arg(&permuted_table_coset_buf)
-                                .arg(&product_coset_buf)
-                                .arg(&l0_buf)
-                                .arg(&l_last_buf)
-                                .arg(&l_active_row_buf)
-                                .arg(&y_beta_gamma_buf)
-                                .arg(&(rot_scale as u32))
-                                .arg(&(size as u32))
-                                .run()?;
                         }
 
-                        program.read_into_buffer(&values_buf, input)?;
-
-                        Ok(())
+                        let local_work_size = 32;
+                        let global_work_size = size / local_work_size;
+                        let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                        let kernel = program.create_kernel(
+                            &kernel_name,
+                            global_work_size as usize,
+                            local_work_size as usize,
+                        )?;
+                        kernel
+                            .arg(&values_buf)
+                            .arg(&table_buf)
+                            .arg(&permuted_input_coset_buf)
+                            .arg(&permuted_table_coset_buf)
+                            .arg(&product_coset_buf)
+                            .arg(&l0_buf)
+                            .arg(&l_last_buf)
+                            .arg(&l_active_row_buf)
+                            .arg(&y_beta_gamma_buf)
+                            .arg(&(rot_scale as u32))
+                            .arg(&(size as u32))
+                            .run()?;
                     }
-                );
-                let devices = Device::all();
-                let programs = devices
-                    .iter()
-                    .map(|device| ec_gpu_gen::program!(device))
-                    .collect::<Result<_, _>>()
-                    .expect("Cannot create programs!");
-                let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
 
-                kern.kernels[0]
-                    .program
-                    .run(closures, unsafe {
-                        std::mem::transmute::<_, &mut [Fr]>(&mut values.values[..])
-                    })
-                    .unwrap();
-            }
-            end_timer!(timer);
+                    program.read_into_buffer(&values_buf, input)?;
+
+                    Ok(())
+                }
+            );
+            let devices = Device::all();
+            let programs = devices
+                .iter()
+                .map(|device| ec_gpu_gen::program!(device))
+                .collect::<Result<_, _>>()
+                .expect("Cannot create programs!");
+            let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+            kern.kernels[0]
+                .program
+                .run(closures, unsafe {
+                    std::mem::transmute::<_, &mut [Fr]>(&mut values.values[..])
+                })
+                .unwrap();
         }
+        end_timer!(timer);
+
         values
     }
 }

@@ -57,9 +57,9 @@ where
             };
 
             let _guard = lock.lock().unwrap();
-            let timer = start_timer!(|| "start commit");
+            //let timer = start_timer!(|| "start commit");
             *w = params.commit(&witness_poly).to_affine();
-            end_timer!(timer);
+            //end_timer!(timer);
         });
 
     for w in ws {

@@ -139,7 +139,6 @@ impl<F: FieldExt> LookupProveExpression<F> {
         theta: F,
         gamma: F,
     ) -> EcResult<(Buffer<F>, i32)> {
-        let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 32;
         let global_work_size = size / local_work_size;
@@ -152,6 +151,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let theta = program.create_buffer_from_slice(&vec![theta])?;
                 let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
+                //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(
                     &kernel_name,
                     global_work_size as usize,
@@ -166,6 +166,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     .arg(&size)
                     .arg(&theta)
                     .run()?;
+                //end_timer!(timer);
                 Ok((res, 0))
             }
             LookupProveExpression::LcBeta(l, r) => {
@@ -174,12 +175,14 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let beta = program.create_buffer_from_slice(&vec![beta])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
+                //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(
                     &kernel_name,
                     global_work_size as usize,
                     local_work_size as usize,
                 )?;
                 kernel
+                    .arg(&res)
                     .arg(&l.0)
                     .arg(&r.0)
                     .arg(&l.1)
@@ -187,19 +190,23 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     .arg(&size)
                     .arg(&beta)
                     .run()?;
+                //end_timer!(timer);
                 Ok((res, 0))
             }
             LookupProveExpression::AddGamma(l) => {
+                let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
                 let gamma = program.create_buffer_from_slice(&vec![gamma])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
+                //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(
                     &kernel_name,
                     global_work_size as usize,
                     local_work_size as usize,
                 )?;
-                kernel.arg(&l.0).arg(&l.1).arg(&size).arg(&gamma).run()?;
-                Ok((l.0, 0))
+                kernel.arg(&res).arg(&l.0).arg(&l.1).arg(&size).arg(&gamma).run()?;
+                //end_timer!(timer);
+                Ok((res, 0))
             }
         }
     }
@@ -209,24 +216,23 @@ impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         pk: &ProvingKey<C>,
-        advice: Vec<&Vec<Polynomial<F, Coeff>>>,
-        instance: Vec<&Vec<Polynomial<F, Coeff>>>,
+        advice: &Vec<Polynomial<F, Coeff>>,
+        instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
         use pairing::bn256::Fr;
 
         let mut values = pk.vk.domain.empty_extended();
 
-        let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
-                                                                      input: &mut [F]|
-         -> ec_gpu_gen::EcResult<
-            (),
-        > {
-            let mut ys = vec![F::one(), y];
-            let values_buf = self._eval_gpu(pk, program, advice[0], instance[0], &mut ys)?;
-            program.read_into_buffer(&values_buf.0, input)?;
-            Ok(())
-        });
+        let closures =
+            ec_gpu_gen::rust_gpu_tools::program_closures!(
+                |program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
+                    let mut ys = vec![F::one(), y];
+                    let values_buf = self._eval_gpu(pk, program, advice, instance, &mut ys)?;
+                    program.read_into_buffer(&values_buf.0, input)?;
+                    Ok(())
+                }
+            );
 
         let devices = Device::all();
         let programs = devices
