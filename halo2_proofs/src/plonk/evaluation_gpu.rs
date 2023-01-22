@@ -71,6 +71,140 @@ pub enum ProveExpression<F> {
     Y(BTreeMap<u32, F>),
 }
 
+#[derive(Clone, Debug)]
+pub enum LookupProveExpression<F> {
+    Expression(ProveExpression<F>),
+    LcTheta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
+    LcBeta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
+    AddGamma(Box<LookupProveExpression<F>>),
+}
+
+impl<F: FieldExt> LookupProveExpression<F> {
+    pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
+        &self,
+        pk: &ProvingKey<C>,
+        advice: Vec<&Vec<Polynomial<F, Coeff>>>,
+        instance: Vec<&Vec<Polynomial<F, Coeff>>>,
+        y: F,
+        beta: F,
+        theta: F,
+        gamma: F,
+    ) -> Polynomial<F, ExtendedLagrangeCoeff> {
+        use pairing::bn256::Fr;
+
+        let mut values = pk.vk.domain.empty_extended();
+
+        let closures =
+            ec_gpu_gen::rust_gpu_tools::program_closures!(
+                |program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
+                    let mut ys = vec![F::one(), y];
+                    let values_buf = self._eval_gpu(
+                        pk,
+                        program,
+                        advice[0],
+                        instance[0],
+                        &mut ys,
+                        beta,
+                        theta,
+                        gamma,
+                    )?;
+                    program.read_into_buffer(&values_buf.0, input)?;
+                    Ok(())
+                }
+            );
+
+        let devices = Device::all();
+        let programs = devices
+            .iter()
+            .map(|device| ec_gpu_gen::program!(device))
+            .collect::<Result<_, _>>()
+            .expect("Cannot create programs!");
+        let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+        kern.kernels[0]
+            .program
+            .run(closures, &mut values.values[..])
+            .unwrap();
+        values
+    }
+
+    pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
+        &self,
+        pk: &ProvingKey<C>,
+        program: &Program,
+        advice: &Vec<Polynomial<F, Coeff>>,
+        instance: &Vec<Polynomial<F, Coeff>>,
+        y: &mut Vec<F>,
+        beta: F,
+        theta: F,
+        gamma: F,
+    ) -> EcResult<(Buffer<F>, i32)> {
+        let origin_size = 1u32 << pk.vk.domain.k();
+        let size = 1u32 << pk.vk.domain.extended_k();
+        let local_work_size = 32;
+        let global_work_size = size / local_work_size;
+
+        match self {
+            LookupProveExpression::Expression(e) => e._eval_gpu(pk, program, advice, instance, y),
+            LookupProveExpression::LcTheta(l, r) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                let theta = program.create_buffer_from_slice(&vec![theta])?;
+                let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&res)
+                    .arg(&l.0)
+                    .arg(&r.0)
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .arg(&theta)
+                    .run()?;
+                Ok((res, 0))
+            }
+            LookupProveExpression::LcBeta(l, r) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                let beta = program.create_buffer_from_slice(&vec![beta])?;
+                let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&l.0)
+                    .arg(&r.0)
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .arg(&beta)
+                    .run()?;
+                Ok((res, 0))
+            }
+            LookupProveExpression::AddGamma(l) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let gamma = program.create_buffer_from_slice(&vec![gamma])?;
+                let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel.arg(&l.0).arg(&l.1).arg(&size).arg(&gamma).run()?;
+                Ok((l.0, 0))
+            }
+        }
+    }
+}
+
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
