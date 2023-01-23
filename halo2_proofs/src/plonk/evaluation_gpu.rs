@@ -79,6 +79,7 @@ pub enum ProveExpression<F> {
     /// This is the product of two polynomials
     Product(Box<ProveExpression<F>>, Box<ProveExpression<F>>),
     Y(BTreeMap<u32, F>),
+    Scaled(Box<ProveExpression<F>>, BTreeMap<u32, F>),
 }
 
 #[derive(Clone, Debug)]
@@ -407,6 +408,36 @@ impl<F: FieldExt> ProveExpression<F> {
                 //end_timer!(timer);
                 Ok((values, rotation.0 * rot_scale))
             }
+            ProveExpression::Scaled(l, ys) => {
+                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                let max_y_order = ys.keys().max().unwrap();
+                for _ in (y.len() as u32)..max_y_order + 1 {
+                    y.push(y[1] * y.last().unwrap());
+                }
+
+                //let timer = start_timer!(|| "gpu eval c");
+                let c = ys.iter().fold(F::zero(), |acc, (y_order, f)| {
+                    acc + y[*y_order as usize] * f
+                });
+                let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                let c = program.create_buffer_from_slice(&vec![c])?;
+
+                let kernel_name = format!("{}_eval_scale", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&values)
+                    .arg(&l.0)
+                    .arg(&l.1)
+                    .arg(&size)
+                    .arg(&c)
+                    .run()?;
+
+                Ok((values, 0))
+            }
         }
     }
 
@@ -689,6 +720,11 @@ impl<F: FieldExt> ProveExpression<F> {
                 (l.0 + r.0 + 1, l.1 + r.1, l.2 + r.2, l.3)
             }
             ProveExpression::Y(_) => (0, 0, 1, HashMap::new()),
+            ProveExpression::Scaled(l, _) => {
+                let mut l = l.get_complexity();
+
+                (l.0 + 1, l.1, l.2, l.3)
+            }
         }
     }
 
@@ -706,6 +742,10 @@ impl<F: FieldExt> ProveExpression<F> {
                 u32::max(l, r + 1)
             }
             ProveExpression::Y(_) => 0,
+            ProveExpression::Scaled(l, _) => {
+                let l = l.get_r_deep();
+                u32::max(l, 1)
+            }
         }
     }
 
@@ -781,6 +821,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 res
             }
             ProveExpression::Y(ys) => BTreeMap::from_iter(vec![(vec![], ys)].into_iter()),
+            ProveExpression::Scaled(_, _) => unreachable!(),
         }
     }
 }
