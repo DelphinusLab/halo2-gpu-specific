@@ -193,7 +193,7 @@ impl Assembly {
         }
 
         let (polys, cosets) = rayon::ThreadPoolBuilder::new()
-            .num_threads(4)
+            .num_threads(2)
             .build()
             .unwrap()
             .install(|| {
