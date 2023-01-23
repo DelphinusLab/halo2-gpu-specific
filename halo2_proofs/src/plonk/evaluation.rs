@@ -258,6 +258,7 @@ pub struct Evaluator<C: CurveAffine> {
     /// GPU
     pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
     pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
+    pub unit_ref_count: Vec<(usize, u32)>,
 }
 
 /// CaluclationInfo
@@ -288,7 +289,13 @@ impl<C: CurveAffine> Evaluator<C> {
             }
         }
         e = ProveExpression::reconstruct(e.flatten());
+        let complexity = e.get_complexity();
+        ev.unit_ref_count = complexity.3.into_iter().collect();
+        ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
+        ev.unit_ref_count.reverse();
+
         println!("complexity is {:?}", e.get_complexity());
+        println!("ref cnt is {:?}", ev.unit_ref_count);
         println!("r deep is {}", e.get_r_deep());
 
         // Lookups

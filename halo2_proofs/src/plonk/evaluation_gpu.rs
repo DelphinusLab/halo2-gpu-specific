@@ -25,7 +25,7 @@ use group::{
     Curve,
 };
 use std::any::TypeId;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
@@ -61,6 +61,16 @@ pub enum ProveExpressionUnit {
     },
 }
 
+impl ProveExpressionUnit {
+    fn get_group(&self) -> usize {
+        match self {
+            ProveExpressionUnit::Fixed { column_index, .. } => column_index << 2,
+            ProveExpressionUnit::Advice { column_index, .. } => (column_index << 2) + 1,
+            ProveExpressionUnit::Instance { column_index, .. } => (column_index << 2) + 2,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum ProveExpression<F> {
     Unit(ProveExpressionUnit),
@@ -80,54 +90,6 @@ pub enum LookupProveExpression<F> {
 }
 
 impl<F: FieldExt> LookupProveExpression<F> {
-    pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
-        &self,
-        pk: &ProvingKey<C>,
-        advice: Vec<&Vec<Polynomial<F, Coeff>>>,
-        instance: Vec<&Vec<Polynomial<F, Coeff>>>,
-        y: F,
-        beta: F,
-        theta: F,
-        gamma: F,
-    ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        use pairing::bn256::Fr;
-
-        let mut values = pk.vk.domain.empty_extended();
-
-        let closures =
-            ec_gpu_gen::rust_gpu_tools::program_closures!(
-                |program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
-                    let mut ys = vec![F::one(), y];
-                    let values_buf = self._eval_gpu(
-                        pk,
-                        program,
-                        advice[0],
-                        instance[0],
-                        &mut ys,
-                        beta,
-                        theta,
-                        gamma,
-                    )?;
-                    program.read_into_buffer(&values_buf.0, input)?;
-                    Ok(())
-                }
-            );
-
-        let devices = Device::all();
-        let programs = devices
-            .iter()
-            .map(|device| ec_gpu_gen::program!(device))
-            .collect::<Result<_, _>>()
-            .expect("Cannot create programs!");
-        let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
-
-        kern.kernels[0]
-            .program
-            .run(closures, &mut values.values[..])
-            .unwrap();
-        values
-    }
-
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         pk: &ProvingKey<C>,
@@ -144,7 +106,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
         let global_work_size = size / local_work_size;
 
         match self {
-            LookupProveExpression::Expression(e) => e._eval_gpu(pk, program, advice, instance, y),
+            LookupProveExpression::Expression(e) => {
+                e._eval_gpu(pk, program, advice, instance, y, &BTreeMap::new())
+            }
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
                 let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
@@ -204,7 +168,13 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     global_work_size as usize,
                     local_work_size as usize,
                 )?;
-                kernel.arg(&res).arg(&l.0).arg(&l.1).arg(&size).arg(&gamma).run()?;
+                kernel
+                    .arg(&res)
+                    .arg(&l.0)
+                    .arg(&l.1)
+                    .arg(&size)
+                    .arg(&gamma)
+                    .run()?;
                 //end_timer!(timer);
                 Ok((res, 0))
             }
@@ -220,27 +190,74 @@ impl<F: FieldExt> ProveExpression<F> {
         instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        use pairing::bn256::Fr;
+        let origin_size = 1u32 << pk.vk.domain.k();
+        let size = 1u32 << pk.vk.domain.extended_k();
+        let local_work_size = 32;
+        let global_work_size = size / local_work_size;
+
+        let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
+                                                                      input: &mut [F]|
+         -> ec_gpu_gen::EcResult<
+            (),
+        > {
+            let mut ys = vec![F::one(), y];
+
+            let mut unit_cache = BTreeMap::<usize, Buffer<F>>::new();
+            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("4".to_owned());
+            let cache_size = u32::from_str_radix(&cache_size, 10).unwrap_or(4);
+            for i in 0..cache_size as usize {
+                let group = pk.ev.unit_ref_count[i].0;
+                let t = group & 0x3;
+                let column_index = group >> 2;
+                let origin_values = if t == 0 {
+                    pk.fixed_polys[column_index].clone()
+                } else if t == 1 {
+                    advice[column_index].clone()
+                } else if t == 2 {
+                    instance[column_index].clone()
+                } else {
+                    unreachable!()
+                };
+
+                //let timer = start_timer!(|| "gpu eval unit");
+                let values = unsafe { program.create_buffer::<F>(size as usize)? };
+
+                //let timer = start_timer!(|| "coeff_to_extended_without_fft");
+                let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
+                //end_timer!(timer);
+
+                let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+
+                let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&origin_values)
+                    .arg(&values)
+                    .arg(&origin_size)
+                    .run()?;
+                let values = Self::do_fft(pk, program, values)?;
+                unit_cache.insert(group, values);
+            }
+
+            let values_buf = self._eval_gpu(pk, program, advice, instance, &mut ys, &unit_cache)?;
+            program.read_into_buffer(&values_buf.0, input)?;
+
+            Ok(())
+        });
 
         let mut values = pk.vk.domain.empty_extended();
-
-        let closures =
-            ec_gpu_gen::rust_gpu_tools::program_closures!(
-                |program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
-                    let mut ys = vec![F::one(), y];
-                    let values_buf = self._eval_gpu(pk, program, advice, instance, &mut ys)?;
-                    program.read_into_buffer(&values_buf.0, input)?;
-                    Ok(())
-                }
-            );
-
         let devices = Device::all();
         let programs = devices
             .iter()
             .map(|device| ec_gpu_gen::program!(device))
             .collect::<Result<_, _>>()
             .expect("Cannot create programs!");
-        let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+        let kern =
+            FftKernel::<pairing::bn256::Fr>::create(programs).expect("Cannot initialize kernel!");
 
         kern.kernels[0]
             .program
@@ -256,6 +273,7 @@ impl<F: FieldExt> ProveExpression<F> {
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
+        unit_cache: &BTreeMap<usize, Buffer<F>>,
     ) -> EcResult<(Buffer<F>, i32)> {
         let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
@@ -265,8 +283,9 @@ impl<F: FieldExt> ProveExpression<F> {
 
         match self {
             ProveExpression::Sum(l, r) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y)?;
+                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                //let timer = start_timer!(|| "gpu eval sum");
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
                 let kernel = program.create_kernel(
@@ -282,15 +301,16 @@ impl<F: FieldExt> ProveExpression<F> {
                     .arg(&r.1)
                     .arg(&size)
                     .run()?;
+                //end_timer!(timer);
                 Ok((res, 0))
             }
             ProveExpression::Product(l, r) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y)?;
+                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+
+                //let timer = start_timer!(|| "gpu eval mul");
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let kernel_name = format!("{}_eval_mul", "Bn256_Fr");
-
-                //let timer = start_timer!(|| "eval_mul");
                 let kernel = program.create_kernel(
                     &kernel_name,
                     global_work_size as usize,
@@ -312,6 +332,8 @@ impl<F: FieldExt> ProveExpression<F> {
                 for _ in (y.len() as u32)..max_y_order + 1 {
                     y.push(y[1] * y.last().unwrap());
                 }
+
+                //let timer = start_timer!(|| "gpu eval c");
                 let c = ys.iter().fold(F::zero(), |acc, (y_order, f)| {
                     acc + y[*y_order as usize] * f
                 });
@@ -324,40 +346,65 @@ impl<F: FieldExt> ProveExpression<F> {
                     local_work_size as usize,
                 )?;
                 kernel.arg(&values).arg(&c).run()?;
+                //end_timer!(timer);
                 Ok((values, 0))
             }
             ProveExpression::Unit(u) => {
-                let values = unsafe { program.create_buffer::<F>(size as usize)? };
-                let (origin_values, rotation) = match u {
-                    ProveExpressionUnit::Fixed {
-                        column_index,
-                        rotation,
-                    } => (pk.fixed_polys[*column_index].clone(), rotation),
-                    ProveExpressionUnit::Advice {
-                        column_index,
-                        rotation,
-                    } => (advice[*column_index].clone(), rotation),
-                    ProveExpressionUnit::Instance {
-                        column_index,
-                        rotation,
-                    } => (instance[*column_index].clone(), rotation),
+                let (values, rotation) = if let Some(cached_values) = unit_cache.get(&u.get_group())
+                {
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel.arg(cached_values).arg(&values).arg(&size).run()?;
+                    match u {
+                        ProveExpressionUnit::Fixed { rotation, .. }
+                        | ProveExpressionUnit::Advice { rotation, .. }
+                        | ProveExpressionUnit::Instance { rotation, .. } => (values, *rotation),
+                    }
+                } else {
+                    let (origin_values, rotation) = match u {
+                        ProveExpressionUnit::Fixed {
+                            column_index,
+                            rotation,
+                        } => (pk.fixed_polys[*column_index].clone(), rotation),
+                        ProveExpressionUnit::Advice {
+                            column_index,
+                            rotation,
+                        } => (advice[*column_index].clone(), rotation),
+                        ProveExpressionUnit::Instance {
+                            column_index,
+                            rotation,
+                        } => (instance[*column_index].clone(), rotation),
+                    };
+
+                    //let timer = start_timer!(|| "gpu eval unit");
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+
+                    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
+                    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
+                    //end_timer!(timer);
+
+                    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&origin_values)
+                        .arg(&values)
+                        .arg(&origin_size)
+                        .run()?;
+                    (Self::do_fft(pk, program, values)?, *rotation)
                 };
-
-                let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
-                let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-
-                let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                let kernel = program.create_kernel(
-                    &kernel_name,
-                    global_work_size as usize,
-                    local_work_size as usize,
-                )?;
-                kernel
-                    .arg(&origin_values)
-                    .arg(&values)
-                    .arg(&origin_size)
-                    .run()?;
-                Ok((Self::do_fft(pk, program, values)?, rotation.0 * rot_scale))
+                //end_timer!(timer);
+                Ok((values, rotation.0 * rot_scale))
             }
         }
     }
@@ -504,21 +551,24 @@ impl<F: FieldExt> ProveExpression<F> {
         )
     }
 
+    // max r deep: 0
     fn ___reconstruct(coeff: BTreeMap<u32, F>) -> Self {
         ProveExpression::Y(coeff)
     }
 
+    // max r deep: 1
     fn ____reconstruct(u: ProveExpressionUnit, c: u32) -> Self {
         if c == 1 {
             Self::Unit(u)
         } else {
             Self::Product(
-                Box::new(Self::Unit(u.clone())),
-                Box::new(Self::____reconstruct(u, c - 1)),
+                Box::new(Self::____reconstruct(u.clone(), c - 1)),
+                Box::new(Self::Unit(u)),
             )
         }
     }
 
+    // max r deep: 2
     fn __reconstruct(mut us: BTreeMap<ProveExpressionUnit, u32>, coeff: BTreeMap<u32, F>) -> Self {
         if us.len() == 0 {
             Self::___reconstruct(coeff)
@@ -531,24 +581,14 @@ impl<F: FieldExt> ProveExpression<F> {
         }
     }
 
-    fn _reconstruct_pure(mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>) -> Self {
+    fn _reconstruct(
+        mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
+        r_deep_limit: u32,
+    ) -> Self {
         if tree.len() == 1 {
             let u = tree.pop().unwrap();
             return Self::__reconstruct(u.0, u.1);
         }
-
-        let e = tree.pop().unwrap();
-        Self::Sum(Box::new(Self::_reconstruct(tree)), Box::new(Self::__reconstruct(e.0, e.1)))
-    }
-
-    fn _reconstruct(mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>) -> Self {
-        if tree.len() == 1 {
-            let u = tree.pop().unwrap();
-            return Self::__reconstruct(u.0, u.1);
-        }
-
-        // let e = tree.pop().unwrap();
-        // Self::Sum(Box::new(Self::_reconstruct(tree)), Box::new(Self::__reconstruct(e.0, e.1)))
 
         // find max
         let mut map = BTreeMap::new();
@@ -592,14 +632,23 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
 
-        let l = Self::_reconstruct(l);
-        let l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
-        if r.len() == 0 {
-            l
+        let mut l = Self::_reconstruct(l, r_deep_limit);
+        l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
+
+        if r_deep_limit <= 2 {
+            for (k, ys) in r {
+                l = Self::Sum(Box::new(l), Box::new(Self::__reconstruct(k, ys)));
+            }
         } else {
-            let r = Self::_reconstruct_pure(r);
-            Self::Sum(Box::new(l), Box::new(r))
+            if r.len() > 0 {
+                l = Self::Sum(
+                    Box::new(l),
+                    Box::new(Self::_reconstruct(r, r_deep_limit - 1)),
+                );
+            }
         }
+
+        l
     }
 
     pub(crate) fn reconstruct(tree: BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>>) -> Self {
@@ -618,37 +667,42 @@ impl<F: FieldExt> ProveExpression<F> {
             })
             .collect();
 
-        Self::_reconstruct(tree)
+        let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("4".to_owned());
+        let r_deep = u32::from_str_radix(&r_deep, 10).unwrap_or(4);
+        Self::_reconstruct(tree, r_deep)
     }
 
-    pub(crate) fn get_complexity(&self) -> (u32, u32) {
+    pub(crate) fn get_complexity(&self) -> (u32, u32, u32, HashMap<usize, u32>) {
         match self {
-            ProveExpression::Unit(_) => (0, 1),
-            ProveExpression::Sum(l, r) => {
-                let l = l.get_complexity();
+            ProveExpression::Unit(u) => (0, 1, 0, HashMap::from_iter(vec![(u.get_group(), 1)])),
+            ProveExpression::Product(l, r) | ProveExpression::Sum(l, r) => {
+                let mut l = l.get_complexity();
                 let r = r.get_complexity();
-                (l.0 + r.0 + 1, l.0 + r.0)
+                for (k, v) in r.3 {
+                    if let Some(lv) = l.3.get_mut(&k) {
+                        *lv += v;
+                    } else {
+                        l.3.insert(k, v);
+                    }
+                }
+                (l.0 + r.0 + 1, l.1 + r.1, l.2 + r.2, l.3)
             }
-            ProveExpression::Product(l, r) => {
-                let l = l.get_complexity();
-                let r = r.get_complexity();
-                (l.0 + r.0 + 1, l.0 + r.0)
-            }
-            ProveExpression::Y(_) => (1, 0),
+            ProveExpression::Y(_) => (0, 0, 1, HashMap::new()),
         }
     }
-
 
     pub(crate) fn get_r_deep(&self) -> u32 {
         match self {
             ProveExpression::Unit(_) => 0,
             ProveExpression::Sum(l, r) => {
+                let l = l.get_r_deep();
                 let r = r.get_r_deep();
-                r + 1
+                u32::max(l, r + 1)
             }
             ProveExpression::Product(l, r) => {
+                let l = l.get_r_deep();
                 let r = r.get_r_deep();
-                r + 1
+                u32::max(l, r + 1)
             }
             ProveExpression::Y(_) => 0,
         }
