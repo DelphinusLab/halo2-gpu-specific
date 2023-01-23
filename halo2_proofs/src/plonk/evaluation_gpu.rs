@@ -79,7 +79,7 @@ pub enum ProveExpression<F> {
     /// This is the product of two polynomials
     Product(Box<ProveExpression<F>>, Box<ProveExpression<F>>),
     Y(BTreeMap<u32, F>),
-    Scaled(Box<ProveExpression<F>>, BTreeMap<u32, F>),
+    Scale(Box<ProveExpression<F>>, BTreeMap<u32, F>),
 }
 
 #[derive(Clone, Debug)]
@@ -408,7 +408,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 //end_timer!(timer);
                 Ok((values, rotation.0 * rot_scale))
             }
-            ProveExpression::Scaled(l, ys) => {
+            ProveExpression::Scale(l, ys) => {
                 let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
                 let max_y_order = ys.keys().max().unwrap();
                 for _ in (y.len() as u32)..max_y_order + 1 {
@@ -584,42 +584,60 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 
     // max r deep: 0
-    fn ___reconstruct(coeff: BTreeMap<u32, F>) -> Self {
+    fn reconstruct_coeff(coeff: BTreeMap<u32, F>) -> Self {
         ProveExpression::Y(coeff)
     }
 
     // max r deep: 1
-    fn ____reconstruct(u: ProveExpressionUnit, c: u32) -> Self {
+    fn reconstruct_unit(u: ProveExpressionUnit, c: u32) -> Self {
+        if c >= 3 {
+            println!("find large c {}", c);
+        }
+
         if c == 1 {
             Self::Unit(u)
         } else {
             Self::Product(
-                Box::new(Self::____reconstruct(u.clone(), c - 1)),
+                Box::new(Self::reconstruct_unit(u.clone(), c - 1)),
                 Box::new(Self::Unit(u)),
             )
         }
     }
 
-    // max r deep: 2
-    fn __reconstruct(mut us: BTreeMap<ProveExpressionUnit, u32>, coeff: BTreeMap<u32, F>) -> Self {
+    // max r deep: 1
+    fn reconstruct_units(mut us: BTreeMap<ProveExpressionUnit, u32>) -> Self {
+        let u = us.pop_first().unwrap();
+
+        let mut l = Self::reconstruct_unit(u.0, u.1);
+
+        for (u, c) in us {
+            for _ in 0..c {
+                l = Self::Product(Box::new(l), Box::new(Self::Unit(u.clone())));
+            }
+        }
+
+        l
+    }
+
+    // max r deep: 1
+    fn reconstruct_units_coeff(mut us: BTreeMap<ProveExpressionUnit, u32>, coeff: BTreeMap<u32, F>) -> Self {
         if us.len() == 0 {
-            Self::___reconstruct(coeff)
+            Self::reconstruct_coeff(coeff)
         } else {
-            let p = us.pop_first().unwrap();
-            Self::Product(
-                Box::new(Self::__reconstruct(us, coeff)),
-                Box::new(Self::____reconstruct(p.0, p.1)),
+            Self::Scale(
+                Box::new(Self::reconstruct_units(us)),
+                coeff
             )
         }
     }
 
-    fn _reconstruct(
+    fn reconstruct_tree(
         mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
         r_deep_limit: u32,
     ) -> Self {
         if tree.len() == 1 {
             let u = tree.pop().unwrap();
-            return Self::__reconstruct(u.0, u.1);
+            return Self::reconstruct_units_coeff(u.0, u.1);
         }
 
         // find max
@@ -664,18 +682,18 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
 
-        let mut l = Self::_reconstruct(l, r_deep_limit);
+        let mut l = Self::reconstruct_tree(l, r_deep_limit);
         l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
 
         if r_deep_limit <= 3 {
             for (k, ys) in r {
-                l = Self::Sum(Box::new(l), Box::new(Self::__reconstruct(k, ys)));
+                l = Self::Sum(Box::new(l), Box::new(Self::reconstruct_units_coeff(k, ys)));
             }
         } else {
             if r.len() > 0 {
                 l = Self::Sum(
                     Box::new(l),
-                    Box::new(Self::_reconstruct(r, r_deep_limit - 1)),
+                    Box::new(Self::reconstruct_tree(r, r_deep_limit - 1)),
                 );
             }
         }
@@ -701,7 +719,7 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("5".to_owned());
         let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
-        Self::_reconstruct(tree, r_deep)
+        Self::reconstruct_tree(tree, r_deep)
     }
 
     pub(crate) fn get_complexity(&self) -> (u32, u32, u32, HashMap<usize, u32>) {
@@ -720,7 +738,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 (l.0 + r.0 + 1, l.1 + r.1, l.2 + r.2, l.3)
             }
             ProveExpression::Y(_) => (0, 0, 1, HashMap::new()),
-            ProveExpression::Scaled(l, _) => {
+            ProveExpression::Scale(l, _) => {
                 let mut l = l.get_complexity();
 
                 (l.0 + 1, l.1, l.2, l.3)
@@ -742,7 +760,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 u32::max(l, r + 1)
             }
             ProveExpression::Y(_) => 0,
-            ProveExpression::Scaled(l, _) => {
+            ProveExpression::Scale(l, _) => {
                 let l = l.get_r_deep();
                 u32::max(l, 1)
             }
@@ -821,7 +839,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 res
             }
             ProveExpression::Y(ys) => BTreeMap::from_iter(vec![(vec![], ys)].into_iter()),
-            ProveExpression::Scaled(_, _) => unreachable!(),
+            ProveExpression::Scale(_, _) => unreachable!(),
         }
     }
 }
