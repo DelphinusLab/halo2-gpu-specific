@@ -203,8 +203,9 @@ impl<F: FieldExt> ProveExpression<F> {
             let mut ys = vec![F::one(), y];
 
             let mut unit_cache = BTreeMap::<usize, Buffer<F>>::new();
-            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("4".to_owned());
-            let cache_size = u32::from_str_radix(&cache_size, 10).unwrap_or(4);
+            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
+            let cache_size =
+                u32::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
             for i in 0..cache_size as usize {
                 let group = pk.ev.unit_ref_count[i].0;
                 let t = group & 0x3;
@@ -635,7 +636,7 @@ impl<F: FieldExt> ProveExpression<F> {
         let mut l = Self::_reconstruct(l, r_deep_limit);
         l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
 
-        if r_deep_limit <= 2 {
+        if r_deep_limit <= 3 {
             for (k, ys) in r {
                 l = Self::Sum(Box::new(l), Box::new(Self::__reconstruct(k, ys)));
             }
@@ -667,8 +668,8 @@ impl<F: FieldExt> ProveExpression<F> {
             })
             .collect();
 
-        let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("4".to_owned());
-        let r_deep = u32::from_str_radix(&r_deep, 10).unwrap_or(4);
+        let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("5".to_owned());
+        let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
         Self::_reconstruct(tree, r_deep)
     }
 
