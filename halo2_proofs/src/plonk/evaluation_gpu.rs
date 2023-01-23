@@ -739,7 +739,7 @@ impl<F: FieldExt> ProveExpression<F> {
             }
             ProveExpression::Y(_) => (0, 0, 1, HashMap::new()),
             ProveExpression::Scale(l, _) => {
-                let mut l = l.get_complexity();
+                let l = l.get_complexity();
 
                 (l.0 + 1, l.1, l.2, l.3)
             }
