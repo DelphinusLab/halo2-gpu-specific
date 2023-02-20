@@ -54,6 +54,7 @@ pub enum ValueSource {
     Instance(usize, usize),
 }
 
+#[cfg(not(feature="cuda"))]
 impl ValueSource {
     /// Get the value for this source
     pub fn get<F: Field, B: Basis>(
@@ -102,6 +103,7 @@ pub enum Calculation {
     Store(ValueSource),
 }
 
+#[cfg(not(feature="cuda"))]
 impl Calculation {
     /// Get the resulting value of this calculation
     pub fn evaluate<F: Field, B: Basis>(
@@ -1112,6 +1114,7 @@ unsafe impl<T> Sync for ThreadBox<T> {}
 
 /// Wraps a mutable slice so it can be passed into a thread without
 /// hard to fix borrow checks caused by difficult data access patterns.
+#[cfg(not(feature="cuda"))]
 impl<T> ThreadBox<T> {
     fn wrap(data: &mut [T]) -> Self {
         Self(data.as_mut_ptr(), data.len())

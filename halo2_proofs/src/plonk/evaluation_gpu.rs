@@ -620,7 +620,7 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 
     // max r deep: 1
-    fn reconstruct_units_coeff(mut us: BTreeMap<ProveExpressionUnit, u32>, coeff: BTreeMap<u32, F>) -> Self {
+    fn reconstruct_units_coeff(us: BTreeMap<ProveExpressionUnit, u32>, coeff: BTreeMap<u32, F>) -> Self {
         if us.len() == 0 {
             Self::reconstruct_coeff(coeff)
         } else {
