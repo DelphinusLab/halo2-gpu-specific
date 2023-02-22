@@ -393,7 +393,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     #[cfg(feature = "cuda")]
     {
         permuted_input_expression.resize(1 << params.k, -C::Scalar::one());
-        gpu_sort::<C>(&mut permuted_input_expression, params.k);
+        gpu_sort(&mut permuted_input_expression, params.k);
         permuted_input_expression.truncate(usable_rows);
     }
 
@@ -406,7 +406,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     #[cfg(feature = "cuda")]
     {
         sorted_table_coeffs.resize(1 << params.k, -C::Scalar::one());
-        gpu_sort::<C>(&mut sorted_table_coeffs, params.k);
+        gpu_sort(&mut sorted_table_coeffs, params.k);
         sorted_table_coeffs.truncate(usable_rows);
     }
 

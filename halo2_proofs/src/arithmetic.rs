@@ -163,7 +163,7 @@ pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C
 }
 
 #[cfg(feature = "cuda")]
-pub fn gpu_sort<C: CurveAffine>(input: &mut Vec<C::Scalar>, log_n: u32) {
+pub fn gpu_sort<F: FieldExt>(input: &mut Vec<F>, log_n: u32) {
     use ec_gpu_gen::{
         fft::FftKernel,
         multiexp::SingleMultiexpKernel,
@@ -175,20 +175,9 @@ pub fn gpu_sort<C: CurveAffine>(input: &mut Vec<C::Scalar>, log_n: u32) {
     use pairing::bn256::Fr;
 
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
-        let mut buffer = unsafe { program.create_buffer::<Fr>(1 << log_n)? };
-        program.write_from_buffer(&mut buffer, &*input)?;
+        let mut buffer = program.create_buffer_from_slice(input)?;
 
         let local_work_size = 32;
-        let global_work_size = (1 << log_n) / local_work_size;
-
-        let kernel_name = format!("{}_batch_unmont", "Bn256_Fr");
-        let kernel = program.create_kernel(
-            &kernel_name,
-            global_work_size as usize,
-            local_work_size as usize,
-        )?;
-        kernel.arg(&buffer).run()?;
-
         let global_work_size = (1 << log_n - 1) / local_work_size;
         let kernel_name = format!("{}_sort", "Bn256_Fr");
         for i in 0..log_n {
@@ -202,7 +191,95 @@ pub fn gpu_sort<C: CurveAffine>(input: &mut Vec<C::Scalar>, log_n: u32) {
             }
         }
 
-        let global_work_size = (1 << log_n) / local_work_size;
+        program.read_into_buffer(&buffer, input)?;
+        Ok(())
+    });
+
+    let devices = Device::all();
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+    gpu_unmont(input);
+
+    kern.kernels[0]
+        .program
+        .run(closures, unsafe {
+            std::mem::transmute::<_, &mut [Fr]>(&mut input[..])
+        })
+        .unwrap();
+
+    gpu_mont(input);
+}
+
+#[cfg(feature = "cuda")]
+pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
+    use ec_gpu_gen::{
+        fft::FftKernel,
+        multiexp::SingleMultiexpKernel,
+        rust_gpu_tools::{program_closures, Device},
+        threadpool::Worker,
+        EcResult,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
+        let mut buffer = program.create_buffer_from_slice(input)?;
+
+        let local_work_size = 32;
+        let global_work_size = input.len() / local_work_size;
+
+        let kernel_name = format!("{}_batch_unmont", "Bn256_Fr");
+        let kernel = program.create_kernel(
+            &kernel_name,
+            global_work_size as usize,
+            local_work_size as usize,
+        )?;
+        kernel.arg(&buffer).run()?;
+
+        program.read_into_buffer(&buffer, input)?;
+        Ok(())
+    });
+
+    let devices = Device::all();
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+    kern.kernels[0]
+        .program
+        .run(closures, unsafe {
+            std::mem::transmute::<_, &mut [Fr]>(&mut input[..])
+        })
+        .unwrap();
+}
+
+
+#[cfg(feature = "cuda")]
+pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
+    use ec_gpu_gen::{
+        fft::FftKernel,
+        multiexp::SingleMultiexpKernel,
+        rust_gpu_tools::{program_closures, Device},
+        threadpool::Worker,
+        EcResult,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
+        let mut buffer = program.create_buffer_from_slice(input)?;
+
+        let local_work_size = 32;
+        let global_work_size = input.len() / local_work_size;
+
         let kernel_name = format!("{}_batch_mont", "Bn256_Fr");
         let kernel = program.create_kernel(
             &kernel_name,
