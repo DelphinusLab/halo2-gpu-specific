@@ -175,7 +175,7 @@ pub fn gpu_sort<F: FieldExt>(input: &mut Vec<F>, log_n: u32) {
     use pairing::bn256::Fr;
 
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
-        let mut buffer = program.create_buffer_from_slice(input)?;
+        let buffer = program.create_buffer_from_slice(input)?;
 
         let local_work_size = 32;
         let global_work_size = (1 << log_n - 1) / local_work_size;
@@ -228,7 +228,7 @@ pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
     use pairing::bn256::Fr;
 
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
-        let mut buffer = program.create_buffer_from_slice(input)?;
+        let buffer = program.create_buffer_from_slice(input)?;
 
         let local_work_size = 32;
         let global_work_size = input.len() / local_work_size;
@@ -275,7 +275,7 @@ pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
     use pairing::bn256::Fr;
 
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
-        let mut buffer = program.create_buffer_from_slice(input)?;
+        let buffer = program.create_buffer_from_slice(input)?;
 
         let local_work_size = 32;
         let global_work_size = input.len() / local_work_size;
