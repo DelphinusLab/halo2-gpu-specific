@@ -207,7 +207,7 @@ impl<F: FieldExt> ProveExpression<F> {
             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
             let cache_size =
                 u32::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
-            for i in 0..cache_size as usize {
+            for i in 0..usize::min(cache_size as usize, pk.ev.unit_ref_count.len()) {
                 let group = pk.ev.unit_ref_count[i].0;
                 let t = group & 0x3;
                 let column_index = group >> 2;

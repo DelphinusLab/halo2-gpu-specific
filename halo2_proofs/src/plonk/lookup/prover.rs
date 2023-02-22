@@ -3,7 +3,7 @@ use super::super::{
     ProvingKey,
 };
 use super::Argument;
-use crate::arithmetic::batch_invert;
+use crate::arithmetic::{batch_invert, gpu_sort};
 use crate::plonk::evaluation::evaluate;
 use crate::poly::Basis;
 use crate::{
@@ -19,6 +19,7 @@ use group::{
     Curve,
 };
 use rand_core::RngCore;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator, ParallelSliceMut, IntoParallelRefMutIterator, IndexedParallelIterator};
 use std::any::TypeId;
 use std::convert::TryInto;
 use std::num::ParseIntError;
@@ -28,7 +29,6 @@ use std::{
     iter,
     ops::{Mul, MulAssign},
 };
-use rayon::prelude::ParallelSliceMut;
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine> {
@@ -390,49 +390,65 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     permuted_input_expression.truncate(usable_rows);
 
     // Sort input lookup expression values
+    #[cfg(feature = "cuda")]
+    {
+        permuted_input_expression.resize(1 << params.k, -C::Scalar::one());
+        gpu_sort::<C>(&mut permuted_input_expression, params.k);
+        permuted_input_expression.truncate(usable_rows);
+    }
+
+    #[cfg(not(feature = "cuda"))]
     permuted_input_expression.par_sort_unstable();
 
-    // A BTreeMap of each unique element in the table expression and its count
-    let mut leftover_table_map: BTreeMap<C::Scalar, u32> = table_expression
-        .iter()
-        .take(usable_rows)
-        .fold(BTreeMap::new(), |mut acc, coeff| {
-            *acc.entry(*coeff).or_insert(0) += 1;
-            acc
-        });
-    let mut permuted_table_coeffs = vec![C::Scalar::zero(); usable_rows];
+    let mut sorted_table_coeffs = table_expression.to_vec();
+    sorted_table_coeffs.truncate(usable_rows);
 
-    let mut repeated_input_rows = permuted_input_expression
-        .iter()
-        .zip(permuted_table_coeffs.iter_mut())
+    #[cfg(feature = "cuda")]
+    {
+        sorted_table_coeffs.resize(1 << params.k, -C::Scalar::one());
+        gpu_sort::<C>(&mut sorted_table_coeffs, params.k);
+        sorted_table_coeffs.truncate(usable_rows);
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    sorted_table_coeffs.par_sort_unstable();
+
+    let mut permuted_table_coeffs = vec![None; usable_rows];
+
+    let unique_input_values = permuted_input_expression
+        .par_iter()
+        .zip(permuted_table_coeffs.par_iter_mut())
         .enumerate()
         .filter_map(|(row, (input_value, table_value))| {
             // If this is the first occurrence of `input_value` in the input expression
             if row == 0 || *input_value != permuted_input_expression[row - 1] {
-                *table_value = *input_value;
-                // Remove one instance of input_value from leftover_table_map
-                if let Some(count) = leftover_table_map.get_mut(input_value) {
-                    assert!(*count > 0);
-                    *count -= 1;
-                    None
-                } else {
-                    // Return error if input_value not found
-                    Some(Err(Error::ConstraintSystemFailure))
-                }
-            // If input value is repeated
+                *table_value = Some(*input_value);
+                Some(*input_value)
             } else {
-                Some(Ok(row))
+                None
             }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
-    // Populate permuted table at unfilled rows with leftover table elements
-    for (coeff, count) in leftover_table_map.iter() {
-        for _ in 0..*count {
-            permuted_table_coeffs[repeated_input_rows.pop().unwrap() as usize] = *coeff;
+    let mut i_unique_input_value = 0;
+    let mut i_sorted_table_coeffs = 0;
+    for v in permuted_table_coeffs.iter_mut() {
+        while i_unique_input_value < unique_input_values.len()
+            && unique_input_values[i_unique_input_value]
+                == sorted_table_coeffs[i_sorted_table_coeffs]
+        {
+            i_unique_input_value += 1;
+            i_sorted_table_coeffs += 1;
+        }
+        if v.is_none() {
+            *v = Some(sorted_table_coeffs[i_sorted_table_coeffs]);
+            i_sorted_table_coeffs += 1;
         }
     }
-    assert!(repeated_input_rows.is_empty());
+    let mut permuted_table_coeffs = permuted_table_coeffs
+        .par_iter()
+        .filter_map(|x| *x)
+        .collect::<Vec<_>>();
 
     permuted_input_expression
         .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
