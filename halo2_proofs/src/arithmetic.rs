@@ -137,7 +137,7 @@ pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C
     use group::Curve;
     use pairing::bn256::Fr;
 
-    let timer = start_timer!(|| "msm");
+    let timer = start_timer!(|| format!("msm {}", coeffs.len()));
 
     let devices = Device::all();
     let programs = devices
@@ -177,7 +177,7 @@ pub fn gpu_sort<F: FieldExt>(input: &mut Vec<F>, log_n: u32) {
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
         let buffer = program.create_buffer_from_slice(input)?;
 
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = (1 << log_n - 1) / local_work_size;
         let kernel_name = format!("{}_sort", "Bn256_Fr");
         for i in 0..log_n {
@@ -230,7 +230,7 @@ pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
         let buffer = program.create_buffer_from_slice(input)?;
 
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = input.len() / local_work_size;
 
         let kernel_name = format!("{}_batch_unmont", "Bn256_Fr");
@@ -261,7 +261,6 @@ pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
         .unwrap();
 }
 
-
 #[cfg(feature = "cuda")]
 pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
     use ec_gpu_gen::{
@@ -277,7 +276,7 @@ pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
     let closures = program_closures!(|program, input: &mut [Fr]| -> EcResult<()> {
         let buffer = program.create_buffer_from_slice(input)?;
 
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = input.len() / local_work_size;
 
         let kernel_name = format!("{}_batch_mont", "Bn256_Fr");
@@ -316,14 +315,28 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     use group::Curve;
     use pairing::bn256::Fr;
 
+    let mut _coeffs = if usize::is_power_of_two(coeffs.len()) {
+        coeffs.par_iter().map(|x| x.to_repr()).collect::<Vec<_>>()
+    } else {
+        let new_len = usize::next_power_of_two(coeffs.len());
+        (0..new_len)
+            .into_par_iter()
+            .map(|i| {
+                if i < coeffs.len() {
+                    coeffs[i].to_repr()
+                } else {
+                    coeffs[0].to_repr()
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
+    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+
     let device = Device::all()[0];
     let programs = ec_gpu_gen::program!(device).unwrap();
     let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
         .expect("Cannot initialize kernel!");
-
-    let _coeffs = coeffs.iter().map(|x| x.to_repr()).collect::<Vec<_>>();
-    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..]) };
-    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
     let a = [kern.multiexp(bases, _coeffs).unwrap()];
     let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };

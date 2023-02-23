@@ -103,7 +103,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         gamma: F,
     ) -> EcResult<(Buffer<F>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = size / local_work_size;
 
         match self {
@@ -193,7 +193,7 @@ impl<F: FieldExt> ProveExpression<F> {
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
         let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = size / local_work_size;
 
         let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
@@ -279,7 +279,7 @@ impl<F: FieldExt> ProveExpression<F> {
     ) -> EcResult<(Buffer<F>, i32)> {
         let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
-        let local_work_size = 32;
+        let local_work_size = 128;
         let global_work_size = size / local_work_size;
         let rot_scale = 1 << (pk.vk.domain.extended_k() - pk.vk.domain.k());
 

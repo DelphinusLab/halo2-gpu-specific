@@ -1056,7 +1056,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             }
                         }
 
-                        let local_work_size = 32;
+                        let local_work_size = 128;
                         let global_work_size = size / local_work_size;
                         let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
                         let kernel = program.create_kernel(
