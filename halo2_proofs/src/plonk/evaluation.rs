@@ -292,7 +292,7 @@ impl<C: CurveAffine> Evaluator<C> {
         }
         e = ProveExpression::reconstruct(e.flatten());
         let complexity = e.get_complexity();
-        ev.unit_ref_count = complexity.3.into_iter().collect();
+        ev.unit_ref_count = complexity.4.into_iter().collect();
         ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
         ev.unit_ref_count.reverse();
 

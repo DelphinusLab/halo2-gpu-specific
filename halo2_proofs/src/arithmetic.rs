@@ -315,21 +315,14 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     use group::Curve;
     use pairing::bn256::Fr;
 
-    let mut _coeffs = if usize::is_power_of_two(coeffs.len()) {
-        coeffs.par_iter().map(|x| x.to_repr()).collect::<Vec<_>>()
-    } else {
-        let new_len = usize::next_power_of_two(coeffs.len());
-        (0..new_len)
-            .into_par_iter()
-            .map(|i| {
-                if i < coeffs.len() {
-                    coeffs[i].to_repr()
-                } else {
-                    coeffs[0].to_repr()
-                }
-            })
-            .collect::<Vec<_>>()
-    };
+    //let timer = start_timer!(|| "to repr");
+    let mut _coeffs = vec![C::Scalar::zero().to_repr(); coeffs.len()];
+    parallelize(&mut _coeffs[..], |c, start| {
+        for (i, c) in c.iter_mut().enumerate() {
+            *c = coeffs[i + start].to_repr();
+        }
+    });
+    //end_timer!(timer);
     let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
