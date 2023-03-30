@@ -107,9 +107,10 @@ impl<F: FieldExt> LookupProveExpression<F> {
         let global_work_size = size / local_work_size;
 
         match self {
-            LookupProveExpression::Expression(e) => {
-                Ok(e._eval_gpu(pk, program, advice, instance, y, &BTreeMap::new())?.0.unwrap())
-            }
+            LookupProveExpression::Expression(e) => Ok(e
+                ._eval_gpu(pk, program, advice, instance, y, &BTreeMap::new())?
+                .0
+                .unwrap()),
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
                 let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
@@ -678,25 +679,18 @@ impl<F: FieldExt> ProveExpression<F> {
         }
     }
 
-    fn reconstruct_tree(
-        mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
-        r_deep_limit: u32,
-    ) -> Self {
-        if tree.len() == 1 {
-            let u = tree.pop().unwrap();
-            return Self::reconstruct_units_coeff(u.0, u.1);
-        }
-
-        // find max
+    fn find_max_group(
+        tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
+    ) -> (
+        ProveExpressionUnit,
+        Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
+        Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
+    ) {
         let mut map = BTreeMap::new();
 
         for (us, _) in tree.iter() {
             for (u, _) in us {
-                if let Some(c) = map.get_mut(u) {
-                    *c = *c + 1;
-                } else {
-                    map.insert(u, 1);
-                }
+                map.entry(u).and_modify(|curr| *curr += 1).or_insert(1);
             }
         }
 
@@ -710,24 +704,36 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
 
-        let mut l = vec![];
-        let mut r = vec![];
+        let mut group = vec![];
+        let mut rest = vec![];
 
         for (mut k, v) in tree {
             let c = k.remove(&max_u);
             match c {
                 Some(1) => {
-                    l.push((k, v));
+                    group.push((k, v));
                 }
                 Some(c) => {
                     k.insert(max_u.clone(), c - 1);
-                    l.push((k, v));
+                    group.push((k, v));
                 }
-                None => {
-                    r.push((k, v));
-                }
+                None => rest.push((k, v)),
             }
         }
+
+        (max_u, group, rest)
+    }
+
+    fn reconstruct_tree(
+        mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
+        r_deep_limit: u32,
+    ) -> Self {
+        if tree.len() == 1 {
+            let u = tree.pop().unwrap();
+            return Self::reconstruct_units_coeff(u.0, u.1);
+        }
+
+        let (max_u, l, r) = Self::find_max_group(tree);
 
         let mut l = Self::reconstruct_tree(l, r_deep_limit);
         l = Self::Product(Box::new(l), Box::new(Self::Unit(max_u)));
