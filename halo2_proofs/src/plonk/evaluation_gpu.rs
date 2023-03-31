@@ -108,7 +108,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
 
         match self {
             LookupProveExpression::Expression(e) => {
-                Ok(e._eval_gpu(pk, program, advice, instance, y, &BTreeMap::new())?.0.unwrap())
+                e._eval_gpu_buffer(pk, program, advice, instance, y, &BTreeMap::new())
             }
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
@@ -266,6 +266,57 @@ impl<F: FieldExt> ProveExpression<F> {
             .run(closures, &mut values.values[..])
             .unwrap();
         values
+    }
+
+    pub(crate) fn _eval_gpu_buffer<C: CurveAffine<ScalarExt = F>>(
+        &self,
+        pk: &ProvingKey<C>,
+        program: &Program,
+        advice: &Vec<Polynomial<F, Coeff>>,
+        instance: &Vec<Polynomial<F, Coeff>>,
+        y: &mut Vec<F>,
+        unit_cache: &BTreeMap<usize, Buffer<F>>,
+    ) -> EcResult<(Buffer<F>, i32)> {
+        let size = 1u32 << pk.vk.domain.extended_k();
+        let local_work_size = 128;
+        let global_work_size = size / local_work_size;
+        let v = self._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+        match v {
+            (Some((l, rot_l)), Some(r)) => {
+                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                let c = program.create_buffer_from_slice(&vec![r])?;
+                let kernel_name = format!("{}_eval_sum_c", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&res)
+                    .arg(&l)
+                    .arg(&rot_l)
+                    .arg(&c)
+                    .arg(&size)
+                    .run()?;
+                Ok((res, 0))
+            }
+            (Some((l, rot_l)), None) => Ok((l, rot_l)),
+            (None, Some(r)) => {
+                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                let c = program.create_buffer_from_slice(&vec![r])?;
+                let kernel_name = format!("{}_eval_constant", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel.arg(&res).arg(&c).run()?;
+                Ok((res, 0))
+            }
+            _ => {
+                unreachable!()
+            }
+        }
     }
 
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
