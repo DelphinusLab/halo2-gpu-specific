@@ -1156,7 +1156,15 @@ pub fn evaluate<F: FieldExt, B: Basis>(
                 },
                 &|a| -a,
                 &|a, b| a + &b,
-                &|a, b| a * b,
+                &|a, b| {
+                    let a = a();
+
+                    if a == F::zero() {
+                        a
+                    } else {
+                        a * b()
+                    }
+                },
                 &|a, scalar| a * scalar,
             );
         }

@@ -127,7 +127,7 @@ impl<C: CurveAffine> Evaluated<C> {
                             &|index, _, _| instance_evals[index],
                             &|a| -a,
                             &|a, b| a + &b,
-                            &|a, b| a * &b,
+                            &|a, b| a() * &b(),
                             &|a, scalar| a * &scalar,
                         )
                     })

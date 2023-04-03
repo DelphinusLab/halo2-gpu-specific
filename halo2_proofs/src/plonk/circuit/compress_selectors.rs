@@ -330,7 +330,7 @@ mod tests {
                         &|_, _, _| panic!("should not occur in returned expressions"),
                         &|a| -a,
                         &|a, b| a + b,
-                        &|a, b| a * b,
+                        &|a, b| a() * b(),
                         &|a, f| a * f,
                     );
 

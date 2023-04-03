@@ -83,7 +83,9 @@ impl FailureLocation {
                         a.append(&mut b);
                         a
                     },
-                    &|mut a, mut b| {
+                    &|a, b| {
+                        let mut a = a();
+                        let mut b = b();
                         a.append(&mut b);
                         a
                     },

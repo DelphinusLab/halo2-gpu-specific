@@ -498,7 +498,7 @@ impl<F: Field> Expression<F> {
         instance_column: &impl Fn(usize, usize, Rotation) -> T,
         negated: &impl Fn(T) -> T,
         sum: &impl Fn(T, T) -> T,
-        product: &impl Fn(T, T) -> T,
+        product: &impl Fn(&dyn Fn() -> T, &dyn Fn() -> T) -> T,
         scaled: &impl Fn(T, F) -> T,
     ) -> T {
         match self {
@@ -559,29 +559,33 @@ impl<F: Field> Expression<F> {
                 sum(a, b)
             }
             Expression::Product(a, b) => {
-                let a = a.evaluate(
-                    constant,
-                    selector_column,
-                    fixed_column,
-                    advice_column,
-                    instance_column,
-                    negated,
-                    sum,
-                    product,
-                    scaled,
-                );
-                let b = b.evaluate(
-                    constant,
-                    selector_column,
-                    fixed_column,
-                    advice_column,
-                    instance_column,
-                    negated,
-                    sum,
-                    product,
-                    scaled,
-                );
-                product(a, b)
+                let a = || {
+                    a.evaluate(
+                        constant,
+                        selector_column,
+                        fixed_column,
+                        advice_column,
+                        instance_column,
+                        negated,
+                        sum,
+                        product,
+                        scaled,
+                    )
+                };
+                let b = || {
+                    b.evaluate(
+                        constant,
+                        selector_column,
+                        fixed_column,
+                        advice_column,
+                        instance_column,
+                        negated,
+                        sum,
+                        product,
+                        scaled,
+                    )
+                };
+                product(&a, &b)
             }
             Expression::Scaled(a, f) => {
                 let a = a.evaluate(
@@ -812,7 +816,7 @@ impl<F: Field> Expression<F> {
             &|_, _, _| false,
             &|a| a,
             &|a, b| a || b,
-            &|a, b| a || b,
+            &|a, b| a() || b(),
             &|a, _| a,
         )
     }
@@ -839,7 +843,13 @@ impl<F: Field> Expression<F> {
             &|_, _, _| None,
             &|a| a,
             &op,
-            &op,
+            &|a, b| match (a(), b()) {
+                (Some(a), None) | (None, Some(a)) => Some(a),
+                (Some(_), Some(_)) => {
+                    panic!("two simple selectors cannot be in the same expression")
+                }
+                _ => None,
+            },
             &|a, _| a,
         )
     }
@@ -1391,7 +1401,7 @@ impl<F: Field> ConstraintSystem<F> {
                 },
                 &|a| -a,
                 &|a, b| a + b,
-                &|a, b| a * b,
+                &|a, b| a() * b(),
                 &|a, f| a * f,
             );
         }

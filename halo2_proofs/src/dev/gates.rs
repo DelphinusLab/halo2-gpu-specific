@@ -136,11 +136,15 @@ impl CircuitGates {
                                     format!("{} + {}", a, b)
                                 }
                             },
-                            &|a, b| match (a.contains(' '), b.contains(' ')) {
-                                (false, false) => format!("{} * {}", a, b),
-                                (false, true) => format!("{} * ({})", a, b),
-                                (true, false) => format!("({}) * {}", a, b),
-                                (true, true) => format!("({}) * ({})", a, b),
+                            &|a, b| {
+                                let a = a();
+                                let b = b();
+                                match (a.contains(' '), b.contains(' ')) {
+                                    (false, false) => format!("{} * {}", a, b),
+                                    (false, true) => format!("{} * ({})", a, b),
+                                    (true, false) => format!("({}) * {}", a, b),
+                                    (true, true) => format!("({}) * ({})", a, b),
+                                }
                             },
                             &|a, s| {
                                 if a.contains(' ') {
@@ -173,7 +177,9 @@ impl CircuitGates {
                                 a.append(&mut b);
                                 a
                             },
-                            &|mut a, mut b| {
+                            &|a, b| {
+                                let mut a = a();
+                                let mut b = b();
                                 a.append(&mut b);
                                 a
                             },
@@ -197,7 +203,11 @@ impl CircuitGates {
                         &|_, _, _| (0, 0, 0),
                         &|(a_n, a_a, a_m)| (a_n + 1, a_a, a_m),
                         &|(a_n, a_a, a_m), (b_n, b_a, b_m)| (a_n + b_n, a_a + b_a + 1, a_m + b_m),
-                        &|(a_n, a_a, a_m), (b_n, b_a, b_m)| (a_n + b_n, a_a + b_a, a_m + b_m + 1),
+                        &|a, b| {
+                            let (a_n, a_a, a_m) = a();
+                            let (b_n, b_a, b_m) = b();
+                            (a_n + b_n, a_a + b_a, a_m + b_m + 1)
+                        },
                         &|(a_n, a_a, a_m), _| (a_n, a_a, a_m + 1),
                     )
                 })
