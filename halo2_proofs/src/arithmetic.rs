@@ -308,7 +308,11 @@ pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
 }
 
 #[cfg(feature = "cuda")]
-pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
+    gpu_idx: usize,
+    coeffs: &[C::Scalar],
+    bases: &[C],
+) -> C::Curve {
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
     };
@@ -326,7 +330,8 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
-    let device = Device::all()[0];
+    let devices = Device::all();
+    let device = devices[gpu_idx % devices.len()];
     let programs = ec_gpu_gen::program!(device).unwrap();
     let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
         .expect("Cannot initialize kernel!");
@@ -334,6 +339,24 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     let a = [kern.multiexp(bases, _coeffs).unwrap()];
     let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
     res[0]
+}
+
+#[cfg(feature = "cuda")]
+pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    use std::str::FromStr;
+    let n_gpu =
+        usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string())).unwrap();
+
+    let part_len = coeffs.len() / n_gpu;
+
+    let c = coeffs
+        .par_chunks(part_len)
+        .zip(bases.par_chunks(part_len))
+        .enumerate()
+        .map(|(gpu_idx, (c, b))| gpu_multiexp_single_gpu(gpu_idx, c, b))
+        .collect::<Vec<_>>();
+
+    c.into_iter().reduce(|acc, x| acc + x).unwrap()
 }
 
 pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {

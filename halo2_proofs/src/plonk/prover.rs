@@ -58,6 +58,8 @@ pub fn create_proof<
         }
     }
 
+    println!("k is {}", pk.vk.domain.k());
+
     // Hash verification key into transcript
     pk.vk.hash_into(transcript)?;
 

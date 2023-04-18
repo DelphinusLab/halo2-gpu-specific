@@ -186,6 +186,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
+        group_idx: usize,
         pk: &ProvingKey<C>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
@@ -261,7 +262,8 @@ impl<F: FieldExt> ProveExpression<F> {
         let kern =
             FftKernel::<pairing::bn256::Fr>::create(programs).expect("Cannot initialize kernel!");
 
-        kern.kernels[0]
+            let gpu_idx = group_idx % kern.kernels.len();
+            kern.kernels[gpu_idx]
             .program
             .run(closures, &mut values.values[..])
             .unwrap();
@@ -799,19 +801,19 @@ impl<F: FieldExt> ProveExpression<F> {
         l
     }
 
-    pub(crate) fn reconstruct(tree: BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>>) -> Self {
+    pub(crate) fn reconstruct(tree: &[(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)]) -> Self {
         let tree = tree
             .into_iter()
             .map(|(us, v)| {
                 let mut map = BTreeMap::new();
                 for u in us {
-                    if let Some(c) = map.get_mut(&u) {
+                    if let Some(c) = map.get_mut(u) {
                         *c = *c + 1;
                     } else {
-                        map.insert(u, 1);
+                        map.insert(u.clone(), 1);
                     }
                 }
-                (map, v)
+                (map, v.clone())
             })
             .collect();
 
