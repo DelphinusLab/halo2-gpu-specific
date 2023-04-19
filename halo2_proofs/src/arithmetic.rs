@@ -346,7 +346,7 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     use std::str::FromStr;
     use ec_gpu_gen::rust_gpu_tools::Device;
 
-    let timer = start_timer!(|| "msm gpu");
+    //let timer = start_timer!(|| "msm gpu");
     let n_gpu = usize::from_str(
         &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
     )
@@ -364,7 +364,7 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
         .reduce(|acc, x| acc + x)
         .unwrap();
 
-    end_timer!(timer);
+    //end_timer!(timer);
     c
 }
 
