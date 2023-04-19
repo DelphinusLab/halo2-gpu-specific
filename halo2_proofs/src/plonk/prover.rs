@@ -406,7 +406,7 @@ pub fn create_proof<
         .collect::<Result<Vec<_>, _>>()?;
 
     end_timer!(timer);
-    let timer = start_timer!(|| "lookups commited");
+    let timer = start_timer!(|| "lookups committed");
 
     let lookups: Vec<Vec<lookup::prover::Committed<C>>> = lookups
         .into_iter()

@@ -344,19 +344,25 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use std::str::FromStr;
+
+    let timer = start_timer!(|| "msm gpu");
     let n_gpu =
         usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string())).unwrap();
 
-    let part_len = coeffs.len() / n_gpu;
+    let part_len = (coeffs.len() + n_gpu - 1) / n_gpu;
 
     let c = coeffs
         .par_chunks(part_len)
         .zip(bases.par_chunks(part_len))
         .enumerate()
         .map(|(gpu_idx, (c, b))| gpu_multiexp_single_gpu(gpu_idx, c, b))
-        .collect::<Vec<_>>();
+        .collect::<Vec<_>>()
+        .into_iter()
+        .reduce(|acc, x| acc + x)
+        .unwrap();
 
-    c.into_iter().reduce(|acc, x| acc + x).unwrap()
+    end_timer!(timer);
+    c
 }
 
 pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
