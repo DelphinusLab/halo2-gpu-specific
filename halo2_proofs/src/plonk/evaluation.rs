@@ -954,7 +954,6 @@ impl<C: CurveAffine> Evaluator<C> {
             usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string()))
                 .unwrap();
         let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
-        let y_chunk = y.pow_vartime(&[group_expr_len as u64 * 5, 0, 0, 0]);
 
         values = lookups
             .par_chunks(group_expr_len)
@@ -1151,11 +1150,13 @@ impl<C: CurveAffine> Evaluator<C> {
                         )
                     })
                     .unwrap();
-                tmp_value
+                (tmp_value, lookups.len())
             })
             .collect::<Vec<_>>()
             .iter()
-            .fold(values, |acc, x| acc * y_chunk + x);
+            .fold(values, |acc, (x, len)| {
+                acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
+            });
 
         end_timer!(timer);
 
