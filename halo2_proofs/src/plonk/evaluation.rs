@@ -792,9 +792,12 @@ impl<C: CurveAffine> Evaluator<C> {
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
         use std::marker::PhantomData;
 
-        use rayon::prelude::{
-            IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-            ParallelIterator,
+        use rayon::{
+            prelude::{
+                IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+                ParallelIterator,
+            },
+            slice::ParallelSlice,
         };
 
         assert!(advice_poly.len() == 1);
@@ -952,26 +955,28 @@ impl<C: CurveAffine> Evaluator<C> {
                 .unwrap();
         let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
         let y_chunk = y.pow_vartime(&[group_expr_len as u64 * 5, 0, 0, 0]);
-        {
-            use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer};
-            use ff::PrimeField;
-            use group::ff::Field;
-            use pairing::bn256::Fr;
 
-            // combine fft with eval_h_lookups:
-            // fft code: from ec-gpu lib.
-            let mut buffer = vec![];
-            buffer.resize(domain.extended_len(), C::Scalar::zero());
-
-            let devices = Device::all();
-            let programs = devices
-                .iter()
-                .map(|device| ec_gpu_gen::program!(device))
-                .collect::<Result<_, _>>()
-                .expect("Cannot create programs!");
-            let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
-
-            for (group_idx, lookups) in lookups.chunks(group_expr_len).enumerate() {
+        values = lookups
+            .par_chunks(group_expr_len)
+            .enumerate()
+            .map(|(group_idx, lookups)| {
+                use ec_gpu_gen::{
+                    fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer,
+                };
+                use ff::PrimeField;
+                use group::ff::Field;
+                use pairing::bn256::Fr;
+                // combine fft with eval_h_lookups:
+                // fft code: from ec-gpu lib.
+                let mut buffer = vec![];
+                buffer.resize(domain.extended_len(), C::Scalar::zero());
+                let devices = Device::all();
+                let programs = devices
+                    .iter()
+                    .map(|device| ec_gpu_gen::program!(device))
+                    .collect::<Result<_, _>>()
+                    .expect("Cannot create programs!");
+                let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
                 let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
                     |program,
                      args: (&mut [Fr], usize, &[Committed<C>])|
@@ -1146,11 +1151,12 @@ impl<C: CurveAffine> Evaluator<C> {
                         )
                     })
                     .unwrap();
+                tmp_value
+            })
+            .collect::<Vec<_>>()
+            .iter()
+            .fold(values, |acc, x| acc * y_chunk + x);
 
-                values = values * y_chunk;
-                values = values + &tmp_value;
-            }
-        }
         end_timer!(timer);
 
         values
