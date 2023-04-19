@@ -14,6 +14,7 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ark_std::{end_timer, start_timer};
+use ec_gpu_gen::rust_gpu_tools::Device;
 use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
 use group::prime::PrimeCurve;
 use group::{
@@ -292,9 +293,9 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
-        let n_gpu =
-            usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string()))
-                .unwrap();
+        let n_gpu = usize::from_str(
+            &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
+        ).unwrap();
         println!("gpus number is {}", n_gpu);
         let es = e_exprs
             .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
@@ -950,9 +951,9 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let timer = ark_std::start_timer!(|| "eval_h_lookups");
         let lookups = &lookups[0];
-        let n_gpu =
-            usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string()))
-                .unwrap();
+        let n_gpu = usize::from_str(
+            &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
+        ).unwrap();
         let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
 
         values = lookups

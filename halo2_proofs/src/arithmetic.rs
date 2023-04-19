@@ -344,10 +344,13 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use std::str::FromStr;
+    use ec_gpu_gen::rust_gpu_tools::Device;
 
     let timer = start_timer!(|| "msm gpu");
-    let n_gpu =
-        usize::from_str(&std::env::var("HALO2_PROOFS_N_GPU").unwrap_or("1".to_string())).unwrap();
+    let n_gpu = usize::from_str(
+        &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
+    )
+    .unwrap();
 
     let part_len = (coeffs.len() + n_gpu - 1) / n_gpu;
 
