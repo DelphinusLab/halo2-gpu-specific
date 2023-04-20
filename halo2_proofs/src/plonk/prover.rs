@@ -349,7 +349,7 @@ pub fn create_proof<
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
     end_timer!(timer);
-    let timer = start_timer!(|| "lookups");
+    let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
     let lookups: Vec<Vec<lookup::prover::Permuted<C>>> = instance
         .iter()
         .zip(advice.iter())
@@ -361,6 +361,7 @@ pub fn create_proof<
                 .iter()
                 .map(|lookup| {
                     lookup.commit_permuted(
+                        0,
                         pk,
                         params,
                         domain,

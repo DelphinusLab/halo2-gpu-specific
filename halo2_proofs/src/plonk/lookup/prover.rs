@@ -14,6 +14,7 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use ark_std::{start_timer, end_timer};
 use group::{
     ff::{BatchInvert, Field},
     Curve,
@@ -69,6 +70,7 @@ impl<F: FieldExt> Argument<F> {
         T: TranscriptWrite<C, E>,
     >(
         &self,
+        group_idx: usize,
         pk: &ProvingKey<C>,
         params: &Params<C>,
         domain: &EvaluationDomain<C::Scalar>,
@@ -89,6 +91,7 @@ impl<F: FieldExt> Argument<F> {
                 .iter()
                 .map(|expression| {
                     pk.vk.domain.lagrange_from_vec(evaluate(
+                        group_idx,
                         expression,
                         params.n as usize,
                         1,
@@ -110,12 +113,18 @@ impl<F: FieldExt> Argument<F> {
             (poly, commitment)
         };
 
+        let timer = start_timer!(|| "eval left");
         // Get values of input expressions involved in the lookup and compress them
         let compressed_input_expression = compress_expressions(&self.input_expressions);
+        end_timer!(timer);
 
+        let timer = start_timer!(|| "eval right");
         // Get values of table expressions involved in the lookup and compress them
         let compressed_table_expression = compress_expressions(&self.table_expressions);
+        end_timer!(timer);
 
+        
+        let timer = start_timer!(|| "core");
         // Permute compressed (InputExpression, TableExpression) pair
         let (permuted_input_expression, permuted_table_expression) = permute_expression_pair::<C, _>(
             pk,
@@ -125,7 +134,9 @@ impl<F: FieldExt> Argument<F> {
             &compressed_input_expression,
             &compressed_table_expression,
         )?;
+        end_timer!(timer);
 
+        let timer = start_timer!(|| "commit");
         // Commit to permuted input expression
         let (permuted_input_poly, permuted_input_commitment) =
             commit_values(&permuted_input_expression);
@@ -133,12 +144,15 @@ impl<F: FieldExt> Argument<F> {
         // Commit to permuted table expression
         let (permuted_table_poly, permuted_table_commitment) =
             commit_values(&permuted_table_expression);
+        end_timer!(timer);
 
+        let timer = start_timer!(|| "transcript");
         // Hash permuted input commitment
         transcript.write_point(permuted_input_commitment)?;
 
         // Hash permuted table commitment
         transcript.write_point(permuted_table_commitment)?;
+        end_timer!(timer);
 
         Ok(Permuted {
             compressed_input_expression,

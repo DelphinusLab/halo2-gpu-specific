@@ -14,8 +14,6 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ark_std::{end_timer, start_timer};
-use ec_gpu_gen::rust_gpu_tools::Device;
-use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},
@@ -295,7 +293,8 @@ impl<C: CurveAffine> Evaluator<C> {
         let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
         let n_gpu = usize::from_str(
             &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
-        ).unwrap();
+        )
+        .unwrap();
         println!("gpus number is {}", n_gpu);
         let es = e_exprs
             .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
@@ -953,10 +952,11 @@ impl<C: CurveAffine> Evaluator<C> {
         let lookups = &lookups[0];
         let n_gpu = usize::from_str(
             &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
-        ).unwrap();
+        )
+        .unwrap();
         let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
 
-        values = lookups
+        let values_parts = lookups
             .par_chunks(group_expr_len)
             .enumerate()
             .map(|(group_idx, lookups)| {
@@ -1153,11 +1153,12 @@ impl<C: CurveAffine> Evaluator<C> {
                     .unwrap();
                 (tmp_value, lookups.len())
             })
-            .collect::<Vec<_>>()
-            .iter()
-            .fold(values, |acc, (x, len)| {
-                acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
-            });
+            .collect::<Vec<_>>();
+        let timer2 = start_timer!(|| "merge");
+        values = values_parts.iter().fold(values, |acc, (x, len)| {
+            acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
+        });
+        end_timer!(timer2);
 
         end_timer!(timer);
 
@@ -1188,8 +1189,10 @@ impl<T> ThreadBox<T> {
     }
 }
 
+#[cfg(not(feature = "cuda"))]
 /// Simple evaluation of an expression
 pub fn evaluate<F: FieldExt, B: Basis>(
+    _group_idx: usize,
     expression: &Expression<F>,
     size: usize,
     rot_scale: i32,
@@ -1202,6 +1205,7 @@ pub fn evaluate<F: FieldExt, B: Basis>(
     parallelize(&mut values, |values, start| {
         for (i, value) in values.iter_mut().enumerate() {
             let idx = start + i;
+            //let idx = i;
             *value = expression.evaluate(
                 &|scalar| scalar,
                 &|_| panic!("virtual selectors are removed during optimization"),
@@ -1229,5 +1233,189 @@ pub fn evaluate<F: FieldExt, B: Basis>(
             );
         }
     });
+    values
+}
+
+#[cfg(feature = "cuda")]
+use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
+use ec_gpu_gen::rust_gpu_tools::cuda::Program;
+use ec_gpu_gen::rust_gpu_tools::Device;
+use ec_gpu_gen::rust_gpu_tools::LocalBuffer;
+use ec_gpu_gen::EcResult;
+
+#[cfg(feature = "cuda")]
+pub fn _evaluate<F: FieldExt, B: Basis>(
+    program: &Program,
+    expression: &Expression<F>,
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+) -> EcResult<(Buffer<F>, i32)> {
+    use std::fmt::format;
+
+    let local_work_size = 128;
+    let global_work_size = size / local_work_size;
+    match expression {
+        Expression::Constant(c) => {
+            let res = unsafe { program.create_buffer::<F>(size as usize)? };
+            let c = program.create_buffer_from_slice(&[*c])?;
+            let kernel_name = format!("{}_eval_constant", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel.arg(&res).arg(&c).run()?;
+            Ok((res, 0))
+        }
+        Expression::Selector(_) => unreachable!(),
+        Expression::Fixed {
+            column_index,
+            rotation,
+            ..
+        } => {
+            let timer = start_timer!(|| format!("copy {}", fixed.len()));
+            let buffer = program.create_buffer_from_slice(&fixed[*column_index])?;
+            end_timer!(timer);
+            Ok((buffer, rotation.0 * rot_scale))
+        }
+        Expression::Advice {
+            column_index,
+            rotation,
+            ..
+        } => {
+            let buffer = program.create_buffer_from_slice(&advice[*column_index])?;
+            Ok((buffer, rotation.0 * rot_scale))
+        }
+        Expression::Instance {
+            column_index,
+            rotation,
+            ..
+        } => {
+            let buffer = program.create_buffer_from_slice(&instance[*column_index])?;
+            Ok((buffer, rotation.0 * rot_scale))
+        }
+        Expression::Negated(v) => {
+            let res = _evaluate(program, &v, size, rot_scale, fixed, advice, instance)?;
+            let kernel_name = format!("{}_eval_neg", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel.arg(&res.0).run()?;
+            Ok(res)
+        }
+        Expression::Sum(l, r) => {
+            let l = _evaluate(program, l, size, rot_scale, fixed, advice, instance)?;
+            let r = _evaluate(program, r, size, rot_scale, fixed, advice, instance)?;
+
+            //let timer1 = start_timer!(|| "create buffer");
+            let res = unsafe { program.create_buffer::<F>(size as usize)? };
+            //end_timer!(timer1);
+            let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(&res)
+                .arg(&l.0)
+                .arg(&r.0)
+                .arg(&l.1)
+                .arg(&r.1)
+                .arg(&(size as i32))
+                .run()?;
+            Ok((res, 0))
+        }
+        Expression::Product(l, r) => {
+            let l = _evaluate(program, l, size, rot_scale, fixed, advice, instance)?;
+            let r = _evaluate(program, r, size, rot_scale, fixed, advice, instance)?;
+
+            //let timer1 = start_timer!(|| "create buffer");
+            let res = unsafe { program.create_buffer::<F>(size as usize)? };
+            //end_timer!(timer1);
+            let kernel_name = format!("{}_eval_mul", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(&res)
+                .arg(&l.0)
+                .arg(&r.0)
+                .arg(&l.1)
+                .arg(&r.1)
+                .arg(&(size as i32))
+                .run()?;
+            Ok((res, 0))
+        }
+        Expression::Scaled(l, c) => {
+            let l = _evaluate(program, l, size, rot_scale, fixed, advice, instance)?;
+            let c = program.create_buffer_from_slice(&vec![c])?;
+
+            //let timer1 = start_timer!(|| "create buffer");
+            let res = unsafe { program.create_buffer::<F>(size as usize)? };
+            //end_timer!(timer1);
+            let kernel_name = format!("{}_eval_scale", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(&res)
+                .arg(&l.0)
+                .arg(&l.1)
+                .arg(&(size as i32))
+                .arg(&c)
+                .run()?;
+            Ok((res, 0))
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// Simple evaluation of an expression
+pub fn evaluate<F: FieldExt, B: Basis>(
+    group_idx: usize,
+    expression: &Expression<F>,
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+) -> Vec<F> {
+    let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
+                                                                  input: &mut [F]|
+     -> ec_gpu_gen::EcResult<()> {
+        let res = _evaluate(
+            program, expression, size, rot_scale, fixed, advice, instance,
+        )?;
+        assert!(res.1 == 0);
+        program.read_into_buffer(&res.0, input)?;
+        Ok(())
+    });
+
+    let mut values = vec![F::zero(); size];
+    let devices = Device::all();
+    let programs = devices
+        .iter()
+        .map(|device| ec_gpu_gen::program!(device))
+        .collect::<Result<_, _>>()
+        .expect("Cannot create programs!");
+    let kern = ec_gpu_gen::fft::FftKernel::<pairing::bn256::Fr>::create(programs)
+        .expect("Cannot initialize kernel!");
+
+    let gpu_idx = group_idx % kern.kernels.len();
+    kern.kernels[gpu_idx]
+        .program
+        .run(closures, &mut values[..])
+        .unwrap();
+
     values
 }
