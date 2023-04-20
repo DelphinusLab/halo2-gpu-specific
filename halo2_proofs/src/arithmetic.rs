@@ -343,15 +343,11 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
 
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    use std::str::FromStr;
     use ec_gpu_gen::rust_gpu_tools::Device;
+    use std::str::FromStr;
 
     //let timer = start_timer!(|| "msm gpu");
-    let n_gpu = usize::from_str(
-        &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or(Device::all().len().to_string()),
-    )
-    .unwrap();
-
+    let n_gpu = *crate::plonk::N_GPU;
     let part_len = (coeffs.len() + n_gpu - 1) / n_gpu;
 
     let c = coeffs
@@ -418,19 +414,21 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 
 #[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device};
+    use crate::plonk::{GPU_GROUP_ID, N_GPU};
+    use ec_gpu_gen::{
+        fft::{FftKernel, SingleFftKernel},
+        rust_gpu_tools::Device,
+    };
     use pairing::bn256::Fr;
+
+    let gpu_id = GPU_GROUP_ID.get() % *N_GPU;
     let devices = Device::all();
-    let programs = devices
-        .iter()
-        .map(|device| ec_gpu_gen::program!(device))
-        .collect::<Result<_, _>>()
-        .expect("Cannot create programs!");
-    let mut kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+    let device = devices[gpu_id % devices.len()];
+    let program = ec_gpu_gen::program!(device).unwrap();
+    let mut kern = SingleFftKernel::<Fr>::create(program, None).expect("Cannot initialize kernel!");
     let a: &mut [Fr] = unsafe { std::mem::transmute(a) };
     let omega: &Fr = unsafe { std::mem::transmute(&omega) };
-    kern.radix_fft_many(&mut [a], &[*omega], &[log_n])
-        .expect("GPU FFT failed!");
+    kern.radix_fft(a, omega, log_n).expect("GPU FFT failed!");
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size

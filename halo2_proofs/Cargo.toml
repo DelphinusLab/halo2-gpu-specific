@@ -45,6 +45,7 @@ cfg-if = "0.1"
 num-integer = "0.1"
 num-bigint = { version = "0.4", features = ["rand"] }
 cuda-driver-sys = "0.3.0"
+lazy_static = "1.4.0"
 
 # Developer tooling dependencies
 plotters = { version = "0.3.0", optional = true }

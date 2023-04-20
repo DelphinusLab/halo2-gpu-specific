@@ -14,12 +14,16 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use ark_std::{end_timer, start_timer};
 use group::{
     ff::{BatchInvert, Field},
     Curve,
 };
 use rand_core::RngCore;
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator, ParallelSliceMut, IntoParallelRefMutIterator, IndexedParallelIterator};
+use rayon::prelude::{
+    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+    ParallelSliceMut,
+};
 use std::any::TypeId;
 use std::convert::TryInto;
 use std::num::ParseIntError;
@@ -61,13 +65,7 @@ impl<F: FieldExt> Argument<F> {
     /// - constructs Permuted<C> struct using permuted_input_value = A', and
     ///   permuted_table_expression = S'.
     /// The Permuted<C> struct is used to update the Lookup, and is then returned.
-    pub(in crate::plonk) fn commit_permuted<
-        'a,
-        C,
-        E: EncodedChallenge<C>,
-        R: RngCore,
-        T: TranscriptWrite<C, E>,
-    >(
+    pub(in crate::plonk) fn commit_permuted<'a, C, R: RngCore>(
         &self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
@@ -76,9 +74,8 @@ impl<F: FieldExt> Argument<F> {
         advice_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         fixed_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
         instance_values: &'a [Polynomial<C::Scalar, LagrangeCoeff>],
-        transcript: &mut T,
         mut rng: R,
-    ) -> Result<Permuted<C>, Error>
+    ) -> Result<(Permuted<C>, [C; 2]), Error>
     where
         C: CurveAffine<ScalarExt = F>,
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
@@ -105,8 +102,10 @@ impl<F: FieldExt> Argument<F> {
 
         // Closure to construct commitment to vector of values
         let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff(values.clone());
+            let timer = start_timer!(|| "fft");
+            let poly = pk.vk.domain.lagrange_to_coeff_st(values.clone());
             let commitment = params.commit_lagrange(values).to_affine();
+            end_timer!(timer);
             (poly, commitment)
         };
 
@@ -134,20 +133,17 @@ impl<F: FieldExt> Argument<F> {
         let (permuted_table_poly, permuted_table_commitment) =
             commit_values(&permuted_table_expression);
 
-        // Hash permuted input commitment
-        transcript.write_point(permuted_input_commitment)?;
-
-        // Hash permuted table commitment
-        transcript.write_point(permuted_table_commitment)?;
-
-        Ok(Permuted {
-            compressed_input_expression,
-            permuted_input_expression,
-            permuted_input_poly,
-            compressed_table_expression,
-            permuted_table_expression,
-            permuted_table_poly,
-        })
+        Ok((
+            Permuted {
+                compressed_input_expression,
+                permuted_input_expression,
+                permuted_input_poly,
+                compressed_table_expression,
+                permuted_table_expression,
+                permuted_table_poly,
+            },
+            [permuted_input_commitment, permuted_table_commitment],
+        ))
     }
 }
 
@@ -416,8 +412,8 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     let mut permuted_table_coeffs = vec![None; usable_rows];
 
     let unique_input_values = permuted_input_expression
-        .par_iter()
-        .zip(permuted_table_coeffs.par_iter_mut())
+        .iter()
+        .zip(permuted_table_coeffs.iter_mut())
         .enumerate()
         .filter_map(|(row, (input_value, table_value))| {
             // If this is the first occurrence of `input_value` in the input expression
@@ -446,7 +442,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         }
     }
     let mut permuted_table_coeffs = permuted_table_coeffs
-        .par_iter()
+        .iter()
         .filter_map(|x| *x)
         .collect::<Vec<_>>();
 

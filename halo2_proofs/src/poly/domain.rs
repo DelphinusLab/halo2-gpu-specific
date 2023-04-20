@@ -2,13 +2,16 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{best_fft, parallelize, FieldExt, Group, batch_invert},
+    arithmetic::{batch_invert, best_fft, parallelize, FieldExt, Group},
     plonk::Assigned,
 };
 
-use super::{Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, Rotation, PreparedExtendedLagrangeCoeff};
+use super::{
+    Coeff, ExtendedLagrangeCoeff, LagrangeCoeff, Polynomial, PreparedExtendedLagrangeCoeff,
+    Rotation,
+};
 
-use ark_std::{start_timer, end_timer};
+use ark_std::{end_timer, start_timer};
 use group::ff::{BatchInvert, Field, PrimeField};
 
 use std::marker::PhantomData;
@@ -238,6 +241,22 @@ impl<G: Group> EvaluationDomain<G> {
         }
     }
 
+    /// This takes us from an n-length vector into the coefficient form.
+    ///
+    /// This function will panic if the provided vector is not the correct
+    /// length.
+    pub fn lagrange_to_coeff_st(&self, mut a: Polynomial<G, LagrangeCoeff>) -> Polynomial<G, Coeff> {
+        assert_eq!(a.values.len(), 1 << self.k);
+
+        // Perform inverse FFT to obtain the polynomial in coefficient form
+        Self::ifft_st(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
+
+        Polynomial {
+            values: a.values,
+            _marker: PhantomData,
+        }
+    }
+
     /// This takes us from an n-length coefficient vector into a coset of the extended
     /// evaluation domain, rotating by `rotation` if desired.
     pub fn coeff_to_extended(
@@ -378,6 +397,14 @@ impl<G: Group> EvaluationDomain<G> {
                 a.group_scale(&divisor);
             }
         });
+    }
+
+    fn ifft_st(a: &mut [G], omega_inv: G::Scalar, log_n: u32, divisor: G::Scalar) {
+        best_fft(a, omega_inv, log_n);
+        for a in a {
+            // Finish iFFT
+            a.group_scale(&divisor);
+        }
     }
 
     /// Get the size of the domain

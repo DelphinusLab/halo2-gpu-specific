@@ -1,7 +1,12 @@
 use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
+use rand_core::OsRng;
 use rand_core::RngCore;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::ParallelIterator;
+use rayon::prelude::IntoParallelIterator;
+use rayon::prelude::IntoParallelRefIterator;
 use std::env::var;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
@@ -33,6 +38,20 @@ use crate::{
     poly::batch_invert_assigned,
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+
+thread_local! {
+    pub static GPU_GROUP_ID: std::cell::Cell<usize>  =  std::cell::Cell::new(0);
+}
+
+#[cfg(feature = "cuda")]
+lazy_static! {
+    pub static ref N_GPU: usize = usize::from_str_radix(
+        &std::env::var("HALO2_PROOFS_N_GPU")
+            .unwrap_or(ec_gpu_gen::rust_gpu_tools::Device::all().len().to_string()),
+        10
+    )
+    .unwrap();
+}
 
 /// This creates a proof for the provided `circuit` when given the public
 /// parameters `params` and the proving key [`ProvingKey`] that was
@@ -325,8 +344,12 @@ pub fn create_proof<
 
             let advice_polys: Vec<_> = advice
                 .clone()
-                .into_iter()
-                .map(|poly| domain.lagrange_to_coeff(poly))
+                .into_par_iter()
+                .enumerate()
+                .map(|(idx, poly)| {
+                    GPU_GROUP_ID.set(idx);
+                    domain.lagrange_to_coeff_st(poly)
+                })
                 .collect();
 
             #[cfg(not(feature = "cuda"))]
@@ -349,32 +372,43 @@ pub fn create_proof<
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
     end_timer!(timer);
-    let timer = start_timer!(|| "lookups");
-    let lookups: Vec<Vec<lookup::prover::Permuted<C>>> = instance
-        .iter()
-        .zip(advice.iter())
-        .map(|(instance, advice)| -> Result<Vec<_>, Error> {
-            // Construct and commit to permuted values for each lookup
-            pk.vk
-                .cs
-                .lookups
-                .iter()
-                .map(|lookup| {
-                    lookup.commit_permuted(
-                        pk,
-                        params,
-                        domain,
-                        theta,
-                        &advice.advice_values,
-                        &pk.fixed_values,
-                        &instance.instance_values,
-                        transcript,
-                        &mut rng,
-                    )
-                })
-                .collect()
+    let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
+    let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
+        instance
+            .iter()
+            .zip(advice.iter())
+            .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
+                // Construct and commit to permuted values for each lookup
+                pk.vk
+                    .cs
+                    .lookups
+                    .par_iter()
+                    .enumerate()
+                    .map(|(idx, lookup)| {
+                        GPU_GROUP_ID.set(idx);
+                        lookup
+                            .commit_permuted(
+                                pk,
+                                params,
+                                domain,
+                                theta,
+                                &advice.advice_values,
+                                &pk.fixed_values,
+                                &instance.instance_values,
+                                &mut OsRng,
+                            )
+                            .unwrap()
+                    })
+                    .unzip()
+            })
+            .unzip();
+
+    lookups_commitments.iter().for_each(|x| {
+        x.iter().for_each(|x| {
+            transcript.write_point(x[0]).unwrap();
+            transcript.write_point(x[1]).unwrap();
         })
-        .collect::<Result<Vec<_>, _>>()?;
+    });
 
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();

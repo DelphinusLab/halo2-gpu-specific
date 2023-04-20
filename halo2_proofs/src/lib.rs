@@ -1,4 +1,5 @@
 //! # halo2_proofs
+#![feature(local_key_cell_methods)]
 
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Build without warnings on stable 1.51 and later.
@@ -32,3 +33,6 @@ pub mod transcript;
 
 pub mod dev;
 mod helpers;
+
+#[macro_use]
+extern crate lazy_static;
