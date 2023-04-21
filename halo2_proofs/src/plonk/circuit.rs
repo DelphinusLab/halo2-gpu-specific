@@ -1279,6 +1279,11 @@ impl<F: Field> ConstraintSystem<F> {
             "Gates must contain at least one constraint."
         );
 
+        println!("add constraints {}:", name);
+        for (i, e) in polys.iter().enumerate(){
+            println!("constraints degree {}:", e.degree());
+        }
+
         self.gates.push(Gate {
             name,
             constraint_names,
