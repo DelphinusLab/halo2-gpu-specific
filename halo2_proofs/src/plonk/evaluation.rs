@@ -14,8 +14,6 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ark_std::{end_timer, start_timer};
-use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
-use ec_gpu_gen::rust_gpu_tools::Device;
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},

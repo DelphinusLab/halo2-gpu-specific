@@ -3,7 +3,7 @@ use super::super::{
     ProvingKey,
 };
 use super::Argument;
-use crate::arithmetic::{batch_invert, gpu_sort};
+use crate::arithmetic::batch_invert;
 use crate::plonk::evaluation::evaluate;
 use crate::poly::Basis;
 use crate::{
@@ -102,10 +102,8 @@ impl<F: FieldExt> Argument<F> {
 
         // Closure to construct commitment to vector of values
         let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            let timer = start_timer!(|| "fft");
             let poly = pk.vk.domain.lagrange_to_coeff_st(values.clone());
             let commitment = params.commit_lagrange(values).to_affine();
-            end_timer!(timer);
             (poly, commitment)
         };
 
@@ -389,7 +387,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     #[cfg(feature = "cuda")]
     {
         permuted_input_expression.resize(1 << params.k, -C::Scalar::one());
-        gpu_sort(&mut permuted_input_expression, params.k);
+        crate::arithmetic::gpu_sort(&mut permuted_input_expression, params.k);
         permuted_input_expression.truncate(usable_rows);
     }
 
@@ -402,7 +400,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     #[cfg(feature = "cuda")]
     {
         sorted_table_coeffs.resize(1 << params.k, -C::Scalar::one());
-        gpu_sort(&mut sorted_table_coeffs, params.k);
+        crate::arithmetic::gpu_sort(&mut sorted_table_coeffs, params.k);
         sorted_table_coeffs.truncate(usable_rows);
     }
 

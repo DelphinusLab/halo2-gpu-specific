@@ -13,12 +13,6 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ark_std::{end_timer, start_timer};
-use ec_gpu_gen::fft::FftKernel;
-use ec_gpu_gen::rust_gpu_tools::cuda::Buffer;
-use ec_gpu_gen::rust_gpu_tools::cuda::Program;
-use ec_gpu_gen::rust_gpu_tools::Device;
-use ec_gpu_gen::rust_gpu_tools::LocalBuffer;
-use ec_gpu_gen::EcResult;
 use group::prime::PrimeCurve;
 use group::{
     ff::{BatchInvert, Field},
@@ -90,6 +84,7 @@ pub enum LookupProveExpression<F> {
     AddGamma(Box<LookupProveExpression<F>>),
 }
 
+#[cfg(feature = "cuda")]
 impl<F: FieldExt> LookupProveExpression<F> {
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
@@ -183,6 +178,13 @@ impl<F: FieldExt> LookupProveExpression<F> {
     }
 }
 
+#[cfg(feature = "cuda")]
+use ec_gpu_gen::{
+    fft::FftKernel, rust_gpu_tools::cuda::Buffer, rust_gpu_tools::cuda::Program,
+    rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer, EcResult,
+};
+
+#[cfg(feature = "cuda")]
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
@@ -262,8 +264,8 @@ impl<F: FieldExt> ProveExpression<F> {
         let kern =
             FftKernel::<pairing::bn256::Fr>::create(programs).expect("Cannot initialize kernel!");
 
-            let gpu_idx = group_idx % kern.kernels.len();
-            kern.kernels[gpu_idx]
+        let gpu_idx = group_idx % kern.kernels.len();
+        kern.kernels[gpu_idx]
             .program
             .run(closures, &mut values.values[..])
             .unwrap();
@@ -615,7 +617,9 @@ impl<F: FieldExt> ProveExpression<F> {
 
         Ok(src_buffer)
     }
+}
 
+impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn new() -> Self {
         ProveExpression::Y(BTreeMap::from_iter(vec![(0, F::zero())].into_iter()))
     }

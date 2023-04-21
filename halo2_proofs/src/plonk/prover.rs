@@ -43,11 +43,18 @@ thread_local! {
     pub static GPU_GROUP_ID: std::cell::Cell<usize>  =  std::cell::Cell::new(0);
 }
 
-#[cfg(feature = "cuda")]
 lazy_static! {
     pub static ref N_GPU: usize = usize::from_str_radix(
-        &std::env::var("HALO2_PROOFS_N_GPU")
-            .unwrap_or(ec_gpu_gen::rust_gpu_tools::Device::all().len().to_string()),
+        &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or({
+            #[cfg(feature = "cuda")]
+            {
+                ec_gpu_gen::rust_gpu_tools::Device::all().len().to_string()
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                "1".to_owned()
+            }
+        }),
         10
     )
     .unwrap();
