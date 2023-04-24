@@ -310,24 +310,46 @@ pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::{
-        fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
+        fft::FftKernel,
+        multiexp::SingleMultiexpKernel,
+        rust_gpu_tools::{program_closures, Device},
+        threadpool::Worker,
+        EcResult,
     };
     use group::Curve;
     use pairing::bn256::Fr;
 
-    //let timer = start_timer!(|| "to repr");
     let mut _coeffs = vec![C::Scalar::zero().to_repr(); coeffs.len()];
-    parallelize(&mut _coeffs[..], |c, start| {
-        for (i, c) in c.iter_mut().enumerate() {
-            *c = coeffs[i + start].to_repr();
-        }
+    let closures = program_closures!(|program, input: &[C::Scalar]| -> EcResult<Vec<_>> {
+        let local_work_size = 1;
+        let global_work_size = input.len();
+
+        let buffer = program.create_buffer_from_slice(input)?;
+        let kernel_name = format!("{}_batch_unmont", "Bn256_Fr");
+        let kernel = program.create_kernel(
+            &kernel_name,
+            global_work_size as usize,
+            local_work_size as usize,
+        )?;
+        kernel.arg(&buffer).run()?;
+        let mut result = vec![C::Scalar::default(); input.len()];
+
+        //let timer = start_timer!(|| "to repr copy");
+        program.read_into_buffer(&buffer, &mut result)?;
+        //end_timer!(timer);
+        Ok(result)
     });
-    //end_timer!(timer);
-    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
-    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
     let device = Device::all()[0];
     let programs = ec_gpu_gen::program!(device).unwrap();
+
+    //let timer = start_timer!(|| "to repr");
+    let _coeffs = programs.run(closures, &coeffs).unwrap();
+    //end_timer!(timer);
+
+    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
+    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+
     let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
         .expect("Cannot initialize kernel!");
 

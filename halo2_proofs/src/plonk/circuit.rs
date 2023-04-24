@@ -1280,8 +1280,8 @@ impl<F: Field> ConstraintSystem<F> {
         );
 
         println!("add constraints {}:", name);
-        for (i, e) in polys.iter().enumerate(){
-            println!("constraints degree {}:", e.degree());
+        for (i, e) in polys.iter().enumerate() {
+            println!("constraints {} degree {}:", i, e.degree());
         }
 
         self.gates.push(Gate {
@@ -1483,27 +1483,36 @@ impl<F: Field> ConstraintSystem<F> {
         // accounted for.
         let mut degree = self.permutation.required_degree();
 
+        println!("permutation degree {}", degree);
+
+        let lookups_degree = self
+            .lookups
+            .iter()
+            .map(|l| {
+                println!("lookup  {} degree {}", l.name, l.required_degree());
+                l.required_degree()
+            })
+            .max()
+            .unwrap_or(1);
+
+        println!("lookup degree {}", lookups_degree);
+
         // The lookup argument also serves alongside the gates and must be accounted
         // for.
-        degree = std::cmp::max(
-            degree,
-            self.lookups
-                .iter()
-                .map(|l| l.required_degree())
-                .max()
-                .unwrap_or(1),
-        );
+        degree = std::cmp::max(degree, lookups_degree);
+
+        let gates_degree = self
+            .gates
+            .iter()
+            .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.degree()))
+            .max()
+            .unwrap_or(0);
+
+        println!("gates degree {}", gates_degree);
 
         // Account for each gate to ensure our quotient polynomial is the
         // correct degree and that our extended domain is the right size.
-        degree = std::cmp::max(
-            degree,
-            self.gates
-                .iter()
-                .flat_map(|gate| gate.polynomials().iter().map(|poly| poly.degree()))
-                .max()
-                .unwrap_or(0),
-        );
+        degree = std::cmp::max(degree, gates_degree);
 
         std::cmp::max(degree, self.minimum_degree.unwrap_or(1))
     }
