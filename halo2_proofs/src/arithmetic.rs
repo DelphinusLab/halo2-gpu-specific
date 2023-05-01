@@ -1,16 +1,17 @@
 //! This module provides common utilities, traits and structures for group,
 //! field and polynomial arithmetic.
 
-use std::{ops::Mul, sync::Arc};
+use std::ops::Mul;
+use std::sync::Arc;
 
 use super::multicore;
-use ark_std::{end_timer, start_timer};
+use ark_std::end_timer;
+use ark_std::start_timer;
 pub use ff::Field;
-use group::{
-    cofactor::CofactorCurveAffine,
-    ff::{BatchInvert, PrimeField},
-    Group as _,
-};
+use group::cofactor::CofactorCurveAffine;
+use group::ff::BatchInvert;
+use group::ff::PrimeField;
+use group::Group as _;
 pub use pairing::arithmetic::*;
 use pairing::bn256::G1Affine;
 use rayon::prelude::*;
@@ -131,9 +132,10 @@ pub fn small_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::C
 
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    use ec_gpu_gen::{
-        fft::FftKernel, multiexp::MultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
-    };
+    use ec_gpu_gen::fft::FftKernel;
+    use ec_gpu_gen::multiexp::MultiexpKernel;
+    use ec_gpu_gen::rust_gpu_tools::Device;
+    use ec_gpu_gen::threadpool::Worker;
     use group::Curve;
     use pairing::bn256::Fr;
 
@@ -149,10 +151,8 @@ pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C
         MultiexpKernel::<G1Affine>::create(programs, &devices).expect("Cannot initialize kernel!");
     let pool = Worker::new();
 
-    let _coeffs = [Arc::new(
-        coeffs.iter().map(|x| x.to_repr()).collect::<Vec<_>>(),
-    )];
-    let _coeffs: &Arc<Vec<[u8; 32]>> = unsafe { std::mem::transmute(&_coeffs) };
+    let _coeffs = [Arc::new(vec![coeffs])];
+    let _coeffs: &Arc<Vec<Fr>> = unsafe { std::mem::transmute(&_coeffs) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
     let bases = Arc::new(Vec::from(bases));
 
@@ -164,13 +164,12 @@ pub fn gpu_multiexp_multikernel<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C
 
 #[cfg(feature = "cuda")]
 pub fn gpu_sort<F: FieldExt>(input: &mut Vec<F>, log_n: u32) {
-    use ec_gpu_gen::{
-        fft::FftKernel,
-        multiexp::SingleMultiexpKernel,
-        rust_gpu_tools::{program_closures, Device},
-        threadpool::Worker,
-        EcResult,
-    };
+    use ec_gpu_gen::fft::FftKernel;
+    use ec_gpu_gen::multiexp::SingleMultiexpKernel;
+    use ec_gpu_gen::rust_gpu_tools::program_closures;
+    use ec_gpu_gen::rust_gpu_tools::Device;
+    use ec_gpu_gen::threadpool::Worker;
+    use ec_gpu_gen::EcResult;
     use group::Curve;
     use pairing::bn256::Fr;
 
@@ -217,13 +216,12 @@ pub fn gpu_sort<F: FieldExt>(input: &mut Vec<F>, log_n: u32) {
 
 #[cfg(feature = "cuda")]
 pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
-    use ec_gpu_gen::{
-        fft::FftKernel,
-        multiexp::SingleMultiexpKernel,
-        rust_gpu_tools::{program_closures, Device},
-        threadpool::Worker,
-        EcResult,
-    };
+    use ec_gpu_gen::fft::FftKernel;
+    use ec_gpu_gen::multiexp::SingleMultiexpKernel;
+    use ec_gpu_gen::rust_gpu_tools::program_closures;
+    use ec_gpu_gen::rust_gpu_tools::Device;
+    use ec_gpu_gen::threadpool::Worker;
+    use ec_gpu_gen::EcResult;
     use group::Curve;
     use pairing::bn256::Fr;
 
@@ -263,13 +261,12 @@ pub fn gpu_unmont<F: FieldExt>(input: &mut [F]) {
 
 #[cfg(feature = "cuda")]
 pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
-    use ec_gpu_gen::{
-        fft::FftKernel,
-        multiexp::SingleMultiexpKernel,
-        rust_gpu_tools::{program_closures, Device},
-        threadpool::Worker,
-        EcResult,
-    };
+    use ec_gpu_gen::fft::FftKernel;
+    use ec_gpu_gen::multiexp::SingleMultiexpKernel;
+    use ec_gpu_gen::rust_gpu_tools::program_closures;
+    use ec_gpu_gen::rust_gpu_tools::Device;
+    use ec_gpu_gen::threadpool::Worker;
+    use ec_gpu_gen::EcResult;
     use group::Curve;
     use pairing::bn256::Fr;
 
@@ -319,15 +316,7 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
     use group::Curve;
     use pairing::bn256::Fr;
 
-    //let timer = start_timer!(|| "to repr");
-    let mut _coeffs = vec![C::Scalar::zero().to_repr(); coeffs.len()];
-    parallelize(&mut _coeffs[..], |c, start| {
-        for (i, c) in c.iter_mut().enumerate() {
-            *c = coeffs[i + start].to_repr();
-        }
-    });
-    //end_timer!(timer);
-    let _coeffs: &[[u8; 32]] = unsafe { std::mem::transmute(&_coeffs[..coeffs.len()]) };
+    let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
     let devices = Device::all();
@@ -414,12 +403,10 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 
 #[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    use crate::plonk::{GPU_GROUP_ID, N_GPU};
-    use ec_gpu_gen::{
-        fft::{FftKernel, SingleFftKernel},
-        rust_gpu_tools::Device,
-    };
+    use ec_gpu_gen::fft::{FftKernel, SingleFftKernel};
+    use ec_gpu_gen::rust_gpu_tools::Device;
     use pairing::bn256::Fr;
+    use crate::plonk::{GPU_GROUP_ID, N_GPU};
 
     let gpu_id = GPU_GROUP_ID.get() % *N_GPU;
     let devices = Device::all();
