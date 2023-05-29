@@ -152,22 +152,23 @@ impl<C: CurveAffine> Permuted<C> {
     /// grand product polynomial over the lookup. The grand product polynomial
     /// is used to populate the Product<C> struct. The Product<C> struct is
     /// added to the Lookup and finally returned by the method.
-    pub(in crate::plonk) fn commit_product<R: RngCore>(
+    pub(in crate::plonk) fn commit_product(
         self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
-        mut rng: R,
+        _gpu_idx: usize,
     ) -> Result<
         (
             Polynomial<C::Scalar, Coeff>,
             Polynomial<C::Scalar, Coeff>,
-            Polynomial<C::Scalar, LagrangeCoeff>,
+            Vec<C::Scalar>,
         ),
         Error,
     > {
         let blinding_factors = pk.vk.cs.blinding_factors();
+
         // Goal is to compute the products of fractions
         //
         // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
@@ -180,32 +181,120 @@ impl<C: CurveAffine> Permuted<C> {
         // s'(X) is the compression of the permuted table expressions,
         // and i is the ith row of the expression.
         let mut lookup_product = vec![C::Scalar::zero(); params.n as usize];
-        // Denominator uses the permuted input expression and permuted table expression
-        parallelize(&mut lookup_product, |lookup_product, start| {
-            for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
-                .iter_mut()
-                .zip(self.permuted_input_expression[start..].iter())
-                .zip(self.permuted_table_expression[start..].iter())
-            {
-                *lookup_product = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
-            }
-        });
 
-        // Batch invert to obtain the denominators for the lookup product
-        // polynomials
-        batch_invert(&mut lookup_product);
+        #[cfg(not(feature = "cuda"))]
+        {
+            // Denominator uses the permuted input expression and permuted table expression
+            parallelize(&mut lookup_product, |lookup_product, start| {
+                for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
+                    .iter_mut()
+                    .zip(self.permuted_input_expression[start..].iter())
+                    .zip(self.permuted_table_expression[start..].iter())
+                {
+                    *lookup_product =
+                        (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
+                }
+            });
 
-        // Finish the computation of the entire fraction by computing the numerators
-        // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
-        // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        parallelize(&mut lookup_product, |product, start| {
-            for (i, product) in product.iter_mut().enumerate() {
-                let i = i + start;
+            // Batch invert to obtain the denominators for the lookup product
+            // polynomials
+            batch_invert(&mut lookup_product);
 
-                *product *= &(self.compressed_input_expression[i] + &*beta);
-                *product *= &(self.compressed_table_expression[i] + &*gamma);
-            }
-        });
+            // Finish the computation of the entire fraction by computing the numerators
+            // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
+            // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
+            parallelize(&mut lookup_product, |product, start| {
+                for (i, product) in product.iter_mut().enumerate() {
+                    let i = i + start;
+
+                    *product *= &(self.compressed_input_expression[i] + &*beta);
+                    *product *= &(self.compressed_table_expression[i] + &*gamma);
+                }
+            });
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            use ec_gpu_gen::fft::FftKernel;
+            use ec_gpu_gen::rust_gpu_tools::program_closures;
+            use ec_gpu_gen::rust_gpu_tools::Device;
+            use ec_gpu_gen::threadpool::Worker;
+            use ec_gpu_gen::EcResult;
+            use group::Curve;
+            use pairing::bn256::Fr;
+
+            let device = Device::all()[0];
+            let program = ec_gpu_gen::program!(device).expect("Cannot create programs!");
+            let kern = FftKernel::<Fr>::create(vec![program]).expect("Cannot initialize kernel!");
+
+            let compute_units = device.compute_units() as usize;
+            let local_work_size = 128usize;
+            let work_units = (compute_units * local_work_size * 2) as usize;
+            let len = self.permuted_input_expression.len();
+            let slot_len = ((len + work_units - 1) / work_units) as usize;
+
+            let closures = program_closures!(|program,
+                                              input: (&[Fr], &[Fr], &[Fr], &[Fr], &mut [Fr])|
+             -> EcResult<()> {
+                let permuted_input = program.create_buffer_from_slice(input.0)?;
+                let permuted_table = program.create_buffer_from_slice(input.1)?;
+                let compressed_input = program.create_buffer_from_slice(input.2)?;
+                let compressed_table = program.create_buffer_from_slice(input.3)?;
+                let beta_gamma = program.create_buffer_from_slice(&vec![*beta, *gamma])?;
+
+                let global_work_size = work_units / local_work_size;
+
+                let kernel_name = format!("{}_calc_lookup_z", "Bn256_Fr");
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(&permuted_input)
+                    .arg(&permuted_table)
+                    .arg(&compressed_input)
+                    .arg(&compressed_table)
+                    .arg(&beta_gamma)
+                    .arg(&(len as u32))
+                    .arg(&(slot_len as u32))
+                    .run()?;
+
+                let mut lookup_product_to_inv = vec![Fr::one(); params.n as usize];
+                let mut lookup_product_to_inv_packed = vec![Fr::zero(); work_units];
+                program.read_into_buffer(&permuted_input, input.4)?;
+                program.read_into_buffer(&permuted_table, &mut lookup_product_to_inv)?;
+
+                for i in 0..work_units {
+                    lookup_product_to_inv_packed[i] = lookup_product_to_inv[i * slot_len];
+                }
+
+                lookup_product_to_inv_packed.iter_mut().batch_invert();
+
+                for (i, lookup_product_to_inv) in
+                    lookup_product_to_inv_packed.into_iter().enumerate()
+                {
+                    for j in i * slot_len..((i + 1) * slot_len).min(len) {
+                        input.4[j] *= lookup_product_to_inv;
+                    }
+                }
+
+                Ok(())
+            });
+
+            kern.kernels[_gpu_idx]
+                .program
+                .run(closures, unsafe {
+                    (
+                        std::mem::transmute::<_, &[Fr]>(&self.permuted_input_expression[..]),
+                        std::mem::transmute::<_, &[Fr]>(&self.permuted_table_expression[..]),
+                        std::mem::transmute::<_, &[Fr]>(&self.compressed_input_expression[..]),
+                        std::mem::transmute::<_, &[Fr]>(&self.compressed_table_expression[..]),
+                        std::mem::transmute::<_, &mut [Fr]>(&mut lookup_product[..]),
+                    )
+                })
+                .unwrap();
+        }
 
         // The product vector is a vector of products of fractions of the form
         //
@@ -219,7 +308,6 @@ impl<C: CurveAffine> Permuted<C> {
         // s_j(\omega^i) is the jth table expression in this lookup,
         // s'(\omega^i) is the permuted table expression,
         // and i is the ith row of the expression.
-
         // Compute the evaluations of the lookup product polynomial
         // over our domain, starting with z[0] = 1
         let z = iter::once(C::Scalar::one())
@@ -231,11 +319,7 @@ impl<C: CurveAffine> Permuted<C> {
             // Take all rows including the "last" row which should
             // be a boolean (and ideally 1, else soundness is broken)
             .take(params.n as usize - blinding_factors)
-            // Chain random blinding factors.
-            .chain((0..blinding_factors).map(|_| C::Scalar::random(&mut rng)))
             .collect::<Vec<_>>();
-        assert_eq!(z.len(), params.n as usize);
-        let z = pk.vk.domain.lagrange_from_vec(z);
 
         #[cfg(feature = "sanity-checks")]
         // This test works only with intermediate representations in this method.

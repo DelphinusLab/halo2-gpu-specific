@@ -470,14 +470,31 @@ pub fn create_proof<
     let timer = start_timer!(|| "lookups committed");
     let lookups: Vec<Vec<_>> = lookups
         .into_iter()
-        .map(|lookups| -> Result<Vec<_>, _> {
+        .map(|lookups|
+            // Construct and commit to products for each lookup
+            lookups
+                .into_par_iter()
+                .enumerate()
+                .map(|(idx, lookup)|
+                    lookup.commit_product(pk, params, beta, gamma, idx % *N_GPU))
+                .collect::<Result<Vec<_>, _>>())
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let lookups: Vec<Vec<_>> = lookups
+        .into_iter()
+        .map(|lookups|
             // Construct and commit to products for each lookup
             lookups
                 .into_iter()
-                .map(|lookup| lookup.commit_product(pk, params, beta, gamma, &mut rng))
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+                .map(|(p1, p2, mut z)|
+                    {
+                        for _ in 0..pk.vk.cs.blinding_factors() {
+                            z.push(C::Scalar::random(&mut rng))
+                        }
+                        (p1, p2, pk.vk.domain.lagrange_from_vec(z))
+                    })
+                .collect::<Vec<_>>())
+        .collect::<Vec<Vec<_>>>();
 
     let lookups = {
         let timer = start_timer!(|| "lookups msm");
