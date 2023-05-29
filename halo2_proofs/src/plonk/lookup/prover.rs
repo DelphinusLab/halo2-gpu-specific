@@ -164,7 +164,14 @@ impl<C: CurveAffine> Permuted<C> {
         gamma: ChallengeGamma<C>,
         transcript: &mut T,
         mut rng: R,
-    ) -> Result<Committed<C>, Error> {
+    ) -> Result<
+        (
+            Polynomial<C::Scalar, Coeff>,
+            Polynomial<C::Scalar, Coeff>,
+            Polynomial<C::Scalar, LagrangeCoeff>,
+        ),
+        Error,
+    > {
         let blinding_factors = pk.vk.cs.blinding_factors();
         // Goal is to compute the products of fractions
         //
@@ -272,18 +279,8 @@ impl<C: CurveAffine> Permuted<C> {
             // case this z[u] value will be zero. (bad!)
             assert_eq!(z[u], C::Scalar::one());
         }
-        let product_commitment = params.commit_lagrange(&z).to_affine();
 
-        // Hash product commitment
-        transcript.write_point(product_commitment)?;
-
-        let z = pk.vk.domain.lagrange_to_coeff(z);
-
-        Ok(Committed::<C> {
-            permuted_input_poly: self.permuted_input_poly,
-            permuted_table_poly: self.permuted_table_poly,
-            product_poly: z,
-        })
+        Ok((self.permuted_input_poly, self.permuted_table_poly, z))
     }
 }
 

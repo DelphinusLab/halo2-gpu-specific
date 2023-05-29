@@ -5,7 +5,7 @@ use crate::poly::Rotation;
 use crate::poly::{commitment::Params, Coeff, Polynomial};
 use crate::transcript::{EncodedChallenge, TranscriptWrite};
 
-use ark_std::{start_timer, end_timer};
+use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
 use rayon::iter::*;
@@ -37,7 +37,9 @@ where
     commitment_data
         .par_iter()
         .zip(ws.par_iter_mut())
-        .for_each(|(commitment_at_a_point, w)| {
+        .enumerate()
+        .for_each(|(idx, (commitment_at_a_point, w))| {
+            crate::plonk::GPU_GROUP_ID.set(idx);
             let mut poly_batch = zero();
             let mut eval_batch = C::Scalar::zero();
             let z = commitment_at_a_point.point;
