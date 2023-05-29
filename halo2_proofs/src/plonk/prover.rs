@@ -177,7 +177,7 @@ pub fn create_proof<
         .map(|(circuit, instances)| -> Result<AdviceSingle<C>, Error> {
             struct WitnessCollection<'a, F: Field> {
                 k: u32,
-                pub advice: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
+                pub advice: Vec<Polynomial<F, LagrangeCoeff>>,
                 instances: &'a [&'a [F]],
                 usable_rows: RangeTo<usize>,
                 _marker: std::marker::PhantomData<F>,
@@ -244,11 +244,18 @@ pub fn create_proof<
                         return Err(Error::not_enough_rows_available(self.k));
                     }
 
+                    let assigned: Assigned<F> = to()?.into();
+                    let v = if let Some(inv) = assigned.denominator() {
+                        assigned.numerator() * inv.invert().unwrap()
+                    } else {
+                        assigned.numerator()
+                    };
+
                     *self
                         .advice
                         .get_mut(column.index())
                         .and_then(|v| v.get_mut(row))
-                        .ok_or(Error::BoundsFailure)? = to()?.into();
+                        .ok_or(Error::BoundsFailure)? = v;
 
                     Ok(())
                 }
@@ -309,7 +316,7 @@ pub fn create_proof<
 
             let mut witness = WitnessCollection {
                 k: params.k,
-                advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+                advice: vec![domain.empty_lagrange(); meta.num_advice_columns],
                 instances,
                 // The prover will not be allowed to assign values to advice
                 // cells that exist within inactive rows, which include some
@@ -327,9 +334,7 @@ pub fn create_proof<
                 meta.constants.clone(),
             )?;
 
-            let timer = start_timer!(|| "batch_invert_assigned");
-            let mut advice = batch_invert_assigned(witness.advice);
-            end_timer!(timer);
+            let mut advice = witness.advice;
 
             let timer = start_timer!(|| "rng");
             // Add blinding factors to advice columns
