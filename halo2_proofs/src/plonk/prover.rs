@@ -470,7 +470,7 @@ pub fn create_proof<
             // Construct and commit to products for each lookup
             lookups
                 .into_iter()
-                .map(|lookup| lookup.commit_product(pk, params, beta, gamma, transcript, &mut rng))
+                .map(|lookup| lookup.commit_product(pk, params, beta, gamma, &mut rng))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;

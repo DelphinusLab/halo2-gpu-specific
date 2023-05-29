@@ -152,17 +152,12 @@ impl<C: CurveAffine> Permuted<C> {
     /// grand product polynomial over the lookup. The grand product polynomial
     /// is used to populate the Product<C> struct. The Product<C> struct is
     /// added to the Lookup and finally returned by the method.
-    pub(in crate::plonk) fn commit_product<
-        E: EncodedChallenge<C>,
-        R: RngCore,
-        T: TranscriptWrite<C, E>,
-    >(
+    pub(in crate::plonk) fn commit_product<R: RngCore>(
         self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
-        transcript: &mut T,
         mut rng: R,
     ) -> Result<
         (

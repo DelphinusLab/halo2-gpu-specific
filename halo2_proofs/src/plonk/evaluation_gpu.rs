@@ -23,6 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
+use std::rc::Rc;
 use std::{cmp, slice};
 use std::{
     collections::BTreeMap,
@@ -96,6 +97,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         beta: F,
         theta: F,
         gamma: F,
+        unit_cache: &mut Cache<Buffer<F>>,
     ) -> EcResult<(Buffer<F>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -103,11 +105,15 @@ impl<F: FieldExt> LookupProveExpression<F> {
 
         match self {
             LookupProveExpression::Expression(e) => {
-                e._eval_gpu_buffer(pk, program, advice, instance, y, &BTreeMap::new())
+                e._eval_gpu_buffer(pk, program, advice, instance, y, unit_cache)
             }
             LookupProveExpression::LcTheta(l, r) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let l = l._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                )?;
+                let r = r._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                )?;
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let theta = program.create_buffer_from_slice(&vec![theta])?;
                 let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
@@ -130,8 +136,12 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 Ok((res, 0))
             }
             LookupProveExpression::LcBeta(l, r) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let l = l._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                )?;
+                let r = r._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                )?;
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let beta = program.create_buffer_from_slice(&vec![beta])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
@@ -155,7 +165,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
             }
             LookupProveExpression::AddGamma(l) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
-                let l = l._eval_gpu(pk, program, advice, instance, y, beta, theta, gamma)?;
+                let l = l._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                )?;
                 let gamma = program.create_buffer_from_slice(&vec![gamma])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
@@ -184,6 +196,49 @@ use ec_gpu_gen::{
     rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer, EcResult,
 };
 
+pub(crate) struct Cache<T> {
+    data: BTreeMap<usize, (Rc<T>, usize)>,
+    ts: usize,
+    bound: usize,
+}
+
+impl<T> Cache<T> {
+    pub fn new(bound: usize) -> Cache<T> {
+        Self {
+            data: BTreeMap::new(),
+            ts: 0,
+            bound,
+        }
+    }
+
+    pub fn get(&mut self, key: usize) -> Option<Rc<T>> {
+        self.ts += 1;
+        if let Some(x) = self.data.get_mut(&key) {
+            x.1 = self.ts;
+            Some(x.0.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn update(&mut self, key: usize, value: T) {
+        self.ts += 1;
+        if self.data.len() < self.bound {
+            self.data.insert(key, (Rc::new(value), self.ts));
+        } else {
+            let min_ts = self
+                .data
+                .iter()
+                .reduce(|a, b| if a.1 .1 > b.1 .1 { b } else { a })
+                .unwrap()
+                .0
+                .clone();
+            self.data.remove(&min_ts);
+            self.data.insert(key, (Rc::new(value), self.ts));
+        }
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
@@ -194,11 +249,6 @@ impl<F: FieldExt> ProveExpression<F> {
         instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        let origin_size = 1u32 << pk.vk.domain.k();
-        let size = 1u32 << pk.vk.domain.extended_k();
-        let local_work_size = 128;
-        let global_work_size = size / local_work_size;
-
         let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
                                                                       input: &mut [F]|
          -> ec_gpu_gen::EcResult<
@@ -206,49 +256,52 @@ impl<F: FieldExt> ProveExpression<F> {
         > {
             let mut ys = vec![F::one(), y];
 
-            let mut unit_cache = BTreeMap::<usize, Buffer<F>>::new();
+            //let mut unit_cache = BTreeMap::<usize, Buffer<F>>::new();
             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
             let cache_size =
-                u32::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
-            for i in 0..usize::min(cache_size as usize, pk.ev.unit_ref_count.len()) {
-                let group = pk.ev.unit_ref_count[i].0;
-                let t = group & 0x3;
-                let column_index = group >> 2;
-                let origin_values = if t == 0 {
-                    pk.fixed_polys[column_index].clone()
-                } else if t == 1 {
-                    advice[column_index].clone()
-                } else if t == 2 {
-                    instance[column_index].clone()
-                } else {
-                    unreachable!()
-                };
+                usize::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+            let mut unit_cache = Cache::new(cache_size);
+            /*
+                for i in 0..usize::min(cache_size as usize, pk.ev.unit_ref_count.len()) {
+                    let group = pk.ev.unit_ref_count[i].0;
+                    let t = group & 0x3;
+                    let column_index = group >> 2;
+                    let origin_values = if t == 0 {
+                        pk.fixed_polys[column_index].clone()
+                    } else if t == 1 {
+                        advice[column_index].clone()
+                    } else if t == 2 {
+                        instance[column_index].clone()
+                    } else {
+                        unreachable!()
+                    };
 
-                //let timer = start_timer!(|| "gpu eval unit");
-                let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    //let timer = start_timer!(|| "gpu eval unit");
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
 
-                //let timer = start_timer!(|| "coeff_to_extended_without_fft");
-                let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
-                //end_timer!(timer);
+                    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
+                    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
+                    //end_timer!(timer);
 
-                let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+                    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
 
-                let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                let kernel = program.create_kernel(
-                    &kernel_name,
-                    global_work_size as usize,
-                    local_work_size as usize,
-                )?;
-                kernel
-                    .arg(&origin_values)
-                    .arg(&values)
-                    .arg(&origin_size)
-                    .run()?;
-                let values = Self::do_fft(pk, program, values)?;
-                unit_cache.insert(group, values);
-            }
-
-            let values_buf = self._eval_gpu(pk, program, advice, instance, &mut ys, &unit_cache)?;
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&origin_values)
+                        .arg(&values)
+                        .arg(&origin_size)
+                        .run()?;
+                    let values = Self::do_fft(pk, program, values)?;
+                    unit_cache.insert(group, values);
+                }
+            */
+            let values_buf =
+                self._eval_gpu(pk, program, advice, instance, &mut ys, &mut unit_cache)?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
 
             Ok(())
@@ -279,7 +332,7 @@ impl<F: FieldExt> ProveExpression<F> {
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
-        unit_cache: &BTreeMap<usize, Buffer<F>>,
+        unit_cache: &mut Cache<Buffer<F>>,
     ) -> EcResult<(Buffer<F>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -330,7 +383,7 @@ impl<F: FieldExt> ProveExpression<F> {
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
-        unit_cache: &BTreeMap<usize, Buffer<F>>,
+        unit_cache: &mut Cache<Buffer<F>>,
     ) -> EcResult<(Option<(Buffer<F>, i32)>, Option<F>)> {
         let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
@@ -452,8 +505,8 @@ impl<F: FieldExt> ProveExpression<F> {
                 Ok((None, Some(c)))
             }
             ProveExpression::Unit(u) => {
-                let (values, rotation) = if let Some(cached_values) = unit_cache.get(&u.get_group())
-                {
+                let group = u.get_group();
+                let (values, rotation) = if let Some(cached_values) = unit_cache.get(group) {
                     let values = unsafe { program.create_buffer::<F>(size as usize)? };
                     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
                     let kernel = program.create_kernel(
@@ -461,7 +514,11 @@ impl<F: FieldExt> ProveExpression<F> {
                         global_work_size as usize,
                         local_work_size as usize,
                     )?;
-                    kernel.arg(cached_values).arg(&values).arg(&size).run()?;
+                    kernel
+                        .arg(cached_values.as_ref())
+                        .arg(&values)
+                        .arg(&size)
+                        .run()?;
                     match u {
                         ProveExpressionUnit::Fixed { rotation, .. }
                         | ProveExpressionUnit::Advice { rotation, .. }
@@ -503,7 +560,19 @@ impl<F: FieldExt> ProveExpression<F> {
                         .arg(&values)
                         .arg(&origin_size)
                         .run()?;
-                    let res = (Self::do_fft(pk, program, values)?, *rotation);
+                    let buffer = Self::do_fft(pk, program, values)?;
+                    let buffer_cached = unsafe { program.create_buffer::<F>(size as usize)? };
+
+                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel.arg(&buffer).arg(&buffer_cached).arg(&size).run()?;
+
+                    unit_cache.update(group, buffer_cached);
+                    let res = (buffer, *rotation);
                     //end_timer!(timer);
                     res
                 };

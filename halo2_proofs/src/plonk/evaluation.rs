@@ -1023,6 +1023,12 @@ impl<C: CurveAffine> Evaluator<C> {
                         for _ in 1..LOG2_MAX_ELEMENTS {
                             omegas.push(omegas.last().unwrap().square());
                         }
+
+                        let cache_size =
+                            std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
+                        let cache_size = usize::from_str_radix(&cache_size, 10)
+                            .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+                        let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
                         for (lookup_idx, lookup) in lookups.iter().enumerate() {
                             let mut ys = vec![C::ScalarExt::one(), y];
                             let table_buf = pk.ev.gpu_lookup_expr
@@ -1036,6 +1042,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     beta,
                                     theta,
                                     gamma,
+                                    &mut unit_cache,
                                 )
                                 .unwrap()
                                 .0;
