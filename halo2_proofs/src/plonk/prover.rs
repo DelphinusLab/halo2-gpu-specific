@@ -465,10 +465,9 @@ pub fn create_proof<
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-
     end_timer!(timer);
-    let timer = start_timer!(|| "lookups committed");
 
+    let timer = start_timer!(|| "lookups committed");
     let lookups: Vec<Vec<_>> = lookups
         .into_iter()
         .map(|lookups| -> Result<Vec<_>, _> {
@@ -480,48 +479,54 @@ pub fn create_proof<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let lookups_z_commitments = lookups
-        .iter()
-        .map(|lookups| {
-            lookups
-                .into_par_iter()
-                .enumerate()
-                .map(|(idx, l)| {
-                    GPU_GROUP_ID.set(idx);
-                    params.commit_lagrange(&l.2).to_affine()
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
+    let lookups = {
+        let timer = start_timer!(|| "lookups msm");
+        let lookups_z_commitments = lookups
+            .iter()
+            .map(|lookups| {
+                lookups
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(idx, l)| {
+                        GPU_GROUP_ID.set(idx);
+                        params.commit_lagrange(&l.2).to_affine()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
 
-    lookups_z_commitments
-        .iter()
-        .for_each(|lookups_z_commitments| {
-            lookups_z_commitments
-                .iter()
-                .for_each(|lookups_z_commitment| {
-                    transcript.write_point(*lookups_z_commitment).unwrap()
-                })
-        });
+        lookups_z_commitments
+            .iter()
+            .for_each(|lookups_z_commitments| {
+                lookups_z_commitments
+                    .iter()
+                    .for_each(|lookups_z_commitment| {
+                        transcript.write_point(*lookups_z_commitment).unwrap()
+                    })
+            });
 
-    let lookups = lookups
-        .into_iter()
-        .map(|lookups| {
-            lookups
-                .into_par_iter()
-                .enumerate()
-                .map(|(idx, l)| {
-                    GPU_GROUP_ID.set(idx);
-                    lookup::prover::Committed {
-                        permuted_input_poly: l.0,
-                        permuted_table_poly: l.1,
-                        product_poly: pk.vk.domain.lagrange_to_coeff(l.2),
-                    }
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-
+        let timer = start_timer!(|| "lookups fft");
+        let lookups = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(idx, l)| {
+                        GPU_GROUP_ID.set(idx);
+                        lookup::prover::Committed {
+                            permuted_input_poly: l.0,
+                            permuted_table_poly: l.1,
+                            product_poly: pk.vk.domain.lagrange_to_coeff(l.2),
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+        lookups
+    };
     end_timer!(timer);
 
     let timer = start_timer!(|| "vanishing commit");
