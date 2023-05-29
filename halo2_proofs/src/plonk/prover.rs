@@ -327,28 +327,42 @@ pub fn create_proof<
                 meta.constants.clone(),
             )?;
 
+            let timer = start_timer!(|| "batch_invert_assigned");
             let mut advice = batch_invert_assigned(witness.advice);
+            end_timer!(timer);
 
+            let timer = start_timer!(|| "rng");
             // Add blinding factors to advice columns
             for advice in &mut advice {
                 for cell in &mut advice[unusable_rows_start..] {
                     *cell = C::Scalar::random(&mut rng);
                 }
             }
+            end_timer!(timer);
 
+            let timer = start_timer!(|| "commit_lagrange");
             let advice_commitments_projective: Vec<_> = advice
-                .iter()
-                .map(|poly| params.commit_lagrange(poly))
+                .par_iter()
+                .enumerate()
+                .map(|(idx, poly)| {
+                    GPU_GROUP_ID.set(idx);
+                    params.commit_lagrange(poly)
+                })
                 .collect();
+            end_timer!(timer);
+
+            let timer = start_timer!(|| "advice_commitments_projective");
             let mut advice_commitments = vec![C::identity(); advice_commitments_projective.len()];
             C::Curve::batch_normalize(&advice_commitments_projective, &mut advice_commitments);
             let advice_commitments = advice_commitments;
             drop(advice_commitments_projective);
+            end_timer!(timer);
 
             for commitment in &advice_commitments {
                 transcript.write_point(*commitment)?;
             }
 
+            let timer = start_timer!(|| "lagrange_to_coeff_st");
             let advice_polys: Vec<_> = advice
                 .clone()
                 .into_par_iter()
@@ -358,6 +372,7 @@ pub fn create_proof<
                     domain.lagrange_to_coeff_st(poly)
                 })
                 .collect();
+            end_timer!(timer);
 
             #[cfg(not(feature = "cuda"))]
             let advice_cosets: Vec<_> = advice_polys

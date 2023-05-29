@@ -15,6 +15,7 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use ark_std::{end_timer, start_timer};
+use ff::PrimeField;
 use group::{
     ff::{BatchInvert, Field},
     Curve,
@@ -363,6 +364,42 @@ impl<C: CurveAffine> Evaluated<C> {
 
 type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCoeff>);
 
+fn scalar_to_usize(s: &impl FieldExt) -> usize {
+    let bytes = s.to_repr();
+    usize::from_le_bytes(bytes.as_ref()[0..8].try_into().unwrap())
+}
+
+fn sort<F: FieldExt>(value: &mut Vec<F>, k: u32) {
+    let max = value.iter().reduce(|a, b| a.max(b)).unwrap();
+    let expected_max = F::from(1u64 << 25);
+    if max < &expected_max {
+        let mut slot = vec![0; scalar_to_usize(max) + 1];
+        for v in value.iter() {
+            slot[scalar_to_usize(v)] += 1;
+        }
+        let mut index = 0;
+        for (v, c) in slot.into_iter().enumerate() {
+            for _ in 0..c {
+                value[index] = F::from(v as u64);
+                index += 1;
+            }
+        }
+    } else {
+        #[cfg(feature = "cuda")]
+        {
+            let len = value.len();
+            value.resize(1 << k, -F::one());
+            crate::arithmetic::gpu_sort(value, k);
+            value.truncate(len);
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        value.sort_unstable();
+
+        drop(k)
+    }
+}
+
 /// Given a vector of input values A and a vector of table values S,
 /// this method permutes A and S to produce A' and S', such that:
 /// - like values in A' are vertically adjacent to each other; and
@@ -383,29 +420,11 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     let mut permuted_input_expression: Vec<C::Scalar> = input_expression.to_vec();
     permuted_input_expression.truncate(usable_rows);
 
-    // Sort input lookup expression values
-    #[cfg(feature = "cuda")]
-    {
-        permuted_input_expression.resize(1 << params.k, -C::Scalar::one());
-        crate::arithmetic::gpu_sort(&mut permuted_input_expression, params.k);
-        permuted_input_expression.truncate(usable_rows);
-    }
-
-    #[cfg(not(feature = "cuda"))]
-    permuted_input_expression.par_sort_unstable();
-
     let mut sorted_table_coeffs = table_expression.to_vec();
     sorted_table_coeffs.truncate(usable_rows);
 
-    #[cfg(feature = "cuda")]
-    {
-        sorted_table_coeffs.resize(1 << params.k, -C::Scalar::one());
-        crate::arithmetic::gpu_sort(&mut sorted_table_coeffs, params.k);
-        sorted_table_coeffs.truncate(usable_rows);
-    }
-
-    #[cfg(not(feature = "cuda"))]
-    sorted_table_coeffs.par_sort_unstable();
+    sort(&mut permuted_input_expression, params.k);
+    sort(&mut sorted_table_coeffs, params.k);
 
     let mut permuted_table_coeffs = vec![None; usable_rows];
 
