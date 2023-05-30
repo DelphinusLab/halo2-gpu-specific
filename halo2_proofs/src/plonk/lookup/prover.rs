@@ -223,7 +223,7 @@ impl<C: CurveAffine> Permuted<C> {
             use group::Curve;
             use pairing::bn256::Fr;
 
-            let device = Device::all()[0];
+            let device = Device::all()[_gpu_idx];
             let program = ec_gpu_gen::program!(device).expect("Cannot create programs!");
             let kern = FftKernel::<Fr>::create(vec![program]).expect("Cannot initialize kernel!");
 
@@ -265,7 +265,7 @@ impl<C: CurveAffine> Permuted<C> {
                 program.read_into_buffer(&permuted_input, input.4)?;
                 program.read_into_buffer(&permuted_table, &mut lookup_product_to_inv)?;
 
-                for i in 0..work_units {
+                for i in 0..work_units.min(len / slot_len) {
                     lookup_product_to_inv_packed[i] = lookup_product_to_inv[i * slot_len];
                 }
 
@@ -282,7 +282,7 @@ impl<C: CurveAffine> Permuted<C> {
                 Ok(())
             });
 
-            kern.kernels[_gpu_idx]
+            kern.kernels[0]
                 .program
                 .run(closures, unsafe {
                     (
