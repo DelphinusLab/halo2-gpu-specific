@@ -59,7 +59,7 @@ tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 bumpalo = ">=3,<3.9.0"
 
 [build-dependencies]
-ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch="halo2-opt", optional = true }
+ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch="halo2-opt-v2", optional = true }
 pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256"}
 
 [dev-dependencies]
