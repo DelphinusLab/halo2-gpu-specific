@@ -32,7 +32,7 @@ harness = false
 core_affinity = "0.5.10"
 ark-std = { version = "0.3.0", features = ["print-trace"] }
 backtrace = { version = "0.3", optional = true }
-ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch="halo2-opt", optional = true }
+ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch = "halo2-opt-v2", optional = true }
 pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256"}
 rayon = "1.5.1"
 ff = "0.12"
@@ -59,7 +59,7 @@ tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 bumpalo = ">=3,<3.9.0"
 
 [build-dependencies]
-ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch="halo2-opt", optional = true }
+ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch = "halo2-opt-v2", optional = true }
 pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256"}
 
 [dev-dependencies]
