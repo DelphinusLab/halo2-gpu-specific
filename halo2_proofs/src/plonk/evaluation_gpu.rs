@@ -398,29 +398,52 @@ impl<F: FieldExt> ProveExpression<F> {
                 //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                 let res = match (l.0, r.0) {
                     (Some(l), Some(r)) => {
-                        //let timer1 = start_timer!(|| "create buffer");
-                        let res = unsafe { program.create_buffer::<F>(size as usize)? };
-                        //end_timer!(timer1);
                         let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
                         let kernel = program.create_kernel(
                             &kernel_name,
                             global_work_size as usize,
                             local_work_size as usize,
                         )?;
-                        kernel
-                            .arg(&res)
-                            .arg(&l.0)
-                            .arg(&r.0)
-                            .arg(&l.1)
-                            .arg(&r.1)
-                            .arg(&size)
-                            .run()?;
+
+                        let res = if r.1 == 0 {
+                            kernel
+                                .arg(&r.0)
+                                .arg(&l.0)
+                                .arg(&r.0)
+                                .arg(&l.1)
+                                .arg(&r.1)
+                                .arg(&size)
+                                .run()?;
+                            r.0
+                        } else {
+                            if l.1 == 0 {
+                                kernel
+                                    .arg(&l.0)
+                                    .arg(&l.0)
+                                    .arg(&r.0)
+                                    .arg(&l.1)
+                                    .arg(&r.1)
+                                    .arg(&size)
+                                    .run()?;
+                                l.0
+                            } else {
+                                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                                kernel
+                                    .arg(&res)
+                                    .arg(&l.0)
+                                    .arg(&r.0)
+                                    .arg(&l.1)
+                                    .arg(&r.1)
+                                    .arg(&size)
+                                    .run()?;
+                                res
+                            }
+                        };
                         Ok((Some((res, 0)), None))
                     }
                     (None, None) => Ok((None, Some(l.1.unwrap() + r.1.unwrap()))),
                     (None, Some(b)) | (Some(b), None) => {
                         let c = l.1.or(r.1).unwrap();
-                        let res = unsafe { program.create_buffer::<F>(size as usize)? };
                         let c = program.create_buffer_from_slice(&vec![c])?;
                         let kernel_name = format!("{}_eval_sum_c", "Bn256_Fr");
                         let kernel = program.create_kernel(
@@ -428,13 +451,27 @@ impl<F: FieldExt> ProveExpression<F> {
                             global_work_size as usize,
                             local_work_size as usize,
                         )?;
-                        kernel
-                            .arg(&res)
-                            .arg(&b.0)
-                            .arg(&b.1)
-                            .arg(&c)
-                            .arg(&size)
-                            .run()?;
+                        let res = if b.1 == 0 {
+                            kernel
+                                .arg(&b.0)
+                                .arg(&b.0)
+                                .arg(&b.1)
+                                .arg(&c)
+                                .arg(&size)
+                                .run()?;
+                            b.0
+                        } else {
+                            let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                            kernel
+                                .arg(&res)
+                                .arg(&b.0)
+                                .arg(&b.1)
+                                .arg(&c)
+                                .arg(&size)
+                                .run()?;
+                            res
+                        };
+
                         Ok((Some((res, 0)), None))
                     }
                 };
@@ -449,21 +486,47 @@ impl<F: FieldExt> ProveExpression<F> {
                 //let timer = start_timer!(|| format!("gpu eval mul {}", size));
                 let res = match (l.0, r.0) {
                     (Some(l), Some(r)) => {
-                        let res = unsafe { program.create_buffer::<F>(size as usize)? };
                         let kernel_name = format!("{}_eval_mul", "Bn256_Fr");
                         let kernel = program.create_kernel(
                             &kernel_name,
                             global_work_size as usize,
                             local_work_size as usize,
                         )?;
-                        kernel
-                            .arg(&res)
-                            .arg(&l.0)
-                            .arg(&r.0)
-                            .arg(&l.1)
-                            .arg(&r.1)
-                            .arg(&size)
-                            .run()?;
+
+                        let res = if r.1 == 0 {
+                            kernel
+                                .arg(&r.0)
+                                .arg(&l.0)
+                                .arg(&r.0)
+                                .arg(&l.1)
+                                .arg(&r.1)
+                                .arg(&size)
+                                .run()?;
+                            r.0
+                        } else {
+                            if l.1 == 0 {
+                                kernel
+                                    .arg(&l.0)
+                                    .arg(&l.0)
+                                    .arg(&r.0)
+                                    .arg(&l.1)
+                                    .arg(&r.1)
+                                    .arg(&size)
+                                    .run()?;
+                                l.0
+                            } else {
+                                let res = unsafe { program.create_buffer::<F>(size as usize)? };
+                                kernel
+                                    .arg(&res)
+                                    .arg(&l.0)
+                                    .arg(&r.0)
+                                    .arg(&l.1)
+                                    .arg(&r.1)
+                                    .arg(&size)
+                                    .run()?;
+                                res
+                            }
+                        };
                         Ok((Some((res, 0)), None))
                     }
                     (None, None) => Ok((None, Some(l.1.unwrap() * r.1.unwrap()))),
@@ -590,7 +653,6 @@ impl<F: FieldExt> ProveExpression<F> {
                 let c = ys.iter().fold(F::zero(), |acc, (y_order, f)| {
                     acc + y[*y_order as usize] * f
                 });
-                let values = unsafe { program.create_buffer::<F>(size as usize)? };
                 let c = program.create_buffer_from_slice(&vec![c])?;
 
                 let kernel_name = format!("{}_eval_scale", "Bn256_Fr");
@@ -599,14 +661,26 @@ impl<F: FieldExt> ProveExpression<F> {
                     global_work_size as usize,
                     local_work_size as usize,
                 )?;
-                kernel
-                    .arg(&values)
-                    .arg(&l.0)
-                    .arg(&l.1)
-                    .arg(&size)
-                    .arg(&c)
-                    .run()?;
-
+                let values = if l.1 == 0 {
+                    kernel
+                        .arg(&l.0)
+                        .arg(&l.0)
+                        .arg(&l.1)
+                        .arg(&size)
+                        .arg(&c)
+                        .run()?;
+                    l.0
+                } else {
+                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    kernel
+                        .arg(&values)
+                        .arg(&l.0)
+                        .arg(&l.1)
+                        .arg(&size)
+                        .arg(&c)
+                        .run()?;
+                    values
+                };
                 Ok((Some((values, 0)), None))
             }
         }
