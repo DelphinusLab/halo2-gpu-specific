@@ -401,34 +401,40 @@ pub fn create_proof<
     end_timer!(timer);
     let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
     let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
-        instance
-            .iter()
-            .zip(advice.iter())
-            .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
-                // Construct and commit to permuted values for each lookup
-                pk.vk
-                    .cs
-                    .lookups
-                    .par_iter()
-                    .enumerate()
-                    .map(|(idx, lookup)| {
-                        GPU_GROUP_ID.set(idx);
-                        lookup
-                            .commit_permuted(
-                                pk,
-                                params,
-                                domain,
-                                theta,
-                                &advice.advice_values,
-                                &pk.fixed_values,
-                                &instance.instance_values,
-                                &mut OsRng,
-                            )
-                            .unwrap()
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .unwrap()
+            .install(|| {
+                instance
+                    .iter()
+                    .zip(advice.iter())
+                    .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
+                        // Construct and commit to permuted values for each lookup
+                        pk.vk
+                            .cs
+                            .lookups
+                            .par_iter()
+                            .enumerate()
+                            .map(|(idx, lookup)| {
+                                GPU_GROUP_ID.set(idx);
+                                lookup
+                                    .commit_permuted(
+                                        pk,
+                                        params,
+                                        domain,
+                                        theta,
+                                        &advice.advice_values,
+                                        &pk.fixed_values,
+                                        &instance.instance_values,
+                                        &mut OsRng,
+                                    )
+                                    .unwrap()
+                            })
+                            .unzip()
                     })
                     .unzip()
-            })
-            .unzip();
+            });
 
     lookups_commitments.iter().for_each(|x| {
         x.iter().for_each(|x| {
@@ -444,7 +450,7 @@ pub fn create_proof<
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
     end_timer!(timer);
-    let timer = start_timer!(|| "permutations comitted");
+    let timer = start_timer!(|| "permutations committed");
 
     // Commit to permutations.
     let permutations: Vec<permutation::prover::Committed<C>> = instance
