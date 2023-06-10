@@ -117,7 +117,13 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 let r = r._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
                 )?;
-                let res = Rc::new(unsafe { program.create_buffer::<F>(size as usize)? });
+                let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
+                    r.0.clone()
+                } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
+                    l.0.clone()
+                } else {
+                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                };
                 let theta = program.create_buffer_from_slice(&vec![theta])?;
                 let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
@@ -145,7 +151,13 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 let r = r._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
                 )?;
-                let res = Rc::new(unsafe { program.create_buffer::<F>(size as usize)? });
+                let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
+                    r.0.clone()
+                } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
+                    l.0.clone()
+                } else {
+                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                };
                 let beta = program.create_buffer_from_slice(&vec![beta])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
@@ -167,10 +179,14 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 Ok((res, 0))
             }
             LookupProveExpression::AddGamma(l) => {
-                let res = Rc::new(unsafe { program.create_buffer::<F>(size as usize)? });
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
                 )?;
+                let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
+                    l.0.clone()
+                } else {
+                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                };
                 let gamma = program.create_buffer_from_slice(&vec![gamma])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
