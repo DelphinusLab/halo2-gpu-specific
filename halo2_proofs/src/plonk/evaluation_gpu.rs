@@ -203,6 +203,8 @@ pub(crate) struct Cache<T> {
     data: BTreeMap<usize, (Rc<T>, usize)>,
     ts: usize,
     bound: usize,
+    hit: usize,
+    miss: usize,
 }
 
 impl<T> Cache<T> {
@@ -211,15 +213,19 @@ impl<T> Cache<T> {
             data: BTreeMap::new(),
             ts: 0,
             bound,
+            hit: 0,
+            miss: 0,
         }
     }
 
     pub fn get(&mut self, key: usize) -> Option<Rc<T>> {
         self.ts += 1;
         if let Some(x) = self.data.get_mut(&key) {
+            self.hit += 1;
             x.1 = self.ts;
             Some(x.0.clone())
         } else {
+            self.miss += 1;
             None
         }
     }
@@ -411,9 +417,9 @@ impl<F: FieldExt> ProveExpression<F> {
                             local_work_size as usize,
                         )?;
 
-                        let res = if r.1 == 0 {
+                        let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                             r.0.clone()
-                        } else if l.1 == 0 {
+                        } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                             l.0.clone()
                         } else {
                             Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
@@ -447,7 +453,7 @@ impl<F: FieldExt> ProveExpression<F> {
                             local_work_size as usize,
                         )?;
 
-                        let res = if b.1 == 0 {
+                        let res = if b.1 == 0 && Rc::strong_count(&b.0) == 1 {
                             b.0.clone()
                         } else {
                             Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
@@ -484,22 +490,12 @@ impl<F: FieldExt> ProveExpression<F> {
             ProveExpression::Unit(u) => {
                 let group = u.get_group();
                 let (values, rotation) = if let Some(cached_values) = unit_cache.get(group) {
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(cached_values.as_ref())
-                        .arg(&values)
-                        .arg(&size)
-                        .run()?;
                     match u {
                         ProveExpressionUnit::Fixed { rotation, .. }
                         | ProveExpressionUnit::Advice { rotation, .. }
-                        | ProveExpressionUnit::Instance { rotation, .. } => (values, *rotation),
+                        | ProveExpressionUnit::Instance { rotation, .. } => {
+                            (cached_values, *rotation)
+                        }
                     }
                 } else {
                     let (origin_values, rotation) = match u {
@@ -538,22 +534,12 @@ impl<F: FieldExt> ProveExpression<F> {
                         .arg(&origin_size)
                         .run()?;
                     let buffer = Self::do_fft(pk, program, values)?;
-                    let buffer_cached = unsafe { program.create_buffer::<F>(size as usize)? };
-
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel.arg(&buffer).arg(&buffer_cached).arg(&size).run()?;
-
-                    unit_cache.update(group, buffer_cached);
-                    let res = (buffer, *rotation);
+                    unit_cache.update(group, buffer);
+                    let res = (unit_cache.get(group).unwrap(), *rotation);
                     //end_timer!(timer);
                     res
                 };
-                Ok((Some((Rc::new(values), rotation.0 * rot_scale)), None))
+                Ok((Some((values, rotation.0 * rot_scale)), None))
             }
             ProveExpression::Scale(l, ys) => {
                 let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
@@ -576,7 +562,7 @@ impl<F: FieldExt> ProveExpression<F> {
                     local_work_size as usize,
                 )?;
 
-                let res = if l.1 == 0 {
+                let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
                 } else {
                     Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
