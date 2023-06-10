@@ -1122,7 +1122,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             )?;
                             kernel
                                 .arg(&values_buf)
-                                .arg(&table_buf)
+                                .arg(table_buf.as_ref())
                                 .arg(&permuted_input_coset_buf)
                                 .arg(&permuted_table_coset_buf)
                                 .arg(&product_coset_buf)

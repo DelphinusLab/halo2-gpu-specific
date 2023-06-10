@@ -337,7 +337,7 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
     use std::str::FromStr;
     use crate::plonk::MSM_LOCK;
 
-    let lock_guard = MSM_LOCK.lock().unwrap();
+    let _lock_guard = MSM_LOCK.lock().unwrap();
 
     //let timer = start_timer!(|| "msm gpu");
     let n_gpu = *crate::plonk::N_GPU;
