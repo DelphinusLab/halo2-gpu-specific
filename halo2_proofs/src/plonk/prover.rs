@@ -10,6 +10,7 @@ use rayon::prelude::IntoParallelRefIterator;
 use std::env::var;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 
@@ -58,6 +59,7 @@ lazy_static! {
         10
     )
     .unwrap();
+    pub static ref MSM_LOCK: Mutex<()> = Mutex::new(());
 }
 
 /// This creates a proof for the provided `circuit` when given the public

@@ -3,6 +3,7 @@
 
 use std::ops::Mul;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use super::multicore;
 use ark_std::end_timer;
@@ -334,6 +335,9 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::rust_gpu_tools::Device;
     use std::str::FromStr;
+    use crate::plonk::MSM_LOCK;
+
+    let lock_guard = MSM_LOCK.lock().unwrap();
 
     //let timer = start_timer!(|| "msm gpu");
     let n_gpu = *crate::plonk::N_GPU;
