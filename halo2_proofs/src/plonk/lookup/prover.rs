@@ -229,7 +229,7 @@ impl<C: CurveAffine> Permuted<C> {
 
             let compute_units = device.compute_units() as usize;
             let local_work_size = 128usize;
-            let work_units = (compute_units * local_work_size * 2) as usize;
+            let work_units = (compute_units * local_work_size * 2) / local_work_size * local_work_size as usize;
             let len = self.permuted_input_expression.len();
             let slot_len = ((len + work_units - 1) / work_units) as usize;
 
@@ -265,7 +265,7 @@ impl<C: CurveAffine> Permuted<C> {
                 program.read_into_buffer(&permuted_input, input.4)?;
                 program.read_into_buffer(&permuted_table, &mut lookup_product_to_inv)?;
 
-                for i in 0..work_units.min(len / slot_len) {
+                for i in 0..work_units.min((len + slot_len - 1) / slot_len) {
                     lookup_product_to_inv_packed[i] = lookup_product_to_inv[i * slot_len];
                 }
 
