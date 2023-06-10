@@ -265,50 +265,10 @@ impl<F: FieldExt> ProveExpression<F> {
         > {
             let mut ys = vec![F::one(), y];
 
-            //let mut unit_cache = BTreeMap::<usize, Buffer<F>>::new();
             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
             let cache_size =
                 usize::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
             let mut unit_cache = Cache::new(cache_size);
-            /*
-                for i in 0..usize::min(cache_size as usize, pk.ev.unit_ref_count.len()) {
-                    let group = pk.ev.unit_ref_count[i].0;
-                    let t = group & 0x3;
-                    let column_index = group >> 2;
-                    let origin_values = if t == 0 {
-                        pk.fixed_polys[column_index].clone()
-                    } else if t == 1 {
-                        advice[column_index].clone()
-                    } else if t == 2 {
-                        instance[column_index].clone()
-                    } else {
-                        unreachable!()
-                    };
-
-                    //let timer = start_timer!(|| "gpu eval unit");
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
-
-                    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
-                    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
-                    //end_timer!(timer);
-
-                    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(&origin_values)
-                        .arg(&values)
-                        .arg(&origin_size)
-                        .run()?;
-                    let values = Self::do_fft(pk, program, values)?;
-                    unit_cache.insert(group, values);
-                }
-            */
             let values_buf =
                 self._eval_gpu(pk, program, advice, instance, &mut ys, &mut unit_cache)?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
