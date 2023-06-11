@@ -301,13 +301,13 @@ impl<C: CurveAffine> Evaluator<C> {
 
         for (i, e) in es.iter().enumerate() {
             let complexity = e.get_complexity();
-            ev.unit_ref_count = complexity.4.into_iter().collect();
+            ev.unit_ref_count = complexity.ref_cnt.into_iter().collect();
             ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
             ev.unit_ref_count.reverse();
 
             println!("--------- expr part {} ---------", i);
             println!("complexity is {:?}", e.get_complexity());
-            println!("ref cnt is {:?}", ev.unit_ref_count);
+            println!("sorted ref cnt is {:?}", ev.unit_ref_count);
             println!("r deep is {}", e.get_r_deep());
         }
 

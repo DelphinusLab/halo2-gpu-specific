@@ -632,6 +632,16 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct ComplexityProfiler {
+    mul: usize,
+    sum: usize,
+    scale: usize,
+    unit: usize,
+    y: usize,
+    pub(crate) ref_cnt: HashMap<usize, u32>,
+}
+
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn new() -> Self {
         ProveExpression::Y(BTreeMap::from_iter(vec![(0, F::zero())].into_iter()))
@@ -750,11 +760,14 @@ impl<F: FieldExt> ProveExpression<F> {
         us: BTreeMap<ProveExpressionUnit, u32>,
         coeff: BTreeMap<u32, F>,
     ) -> Self {
-        if us.len() == 0 {
+        let res = if us.len() == 0 {
             Self::reconstruct_coeff(coeff)
         } else {
             Self::Scale(Box::new(Self::reconstruct_units(us)), coeff)
-        }
+        };
+
+        assert!(res.get_r_deep() <= 1);
+        res
     }
 
     fn reconstruct_tree(
@@ -766,70 +779,70 @@ impl<F: FieldExt> ProveExpression<F> {
             return Self::reconstruct_units_coeff(u.0, u.1);
         }
 
-        // find max
-        let mut map = BTreeMap::new();
+        if r_deep_limit > 2 {
+            // find max
+            let mut map = BTreeMap::new();
 
-        for (us, _) in tree.iter() {
-            for (u, _) in us {
-                if let Some(c) = map.get_mut(u) {
-                    *c = *c + 1;
-                } else {
-                    map.insert(u, 1);
+            for (us, _) in tree.iter() {
+                for (u, _) in us {
+                    if let Some(c) = map.get_mut(u) {
+                        *c = *c + 1;
+                    } else {
+                        map.insert(u, 1);
+                    }
                 }
+            }
+
+            let mut max_u = (*map.first_entry().unwrap().key()).clone();
+            let mut max_c = 0;
+
+            for (u, c) in map {
+                if c > max_c {
+                    max_c = c;
+                    max_u = u.clone();
+                }
+            }
+
+            if max_c > 1 {
+                let mut picked = vec![];
+                let mut other = vec![];
+
+                for (mut k, v) in tree {
+                    let c = k.remove(&max_u);
+                    match c {
+                        Some(1) => {
+                            picked.push((k, v));
+                        }
+                        Some(c) => {
+                            k.insert(max_u.clone(), c - 1);
+                            picked.push((k, v));
+                        }
+                        None => {
+                            other.push((k, v));
+                        }
+                    }
+                }
+
+                let picked = Self::reconstruct_tree(picked, r_deep_limit - 1);
+                let mut r = Self::Op(Box::new(picked), Box::new(Self::Unit(max_u)), Bop::Product);
+
+                if other.len() > 0 {
+                    r = Self::Op(
+                        Box::new(Self::reconstruct_tree(other, r_deep_limit)),
+                        Box::new(r),
+                        Bop::Sum,
+                    );
+                }
+
+                return r;
             }
         }
 
-        let mut max_u = (*map.first_entry().unwrap().key()).clone();
-        let mut max_c = 0;
-
-        for (u, c) in map {
-            if c > max_c {
-                max_c = c;
-                max_u = u.clone();
-            }
-        }
-
-        let mut l = vec![];
-        let mut r = vec![];
-
-        for (mut k, v) in tree {
-            let c = k.remove(&max_u);
-            match c {
-                Some(1) => {
-                    l.push((k, v));
-                }
-                Some(c) => {
-                    k.insert(max_u.clone(), c - 1);
-                    l.push((k, v));
-                }
-                None => {
-                    r.push((k, v));
-                }
-            }
-        }
-
-        let mut l = Self::reconstruct_tree(l, r_deep_limit);
-        l = Self::Op(Box::new(l), Box::new(Self::Unit(max_u)), Bop::Product);
-
-        if r_deep_limit <= 3 {
-            for (k, ys) in r {
-                l = Self::Op(
-                    Box::new(l),
-                    Box::new(Self::reconstruct_units_coeff(k, ys)),
-                    Bop::Sum,
-                );
-            }
-        } else {
-            if r.len() > 0 {
-                l = Self::Op(
-                    Box::new(l),
-                    Box::new(Self::reconstruct_tree(r, r_deep_limit - 1)),
-                    Bop::Sum,
-                );
-            }
-        }
-
-        l
+        return tree
+            .into_iter()
+            .map(|(k, ys)| Self::reconstruct_units_coeff(k, ys))
+            .reduce(|acc, x| Self::Op(Box::new(acc), Box::new(x), Bop::Sum))
+            .unwrap();
     }
 
     pub(crate) fn reconstruct(tree: &[(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)]) -> Self {
@@ -848,33 +861,54 @@ impl<F: FieldExt> ProveExpression<F> {
             })
             .collect();
 
-        let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("5".to_owned());
+        let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("6".to_owned());
         let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
         Self::reconstruct_tree(tree, r_deep)
     }
 
-    pub(crate) fn get_complexity(&self) -> (u32, u32, u32, u32, HashMap<usize, u32>) {
+    pub(crate) fn get_complexity(&self) -> ComplexityProfiler {
         match self {
-            ProveExpression::Unit(u) => (0, 0, 1, 0, HashMap::from_iter(vec![(u.get_group(), 1)])),
+            ProveExpression::Unit(u) => ComplexityProfiler {
+                mul: 0,
+                sum: 0,
+                scale: 0,
+                unit: 1,
+                y: 0,
+                ref_cnt: HashMap::from_iter(vec![(u.get_group(), 1)]),
+            },
             ProveExpression::Op(l, r, op) => {
                 let mut l = l.get_complexity();
                 let r = r.get_complexity();
-                for (k, v) in r.4 {
-                    if let Some(lv) = l.4.get_mut(&k) {
+                for (k, v) in r.ref_cnt {
+                    if let Some(lv) = l.ref_cnt.get_mut(&k) {
                         *lv += v;
                     } else {
-                        l.4.insert(k, v);
+                        l.ref_cnt.insert(k, v);
                     }
                 }
+                l.scale += r.scale;
+                l.mul += r.mul;
+                l.sum += r.sum;
+                l.y += r.y;
+                l.unit += r.unit;
                 match op {
-                    Bop::Sum => (l.0 + r.0, l.1 + r.1 + 1, l.2 + r.2, l.3 + r.3, l.4),
-                    Bop::Product => (l.0 + r.0 + 1, l.1 + r.1, l.2 + r.2, l.3 + r.3, l.4),
-                }
+                    Bop::Sum => l.sum += 1,
+                    Bop::Product => l.mul += 1,
+                };
+                l
             }
-            ProveExpression::Y(_) => (0, 0, 0, 1, HashMap::new()),
+            ProveExpression::Y(_) => ComplexityProfiler {
+                mul: 0,
+                sum: 0,
+                scale: 0,
+                unit: 0,
+                y: 1,
+                ref_cnt: HashMap::from_iter(vec![]),
+            },
             ProveExpression::Scale(l, _) => {
-                let l = l.get_complexity();
-                (l.0 + 1, l.1, l.2, l.3, l.4)
+                let mut l = l.get_complexity();
+                l.scale += 1;
+                l
             }
         }
     }
