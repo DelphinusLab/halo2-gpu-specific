@@ -672,7 +672,7 @@ impl<F: FieldExt> ProveExpression<F> {
                         .arg(&values)
                         .arg(&origin_size)
                         .run()?;
-                    let buffer = Self::do_fft(pk, program, values, allocator)?;
+                    let buffer = do_fft(pk, program, values, allocator)?;
 
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
@@ -730,86 +730,86 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
     }
+}
 
-    pub(crate) fn do_fft<C: CurveAffine<ScalarExt = F>>(
-        pk: &ProvingKey<C>,
-        program: &Program,
-        values: Buffer<F>,
-        allocator: &mut LinkedList<Buffer<F>>,
-    ) -> EcResult<Buffer<F>> {
-        let log_n = pk.vk.domain.extended_k();
-        let n = 1 << log_n;
-        let omega = pk.vk.domain.get_extended_omega();
-        const MAX_LOG2_RADIX: u32 = 8;
-        const LOG2_MAX_ELEMENTS: usize = 32;
-        const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
+pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    values: Buffer<F>,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
+    let log_n = pk.vk.domain.extended_k();
+    let n = 1 << log_n;
+    let omega = pk.vk.domain.get_extended_omega();
+    const MAX_LOG2_RADIX: u32 = 8;
+    const LOG2_MAX_ELEMENTS: usize = 32;
+    const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
 
-        let mut src_buffer = values;
-        let mut dst_buffer = allocator
-            .pop_front()
-            .unwrap_or_else(|| unsafe { program.create_buffer::<F>(n).unwrap() });
-        // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
-        let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+    let mut src_buffer = values;
+    let mut dst_buffer = allocator
+        .pop_front()
+        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(n).unwrap() });
+    // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
+    let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
 
-        // Precalculate:
-        // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
-        let mut pq = vec![F::zero(); 1 << max_deg >> 1];
-        let twiddle = omega.pow_vartime([(n >> max_deg) as u64]);
-        pq[0] = F::one();
-        if max_deg > 1 {
-            pq[1] = twiddle;
-            for i in 2..(1 << max_deg >> 1) {
-                pq[i] = pq[i - 1];
-                pq[i].mul_assign(&twiddle);
-            }
+    // Precalculate:
+    // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
+    let mut pq = vec![F::zero(); 1 << max_deg >> 1];
+    let twiddle = omega.pow_vartime([(n >> max_deg) as u64]);
+    pq[0] = F::one();
+    if max_deg > 1 {
+        pq[1] = twiddle;
+        for i in 2..(1 << max_deg >> 1) {
+            pq[i] = pq[i - 1];
+            pq[i].mul_assign(&twiddle);
         }
-        let pq_buffer = program.create_buffer_from_slice(&pq)?;
-
-        // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
-        let mut omegas = vec![F::zero(); 32];
-        omegas[0] = omega;
-        for i in 1..LOG2_MAX_ELEMENTS {
-            omegas[i] = omegas[i - 1].pow_vartime([2u64]);
-        }
-        let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
-
-        //let timer = start_timer!(|| format!("fft main {}", log_n));
-        // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
-        let mut log_p = 0u32;
-        // Each iteration performs a FFT round
-        while log_p < log_n {
-            // 1=>radix2, 2=>radix4, 3=>radix8, ...
-            let deg = cmp::min(max_deg, log_n - log_p);
-
-            let n = 1u32 << log_n;
-            let local_work_size = 1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
-            let global_work_size = n >> deg;
-            let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
-            let kernel = program.create_kernel(
-                &kernel_name,
-                global_work_size as usize,
-                local_work_size as usize,
-            )?;
-            kernel
-                .arg(&src_buffer)
-                .arg(&dst_buffer)
-                .arg(&pq_buffer)
-                .arg(&omegas_buffer)
-                .arg(&LocalBuffer::<F>::new(1 << deg))
-                .arg(&n)
-                .arg(&log_p)
-                .arg(&deg)
-                .arg(&max_deg)
-                .run()?;
-
-            log_p += deg;
-            std::mem::swap(&mut src_buffer, &mut dst_buffer);
-        }
-
-        allocator.push_back(dst_buffer);
-
-        Ok(src_buffer)
     }
+    let pq_buffer = program.create_buffer_from_slice(&pq)?;
+
+    // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
+    let mut omegas = vec![F::zero(); 32];
+    omegas[0] = omega;
+    for i in 1..LOG2_MAX_ELEMENTS {
+        omegas[i] = omegas[i - 1].pow_vartime([2u64]);
+    }
+    let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
+
+    //let timer = start_timer!(|| format!("fft main {}", log_n));
+    // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
+    let mut log_p = 0u32;
+    // Each iteration performs a FFT round
+    while log_p < log_n {
+        // 1=>radix2, 2=>radix4, 3=>radix8, ...
+        let deg = cmp::min(max_deg, log_n - log_p);
+
+        let n = 1u32 << log_n;
+        let local_work_size = 1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
+        let global_work_size = n >> deg;
+        let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
+        let kernel = program.create_kernel(
+            &kernel_name,
+            global_work_size as usize,
+            local_work_size as usize,
+        )?;
+        kernel
+            .arg(&src_buffer)
+            .arg(&dst_buffer)
+            .arg(&pq_buffer)
+            .arg(&omegas_buffer)
+            .arg(&LocalBuffer::<F>::new(1 << deg))
+            .arg(&n)
+            .arg(&log_p)
+            .arg(&deg)
+            .arg(&max_deg)
+            .run()?;
+
+        log_p += deg;
+        std::mem::swap(&mut src_buffer, &mut dst_buffer);
+    }
+
+    allocator.push_back(dst_buffer);
+
+    Ok(src_buffer)
 }
 
 #[derive(Debug)]

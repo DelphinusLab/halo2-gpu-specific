@@ -788,8 +788,10 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        use std::{collections::LinkedList, marker::PhantomData};
-
+        use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer};
+        use ff::PrimeField;
+        use group::ff::Field;
+        use pairing::bn256::Fr;
         use rayon::{
             prelude::{
                 IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
@@ -797,6 +799,7 @@ impl<C: CurveAffine> Evaluator<C> {
             },
             slice::ParallelSlice,
         };
+        use std::{collections::LinkedList, marker::PhantomData};
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -819,20 +822,10 @@ impl<C: CurveAffine> Evaluator<C> {
         let rot_scale = 1 << (domain.extended_k() - domain.k());
         let fixed = &pk.fixed_polys[..];
         let extended_omega = domain.get_extended_omega();
-        //let num_lookups = pk.vk.cs.lookups.len();
-        let isize = size as i32;
-        let one = C::ScalarExt::one();
         let l0 = &pk.l0;
         let l_last = &pk.l_last;
         let l_active_row = &pk.l_active_row;
         let p = &pk.vk.cs.permutation;
-
-        // let mut values = domain.empty_extended();
-        // let mut lookup_values = vec![C::Scalar::zero(); size * num_lookups];
-
-        // Core expression evaluations
-        //let num_threads = multicore::current_num_threads();
-        //let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
 
         let timer = ark_std::start_timer!(|| "permutations");
         // Permutations
@@ -847,102 +840,183 @@ impl<C: CurveAffine> Evaluator<C> {
             let first_set = sets.first().unwrap();
             let last_set = sets.last().unwrap();
 
-            let mut fixed_map = BTreeMap::new();
-            let mut advice_map = BTreeMap::new();
-            let mut instance_map = BTreeMap::new();
+            let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
+                |program, values: &mut [Fr]| -> ec_gpu_gen::EcResult<()> {
+                    macro_rules! create_buffer_from {
+                        ($x:ident, $y:expr) => {
+                            let $x = program.create_buffer_from_slice($y)?;
+                        };
+                    }
 
-            for column in p.columns.iter() {
-                match column.column_type() {
-                    Any::Advice => {
-                        advice_map.insert(
-                            column.index(),
-                            domain.coeff_to_extended(advice_poly[0][column.index()].clone()),
-                        );
-                    }
-                    Any::Fixed => {
-                        fixed_map.insert(
-                            column.index(),
-                            domain.coeff_to_extended(fixed[column.index()].clone()),
-                        );
-                    }
-                    Any::Instance => {
-                        instance_map.insert(
-                            column.index(),
-                            domain.coeff_to_extended(instance_poly[0][column.index()].clone()),
-                        );
-                    }
-                }
-            }
+                    let y_beta_gamma = vec![y, beta, gamma, C::Scalar::DELTA];
 
-            // Permutation constraints
-            parallelize(&mut values, |values, start| {
-                let mut beta_term = extended_omega.pow_vartime(&[start as u64, 0, 0, 0]);
-                for (i, value) in values.iter_mut().enumerate() {
-                    let idx = start + i;
-                    let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                    let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
+                    create_buffer_from!(values_buf, values);
+                    create_buffer_from!(l0_buf, l0);
+                    create_buffer_from!(l_last_buf, l_last);
+                    create_buffer_from!(l_active_row_buf, l_active_row);
+                    create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
+                    create_buffer_from!(first_set_buf, &first_set.permutation_product_coset[..]);
+                    create_buffer_from!(last_set_buf, &last_set.permutation_product_coset[..]);
 
-                    // Enforce only for the first set.
-                    // l_0(X) * (1 - z_0(X)) = 0
-                    *value =
-                        *value * y + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                    // Enforce only for the last set.
-                    // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
-                    *value = *value * y
-                        + ((last_set.permutation_product_coset[idx]
-                            * last_set.permutation_product_coset[idx]
-                            - last_set.permutation_product_coset[idx])
-                            * l_last[idx]);
-                    // Except for the first set, enforce.
-                    // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-                    for (set_idx, set) in sets.iter().enumerate() {
-                        if set_idx != 0 {
-                            *value = *value * y
-                                + ((set.permutation_product_coset[idx]
-                                    - permutation.sets[set_idx - 1].permutation_product_coset
-                                        [r_last])
-                                    * l0[idx]);
-                        }
+                    let local_work_size = 128;
+                    let global_work_size = size / local_work_size;
+                    let kernel_name = format!("{}_eval_h_permutation_part1", "Bn256_Fr");
+                    let kernel = program.create_kernel(
+                        &kernel_name,
+                        global_work_size as usize,
+                        local_work_size as usize,
+                    )?;
+                    kernel
+                        .arg(&values_buf)
+                        .arg(&first_set_buf)
+                        .arg(&last_set_buf)
+                        .arg(&l0_buf)
+                        .arg(&l_last_buf)
+                        .arg(&l_active_row_buf)
+                        .arg(&y_beta_gamma_buf)
+                        .run()?;
+
+                    let mut prev_set_buf = first_set_buf;
+                    for set in sets.iter().skip(1) {
+                        create_buffer_from!(curr_set_buf, &set.permutation_product_coset[..]);
+                        let kernel_name = format!("{}_eval_h_permutation_part2", "Bn256_Fr");
+                        let kernel = program.create_kernel(
+                            &kernel_name,
+                            global_work_size as usize,
+                            local_work_size as usize,
+                        )?;
+                        kernel
+                            .arg(&values_buf)
+                            .arg(&curr_set_buf)
+                            .arg(&prev_set_buf)
+                            .arg(&l0_buf)
+                            .arg(&y_beta_gamma_buf)
+                            .arg(&(last_rotation.0 * rot_scale + size as i32))
+                            .arg(&(size as u32))
+                            .run()?;
+                        prev_set_buf = curr_set_buf;
                     }
-                    // And for all the sets we enforce:
-                    // (1 - (l_last(X) + l_blind(X))) * (
-                    //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
-                    // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
-                    // )
-                    let mut current_delta = delta_start * beta_term;
+
+                    let mut allocator = LinkedList::new();
+                    let left_buf = unsafe { program.create_buffer::<C::ScalarExt>(size)? };
+                    let mut extended_data_buf =
+                        unsafe { program.create_buffer::<C::ScalarExt>(size)? };
+
+                    let mut beta_term = vec![delta_start];
+                    for _ in 1..size {
+                        beta_term.push(*beta_term.last().unwrap() * &extended_omega);
+                    }
+                    create_buffer_from!(beta_term_buf, &beta_term);
+
                     for ((set, columns), cosets) in sets
                         .iter()
                         .zip(p.columns.chunks(chunk_len))
                         .zip(pk.permutation.cosets.chunks(chunk_len))
                     {
-                        let mut left = set.permutation_product_coset[r_next];
+                        create_buffer_from!(curr_set_buf, &set.permutation_product_coset[..]);
+                        let kernel_name = format!("{}_eval_h_permutation_left_prepare", "Bn256_Fr");
+                        let kernel = program.create_kernel(
+                            &kernel_name,
+                            global_work_size as usize,
+                            local_work_size as usize,
+                        )?;
+                        kernel
+                            .arg(&left_buf)
+                            .arg(&curr_set_buf)
+                            .arg(&(rot_scale))
+                            .arg(&(size as u32))
+                            .run()?;
+
+                        let right_buf = curr_set_buf;
+
                         for (values, permutation) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
-                                Any::Advice => advice_map.get(&column.index()).unwrap(),
-                                Any::Fixed => fixed_map.get(&column.index()).unwrap(),
-                                Any::Instance => instance_map.get(&column.index()).unwrap(),
+                                Any::Advice => advice_poly[0][column.index()].clone(),
+                                Any::Fixed => fixed[column.index()].clone(),
+                                Any::Instance => instance_poly[0][column.index()].clone(),
                             })
                             .zip(cosets.iter())
                         {
-                            left *= values[idx] + beta * permutation[idx] + gamma;
+                            let values = domain.coeff_to_extended_without_fft(values);
+
+                            create_buffer_from!(origin_buf, &values.values);
+
+                            let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+                            let kernel = program.create_kernel(
+                                &kernel_name,
+                                global_work_size as usize,
+                                local_work_size as usize,
+                            )?;
+                            kernel
+                                .arg(&origin_buf)
+                                .arg(&extended_data_buf)
+                                .arg(&(1 << domain.k()))
+                                .run()?;
+
+                            extended_data_buf = crate::plonk::evaluation_gpu::do_fft(
+                                pk,
+                                program,
+                                extended_data_buf,
+                                &mut allocator,
+                            )?;
+
+                            create_buffer_from!(permutation_buf, &permutation.values);
+
+                            let kernel_name =
+                                format!("{}_eval_h_permutation_left_right", "Bn256_Fr");
+                            let kernel = program.create_kernel(
+                                &kernel_name,
+                                global_work_size as usize,
+                                local_work_size as usize,
+                            )?;
+
+                            kernel
+                                .arg(&left_buf)
+                                .arg(&right_buf)
+                                .arg(&extended_data_buf)
+                                .arg(&permutation_buf)
+                                .arg(&beta_term_buf)
+                                .arg(&y_beta_gamma_buf)
+                                .run()?;
                         }
 
-                        let mut right = set.permutation_product_coset[idx];
-                        for values in columns.iter().map(|&column| match column.column_type() {
-                            Any::Advice => advice_map.get(&column.index()).unwrap(),
-                            Any::Fixed => fixed_map.get(&column.index()).unwrap(),
-                            Any::Instance => instance_map.get(&column.index()).unwrap(),
-                        }) {
-                            right *= values[idx] + current_delta + gamma;
-                            current_delta *= &C::Scalar::DELTA;
-                        }
-
-                        *value = *value * y + ((left - right) * l_active_row[idx]);
+                        let kernel_name = format!("{}_eval_h_permutation_part3", "Bn256_Fr");
+                        let kernel = program.create_kernel(
+                            &kernel_name,
+                            global_work_size as usize,
+                            local_work_size as usize,
+                        )?;
+                        kernel
+                            .arg(&values_buf)
+                            .arg(&left_buf)
+                            .arg(&right_buf)
+                            .arg(&l_active_row_buf)
+                            .arg(&y_beta_gamma_buf)
+                            .run()?;
                     }
-                    beta_term *= &extended_omega;
+
+                    program.read_into_buffer(&values_buf, values)?;
+                    Ok(())
                 }
-            });
+            );
+
+            let devices = Device::all();
+            let programs = devices
+                .iter()
+                .map(|device| ec_gpu_gen::program!(device))
+                .collect::<Result<_, _>>()
+                .expect("Cannot create programs!");
+            let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+            let group_idx = 0;
+            let gpu_idx = group_idx % kern.kernels.len();
+
+            kern.kernels[gpu_idx]
+                .program
+                .run(closures, unsafe {
+                    std::mem::transmute::<_, &mut [Fr]>(&mut values.values[..])
+                })
+                .unwrap();
         }
         end_timer!(timer);
 
@@ -956,12 +1030,6 @@ impl<C: CurveAffine> Evaluator<C> {
             .par_chunks(group_expr_len)
             .enumerate()
             .map(|(group_idx, lookups)| {
-                use ec_gpu_gen::{
-                    fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer,
-                };
-                use ff::PrimeField;
-                use group::ff::Field;
-                use pairing::bn256::Fr;
                 // combine fft with eval_h_lookups:
                 // fft code: from ec-gpu lib.
                 let mut buffer = vec![];
