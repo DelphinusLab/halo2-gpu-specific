@@ -215,12 +215,87 @@ use ec_gpu_gen::{
     rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer, EcResult,
 };
 
+#[derive(Debug, PartialEq, Clone)]
+pub(crate) enum CacheAction {
+    Cache,
+    Drop,
+}
+
 pub(crate) struct Cache<T> {
     data: BTreeMap<usize, (Rc<T>, usize)>,
     ts: usize,
     bound: usize,
     hit: usize,
     miss: usize,
+    access: Vec<(usize, CacheAction)>,
+}
+
+impl<T> Cache<T> {
+    pub fn access(&mut self, k: usize) {
+        self.access.push((k, CacheAction::Cache));
+    }
+
+    pub fn analyze(&mut self) {
+        let mut to_update = true;
+        let mut try_count = 100000;
+        let timer = start_timer!(|| "cache policy analysis");
+        while try_count > 0 && to_update {
+            try_count -= 1;
+            to_update = false;
+            let mut _hit = 0;
+            let mut _miss = 0;
+            let mut sim: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
+            let mut new_access = self.access.clone();
+            for (ts, (k, action)) in self.access.iter().enumerate() {
+                if let Some(x) = sim.get_mut(&k) {
+                    _hit += 1;
+                    x.0 = ts;
+                    if *action == CacheAction::Drop {
+                        sim.remove(&k);
+                    }
+                } else {
+                    _miss += 1;
+                    if *action == CacheAction::Cache {
+                        if sim.len() == self.bound {
+                            for (ts, (k, _)) in self.access.iter().enumerate().skip(ts) {
+                                if let Some(e) = sim.get_mut(&k) {
+                                    if e.1 > ts {
+                                        e.1 = ts;
+                                    }
+                                }
+                            }
+
+                            let (_, last_ts) =
+                                sim.iter().fold((0, 0), |(max_latest_access, ts), e| {
+                                    if e.1 .1 > max_latest_access {
+                                        (e.1 .1, e.1 .0)
+                                    } else {
+                                        (max_latest_access, ts)
+                                    }
+                                });
+
+                            if self.access[last_ts].1 != CacheAction::Drop {
+                                new_access[last_ts].1 = CacheAction::Drop;
+                                to_update = true;
+                                break;
+                            }
+                        }
+
+                        sim.insert(*k, (ts, self.access.len()));
+                    }
+                }
+            }
+
+            if !to_update {
+                for (_, (ts, _)) in sim.iter() {
+                    new_access[*ts].1 = CacheAction::Drop;
+                }
+            }
+
+            self.access = new_access;
+        }
+        end_timer!(timer);
+    }
 }
 
 impl<T> Cache<T> {
@@ -231,25 +306,40 @@ impl<T> Cache<T> {
             bound,
             hit: 0,
             miss: 0,
+            access: vec![],
         }
     }
 
-    pub fn get(&mut self, key: usize) -> Option<Rc<T>> {
+    pub fn get(&mut self, key: usize) -> (Option<Rc<T>>, CacheAction) {
+        let action = self
+            .access
+            .get(self.ts)
+            .map(|x| {
+                assert!(key == self.access[self.ts].0);
+                x.1.clone()
+            })
+            .unwrap_or(CacheAction::Cache);
         self.ts += 1;
-        if let Some(x) = self.data.get_mut(&key) {
+        let res = if let Some(x) = self.data.get_mut(&key) {
             self.hit += 1;
             x.1 = self.ts;
             Some(x.0.clone())
         } else {
             self.miss += 1;
             None
+        };
+
+        if action == CacheAction::Drop {
+            self.data.remove(&key);
         }
+
+        (res, action)
     }
 
-    pub fn update(&mut self, key: usize, value: T) {
-        self.ts += 1;
+    pub fn update(&mut self, key: usize, value: T) -> Rc<T> {
+        let value = Rc::new(value);
         if self.data.len() < self.bound {
-            self.data.insert(key, (Rc::new(value), self.ts));
+            self.data.insert(key, (value.clone(), self.ts));
         } else {
             let min_ts = self
                 .data
@@ -259,13 +349,28 @@ impl<T> Cache<T> {
                 .0
                 .clone();
             self.data.remove(&min_ts);
-            self.data.insert(key, (Rc::new(value), self.ts));
+            self.data.insert(key, (value.clone(), self.ts));
         }
+        value
     }
 }
 
 #[cfg(feature = "cuda")]
 impl<F: FieldExt> ProveExpression<F> {
+    pub(crate) fn gen_cache_policy(&self, unit_cache: &mut Cache<Buffer<F>>) {
+        match self {
+            ProveExpression::Unit(u) => unit_cache.access(u.get_group()),
+            ProveExpression::Op(l, r, _) => {
+                l.gen_cache_policy(unit_cache);
+                r.gen_cache_policy(unit_cache);
+            }
+            ProveExpression::Y(_) => {}
+            ProveExpression::Scale(l, _) => {
+                l.gen_cache_policy(unit_cache);
+            }
+        }
+    }
+
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         group_idx: usize,
@@ -285,6 +390,8 @@ impl<F: FieldExt> ProveExpression<F> {
             let cache_size =
                 usize::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
             let mut unit_cache = Cache::new(cache_size);
+            self.gen_cache_policy(&mut unit_cache);
+            unit_cache.analyze();
             let values_buf =
                 self._eval_gpu(pk, program, advice, instance, &mut ys, &mut unit_cache)?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
@@ -465,7 +572,8 @@ impl<F: FieldExt> ProveExpression<F> {
             }
             ProveExpression::Unit(u) => {
                 let group = u.get_group();
-                let (values, rotation) = if let Some(cached_values) = unit_cache.get(group) {
+                let (cache, cache_action) = unit_cache.get(group);
+                let (values, rotation) = if let Some(cached_values) = cache {
                     match u {
                         ProveExpressionUnit::Fixed { rotation, .. }
                         | ProveExpressionUnit::Advice { rotation, .. }
@@ -510,8 +618,14 @@ impl<F: FieldExt> ProveExpression<F> {
                         .arg(&origin_size)
                         .run()?;
                     let buffer = Self::do_fft(pk, program, values)?;
-                    unit_cache.update(group, buffer);
-                    let res = (unit_cache.get(group).unwrap(), *rotation);
+
+                    let value = if cache_action == CacheAction::Cache {
+                        unit_cache.update(group, buffer)
+                    } else {
+                        Rc::new(buffer)
+                    };
+
+                    let res = (value, *rotation);
                     //end_timer!(timer);
                     res
                 };
