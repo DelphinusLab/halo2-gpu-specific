@@ -311,11 +311,14 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
 ) -> C::Curve {
+    use crate::plonk::MSM_LOCK;
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
     };
     use group::Curve;
     use pairing::bn256::Fr;
+
+    let _lock_guard = MSM_LOCK[gpu_idx].lock().unwrap();
 
     let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
     let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
@@ -335,9 +338,6 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     use ec_gpu_gen::rust_gpu_tools::Device;
     use std::str::FromStr;
-    use crate::plonk::MSM_LOCK;
-
-    let _lock_guard = MSM_LOCK.lock().unwrap();
 
     //let timer = start_timer!(|| "msm gpu");
     let n_gpu = *crate::plonk::N_GPU;
@@ -407,10 +407,10 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 
 #[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
+    use crate::plonk::{GPU_GROUP_ID, N_GPU};
     use ec_gpu_gen::fft::{FftKernel, SingleFftKernel};
     use ec_gpu_gen::rust_gpu_tools::Device;
     use pairing::bn256::Fr;
-    use crate::plonk::{GPU_GROUP_ID, N_GPU};
 
     let gpu_id = GPU_GROUP_ID.get() % *N_GPU;
     let devices = Device::all();

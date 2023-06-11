@@ -59,7 +59,8 @@ lazy_static! {
         10
     )
     .unwrap();
-    pub static ref MSM_LOCK: Mutex<()> = Mutex::new(());
+    pub static ref MSM_LOCK: Vec<Mutex<()>> =
+        (0..*N_GPU).into_iter().map(|_| Mutex::new(())).collect();
 }
 
 /// This creates a proof for the provided `circuit` when given the public
@@ -349,7 +350,7 @@ pub fn create_proof<
 
             let timer = start_timer!(|| "commit_lagrange");
             let advice_commitments_projective: Vec<_> = advice
-                .par_iter()
+                .iter()
                 .enumerate()
                 .map(|(idx, poly)| {
                     GPU_GROUP_ID.set(idx);
@@ -504,7 +505,7 @@ pub fn create_proof<
             .iter()
             .map(|lookups| {
                 lookups
-                    .into_par_iter()
+                    .into_iter()
                     .enumerate()
                     .map(|(idx, l)| {
                         GPU_GROUP_ID.set(idx);
