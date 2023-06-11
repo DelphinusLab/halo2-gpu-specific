@@ -19,7 +19,7 @@ use group::{
     Curve,
 };
 use std::any::TypeId;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, LinkedList};
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
@@ -298,7 +298,7 @@ impl<T> Cache<T> {
     }
 }
 
-impl<T> Cache<T> {
+impl<T: std::fmt::Debug> Cache<T> {
     pub fn new(bound: usize) -> Cache<T> {
         Self {
             data: BTreeMap::new(),
@@ -329,14 +329,10 @@ impl<T> Cache<T> {
             None
         };
 
-        if action == CacheAction::Drop {
-            self.data.remove(&key);
-        }
-
         (res, action)
     }
 
-    pub fn update(&mut self, key: usize, value: T) -> Rc<T> {
+    pub fn update(&mut self, key: usize, value: T, on_drop: impl FnOnce(T) -> ()) -> Rc<T> {
         let value = Rc::new(value);
         if self.data.len() < self.bound {
             self.data.insert(key, (value.clone(), self.ts));
@@ -348,7 +344,10 @@ impl<T> Cache<T> {
                 .unwrap()
                 .0
                 .clone();
-            self.data.remove(&min_ts);
+            let drop_value = self.data.remove(&min_ts).unwrap().0;
+            if Rc::strong_count(&value) == 1 {
+                on_drop(Rc::try_unwrap(drop_value).unwrap());
+            }
             self.data.insert(key, (value.clone(), self.ts));
         }
         value
@@ -392,8 +391,15 @@ impl<F: FieldExt> ProveExpression<F> {
             let mut unit_cache = Cache::new(cache_size);
             self.gen_cache_policy(&mut unit_cache);
             unit_cache.analyze();
-            let values_buf =
-                self._eval_gpu(pk, program, advice, instance, &mut ys, &mut unit_cache)?;
+            let values_buf = self._eval_gpu(
+                pk,
+                program,
+                advice,
+                instance,
+                &mut ys,
+                &mut unit_cache,
+                &mut LinkedList::new(),
+            )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
 
             Ok(())
@@ -429,7 +435,15 @@ impl<F: FieldExt> ProveExpression<F> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let v = self._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+        let v = self._eval_gpu(
+            pk,
+            program,
+            advice,
+            instance,
+            y,
+            unit_cache,
+            &mut LinkedList::new(),
+        )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
@@ -476,6 +490,7 @@ impl<F: FieldExt> ProveExpression<F> {
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
+        allocator: &mut LinkedList<Buffer<F>>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
         let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
@@ -485,8 +500,8 @@ impl<F: FieldExt> ProveExpression<F> {
 
         match self {
             ProveExpression::Op(l, r, op) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
+                let r = r._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
                 //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                 let res = match (l.0, r.0) {
                     (Some(l), Some(r)) => {
@@ -505,7 +520,9 @@ impl<F: FieldExt> ProveExpression<F> {
                         } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                             l.0.clone()
                         } else {
-                            Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                            Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                                program.create_buffer::<F>(size as usize).unwrap()
+                            }))
                         };
 
                         kernel
@@ -516,6 +533,14 @@ impl<F: FieldExt> ProveExpression<F> {
                             .arg(&r.1)
                             .arg(&size)
                             .run()?;
+
+                        if Rc::strong_count(&l.0) == 1 {
+                            allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                        }
+
+                        if Rc::strong_count(&r.0) == 1 {
+                            allocator.push_back(Rc::try_unwrap(r.0).unwrap())
+                        }
 
                         Ok((Some((res, 0)), None))
                     }
@@ -539,7 +564,9 @@ impl<F: FieldExt> ProveExpression<F> {
                         let res = if b.1 == 0 && Rc::strong_count(&b.0) == 1 {
                             b.0.clone()
                         } else {
-                            Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                            Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                                program.create_buffer::<F>(size as usize).unwrap()
+                            }))
                         };
 
                         kernel
@@ -549,6 +576,10 @@ impl<F: FieldExt> ProveExpression<F> {
                             .arg(&c)
                             .arg(&size)
                             .run()?;
+
+                        if Rc::strong_count(&b.0) == 1 {
+                            allocator.push_back(Rc::try_unwrap(b.0).unwrap())
+                        }
 
                         Ok((Some((res, 0)), None))
                     }
@@ -598,7 +629,9 @@ impl<F: FieldExt> ProveExpression<F> {
                     };
 
                     //let timer = start_timer!(|| "gpu eval unit");
-                    let values = unsafe { program.create_buffer::<F>(size as usize)? };
+                    let values = allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    });
 
                     //let timer = start_timer!(|| "coeff_to_extended_without_fft");
                     let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
@@ -617,10 +650,10 @@ impl<F: FieldExt> ProveExpression<F> {
                         .arg(&values)
                         .arg(&origin_size)
                         .run()?;
-                    let buffer = Self::do_fft(pk, program, values)?;
+                    let buffer = Self::do_fft(pk, program, values, allocator)?;
 
                     let value = if cache_action == CacheAction::Cache {
-                        unit_cache.update(group, buffer)
+                        unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
                     } else {
                         Rc::new(buffer)
                     };
@@ -632,7 +665,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 Ok((Some((values, rotation.0 * rot_scale)), None))
             }
             ProveExpression::Scale(l, ys) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache)?;
+                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
                 let l = l.0.unwrap();
                 let max_y_order = ys.keys().max().unwrap();
                 for _ in (y.len() as u32)..max_y_order + 1 {
@@ -655,7 +688,9 @@ impl<F: FieldExt> ProveExpression<F> {
                 let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
                 } else {
-                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
                 };
                 kernel
                     .arg(res.as_ref())
@@ -664,6 +699,10 @@ impl<F: FieldExt> ProveExpression<F> {
                     .arg(&size)
                     .arg(&c)
                     .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
 
                 Ok((Some((res, 0)), None))
             }
@@ -674,6 +713,7 @@ impl<F: FieldExt> ProveExpression<F> {
         pk: &ProvingKey<C>,
         program: &Program,
         values: Buffer<F>,
+        allocator: &mut LinkedList<Buffer<F>>,
     ) -> EcResult<Buffer<F>> {
         let log_n = pk.vk.domain.extended_k();
         let n = 1 << log_n;
@@ -683,7 +723,9 @@ impl<F: FieldExt> ProveExpression<F> {
         const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
 
         let mut src_buffer = values;
-        let mut dst_buffer = unsafe { program.create_buffer::<F>(n)? };
+        let mut dst_buffer = allocator
+            .pop_front()
+            .unwrap_or_else(|| unsafe { program.create_buffer::<F>(n).unwrap() });
         // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
         let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
 
@@ -741,6 +783,8 @@ impl<F: FieldExt> ProveExpression<F> {
             log_p += deg;
             std::mem::swap(&mut src_buffer, &mut dst_buffer);
         }
+
+        allocator.push_back(dst_buffer);
 
         Ok(src_buffer)
     }
