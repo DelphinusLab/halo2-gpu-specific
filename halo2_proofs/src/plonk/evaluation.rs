@@ -788,7 +788,7 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        use std::marker::PhantomData;
+        use std::{collections::LinkedList, marker::PhantomData};
 
         use rayon::{
             prelude::{
@@ -1043,6 +1043,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     theta,
                                     gamma,
                                     &mut unit_cache,
+                                    &mut LinkedList::new(),
                                 )
                                 .unwrap()
                                 .0;

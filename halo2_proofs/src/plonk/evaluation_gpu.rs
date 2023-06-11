@@ -101,6 +101,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         theta: F,
         gamma: F,
         unit_cache: &mut Cache<Buffer<F>>,
+        allocator: &mut LinkedList<Buffer<F>>,
     ) -> EcResult<(Rc<Buffer<F>>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -108,21 +109,23 @@ impl<F: FieldExt> LookupProveExpression<F> {
 
         match self {
             LookupProveExpression::Expression(e) => {
-                e._eval_gpu_buffer(pk, program, advice, instance, y, unit_cache)
+                e._eval_gpu_buffer(pk, program, advice, instance, y, unit_cache, allocator)
             }
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
                 } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
                 } else {
-                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
                 };
                 let theta = program.create_buffer_from_slice(&vec![theta])?;
                 let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
@@ -141,22 +144,33 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     .arg(&size)
                     .arg(&theta)
                     .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
+
+                if Rc::strong_count(&r.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(r.0).unwrap())
+                }
+
                 //end_timer!(timer);
                 Ok((res, 0))
             }
             LookupProveExpression::LcBeta(l, r) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
                 } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
                 } else {
-                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
                 };
                 let beta = program.create_buffer_from_slice(&vec![beta])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
@@ -175,17 +189,27 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     .arg(&size)
                     .arg(&beta)
                     .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
+
+                if Rc::strong_count(&r.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(r.0).unwrap())
+                }
                 //end_timer!(timer);
                 Ok((res, 0))
             }
             LookupProveExpression::AddGamma(l) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache,
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                 )?;
                 let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
                 } else {
-                    Rc::new(unsafe { program.create_buffer::<F>(size as usize)? })
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
                 };
                 let gamma = program.create_buffer_from_slice(&vec![gamma])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
@@ -202,6 +226,11 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     .arg(&size)
                     .arg(&gamma)
                     .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
+
                 //end_timer!(timer);
                 Ok((res, 0))
             }
@@ -431,19 +460,12 @@ impl<F: FieldExt> ProveExpression<F> {
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
+        allocator: &mut LinkedList<Buffer<F>>,
     ) -> EcResult<(Rc<Buffer<F>>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let v = self._eval_gpu(
-            pk,
-            program,
-            advice,
-            instance,
-            y,
-            unit_cache,
-            &mut LinkedList::new(),
-        )?;
+        let v = self._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
