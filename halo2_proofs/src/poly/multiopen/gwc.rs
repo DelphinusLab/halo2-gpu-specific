@@ -37,10 +37,10 @@ struct CommitmentData<F: FieldExt, Q: Query<F>> {
 
 fn construct_intermediate_sets<F: FieldExt, I, Q: Query<F>>(queries: I) -> Vec<CommitmentData<F, Q>>
 where
-    I: IntoIterator<Item = Q> + Clone,
+    I: IntoIterator<Item = Q>,
 {
     let mut point_query_map: BTreeMap<Rotation, Vec<Q>> = BTreeMap::new();
-    for query in queries.clone() {
+    for query in queries {
         if let Some(queries) = point_query_map.get_mut(&query.get_rotation()) {
             queries.push(query);
         } else {
@@ -49,12 +49,12 @@ where
     }
 
     point_query_map
-        .keys()
-        .map(|rot| {
-            let queries = point_query_map.get(rot).unwrap();
+        .into_iter()
+        .map(|(_, queries)| {
+            let point = queries[0].get_point();
             CommitmentData {
-                queries: queries.clone(),
-                point: queries[0].get_point(),
+                queries,
+                point,
                 _marker: PhantomData,
             }
         })

@@ -20,7 +20,7 @@ pub fn create_proof<'a, I, C: CurveAffine, E: EncodedChallenge<C>, T: Transcript
     queries: I,
 ) -> io::Result<()>
 where
-    I: IntoIterator<Item = ProverQuery<'a, C>> + Clone,
+    I: IntoIterator<Item = ProverQuery<'a, C>>,
 {
     let v: ChallengeV<_> = transcript.squeeze_challenge_scalar();
     let commitment_data = construct_intermediate_sets(queries);
