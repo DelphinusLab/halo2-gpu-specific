@@ -38,11 +38,9 @@ use std::{
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine> {
     compressed_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_input_poly: Polynomial<C::Scalar, Coeff>,
+    pub(in crate::plonk) permuted_input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    permuted_table_poly: Polynomial<C::Scalar, Coeff>,
+    pub(in crate::plonk) permuted_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
 }
 
 #[derive(Debug)]
@@ -103,9 +101,7 @@ impl<F: FieldExt> Argument<F> {
 
         // Closure to construct commitment to vector of values
         let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            let poly = pk.vk.domain.lagrange_to_coeff_st(values.clone());
-            let commitment = params.commit_lagrange(values).to_affine();
-            (poly, commitment)
+            params.commit_lagrange(values).to_affine()
         };
 
         // Get values of input expressions involved in the lookup and compress them
@@ -125,21 +121,17 @@ impl<F: FieldExt> Argument<F> {
         )?;
 
         // Commit to permuted input expression
-        let (permuted_input_poly, permuted_input_commitment) =
-            commit_values(&permuted_input_expression);
+        let permuted_input_commitment = commit_values(&permuted_input_expression);
 
         // Commit to permuted table expression
-        let (permuted_table_poly, permuted_table_commitment) =
-            commit_values(&permuted_table_expression);
+        let permuted_table_commitment = commit_values(&permuted_table_expression);
 
         Ok((
             Permuted {
                 compressed_input_expression,
                 permuted_input_expression,
-                permuted_input_poly,
                 compressed_table_expression,
                 permuted_table_expression,
-                permuted_table_poly,
             },
             [permuted_input_commitment, permuted_table_commitment],
         ))
@@ -161,8 +153,8 @@ impl<C: CurveAffine> Permuted<C> {
         _gpu_idx: usize,
     ) -> Result<
         (
-            Polynomial<C::Scalar, Coeff>,
-            Polynomial<C::Scalar, Coeff>,
+            Polynomial<C::Scalar, LagrangeCoeff>,
+            Polynomial<C::Scalar, LagrangeCoeff>,
             Vec<C::Scalar>,
         ),
         Error,
@@ -229,7 +221,8 @@ impl<C: CurveAffine> Permuted<C> {
 
             let compute_units = device.compute_units() as usize;
             let local_work_size = 128usize;
-            let work_units = (compute_units * local_work_size * 2) / local_work_size * local_work_size as usize;
+            let work_units =
+                (compute_units * local_work_size * 2) / local_work_size * local_work_size as usize;
             let len = self.permuted_input_expression.len();
             let slot_len = ((len + work_units - 1) / work_units) as usize;
 
@@ -359,7 +352,11 @@ impl<C: CurveAffine> Permuted<C> {
             assert_eq!(z[u], C::Scalar::one());
         }
 
-        Ok((self.permuted_input_poly, self.permuted_table_poly, z))
+        Ok((
+            self.permuted_input_expression,
+            self.permuted_table_expression,
+            z,
+        ))
     }
 }
 

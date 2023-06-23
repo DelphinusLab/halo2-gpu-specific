@@ -7,6 +7,7 @@ use rayon::iter::IndexedParallelIterator;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
+use rayon::slice::ParallelSlice;
 use std::env::var;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
@@ -167,17 +168,16 @@ pub fn create_proof<
     end_timer!(timer);
     let timer = start_timer!(|| "advice");
     struct AdviceSingle<C: CurveAffine> {
-        pub advice_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
         pub advice_polys: Vec<Polynomial<C::Scalar, Coeff>>,
 
         #[cfg(not(feature = "cuda"))]
         pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
-    let advice: Vec<AdviceSingle<C>> = circuits
+    let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> = circuits
         .iter()
         .zip(instances.iter())
-        .map(|(circuit, instances)| -> Result<AdviceSingle<C>, Error> {
+        .map(|(circuit, instances)| {
             struct WitnessCollection<'a, F: Field> {
                 k: u32,
                 pub advice: Vec<Polynomial<F, LagrangeCoeff>>,
@@ -335,7 +335,8 @@ pub fn create_proof<
                 circuit,
                 config.clone(),
                 meta.constants.clone(),
-            )?;
+            )
+            .unwrap();
 
             let mut advice = witness.advice;
 
@@ -367,12 +368,220 @@ pub fn create_proof<
             end_timer!(timer);
 
             for commitment in &advice_commitments {
-                transcript.write_point(*commitment)?;
+                transcript.write_point(*commitment).unwrap();
             }
 
+            advice
+        })
+        .collect::<Vec<_>>();
+
+    // Sample theta challenge for keeping lookup columns linearly independent
+    let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
+
+    end_timer!(timer);
+    let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
+    let (lookups, lookups_commitments): (
+        Vec<Vec<Vec<lookup::prover::Permuted<C>>>>,
+        Vec<Vec<Vec<[C; 2]>>>,
+    ) = instance
+        .iter()
+        .zip(advice.iter())
+        .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
+            // Construct and commit to permuted values for each lookup
+            let groups = *N_GPU * 2;
+            let chunk_size = (pk.vk.cs.lookups.len() + groups - 1) / groups;
+            pk.vk
+                .cs
+                .lookups
+                .par_chunks(chunk_size)
+                .enumerate()
+                .map(|(idx, lookups)| {
+                    GPU_GROUP_ID.set(idx);
+                    lookups
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, lookup)| {
+                            let timer = start_timer!(|| format!("lookup {}", idx));
+                            let res = lookup
+                                .commit_permuted(
+                                    pk,
+                                    params,
+                                    domain,
+                                    theta,
+                                    &advice,
+                                    &pk.fixed_values,
+                                    &instance.instance_values,
+                                    &mut OsRng,
+                                )
+                                .unwrap();
+                            end_timer!(timer);
+                            res
+                        })
+                        .unzip()
+                })
+                .unzip()
+        })
+        .unzip();
+
+    lookups_commitments.into_iter().for_each(|x| {
+        x.iter().for_each(|x| {
+            x.iter().for_each(|x| {
+                transcript.write_point(x[0]).unwrap();
+                transcript.write_point(x[1]).unwrap();
+            })
+        })
+    });
+    end_timer!(timer);
+
+    // Sample beta challenge
+    let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
+    // Sample gamma challenge
+    let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
+
+    let timer = start_timer!(|| "lookups commit product");
+    let lookups: Vec<Vec<_>> = lookups
+        .into_iter()
+        .map(|lookups| {
+            lookups
+                .into_par_iter()
+                .enumerate()
+                .map(|(idx, lookups)| {
+                    lookups
+                        .into_iter()
+                        .map(|lookup| {
+                            lookup
+                                .commit_product(pk, params, beta, gamma, idx % *N_GPU)
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<Vec<_>>>()
+        })
+        .collect::<Vec<_>>();
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "lookups add blinding value");
+    let lookups: Vec<Vec<_>> = lookups
+        .into_iter()
+        .map(|lookups| {
+            lookups
+                .into_iter()
+                .map(|lookups| {
+                    lookups
+                        .into_iter()
+                        .map(|(l0, l1, mut z)| {
+                            for _ in 0..pk.vk.cs.blinding_factors() {
+                                z.push(C::Scalar::random(&mut rng))
+                            }
+                            (l0, l1, pk.vk.domain.lagrange_from_vec(z))
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<Vec<_>>>();
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "lookups msm");
+    let lookups_z_commitments = lookups
+        .iter()
+        .flat_map(|lookups| {
+            lookups
+                .into_iter()
+                .flat_map(|lookups| {
+                    lookups
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, l)| {
+                            GPU_GROUP_ID.set(idx);
+                            params.commit_lagrange(&l.2).to_affine()
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "lookups fft");
+
+    let lookups = lookups
+        .into_iter()
+        .map(|lookups| {
+            lookups
+                .into_par_iter()
+                .enumerate()
+                .flat_map(|(idx, lookups)| {
+                    GPU_GROUP_ID.set(idx);
+                    lookups
+                        .into_iter()
+                        .map(
+                            |(lookup_permuted_input, lookup_permuted_table, lookups_product)| {
+                                lookup::prover::Committed {
+                                    permuted_input_poly: pk
+                                        .vk
+                                        .domain
+                                        .lagrange_to_coeff_st(lookup_permuted_input),
+                                    permuted_table_poly: pk
+                                        .vk
+                                        .domain
+                                        .lagrange_to_coeff_st(lookup_permuted_table),
+                                    product_poly: pk
+                                        .vk
+                                        .domain
+                                        .lagrange_to_coeff_st(lookups_product),
+                                }
+                            },
+                        )
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "permutations committed");
+    // Commit to permutations.
+    let permutations: Vec<permutation::prover::Committed<C>> = instance
+        .iter()
+        .zip(advice.iter())
+        .map(|(instance, advice)| {
+            pk.vk.cs.permutation.commit(
+                params,
+                pk,
+                &pk.permutation,
+                &advice,
+                &pk.fixed_values,
+                &instance.instance_values,
+                beta,
+                gamma,
+                &mut rng,
+                transcript,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    end_timer!(timer);
+
+    lookups_z_commitments
+        .into_iter()
+        .for_each(|lookups_z_commitment| transcript.write_point(lookups_z_commitment).unwrap());
+
+    let timer = start_timer!(|| "vanishing commit");
+    // Commit to the vanishing argument's random polynomial for blinding h(x_3)
+    let vanishing = vanishing::Argument::commit(params, domain, rng, transcript)?;
+
+    // Obtain challenge for keeping all separate gates linearly independent
+    let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
+
+    end_timer!(timer);
+    let timer = start_timer!(|| "h_poly");
+    // Evaluate the h(X) polynomial
+
+    let advice = advice
+        .into_iter()
+        .map(|advice| {
             let timer = start_timer!(|| "lagrange_to_coeff_st");
             let advice_polys: Vec<_> = advice
-                .clone()
                 .into_par_iter()
                 .enumerate()
                 .map(|(idx, poly)| {
@@ -388,196 +597,18 @@ pub fn create_proof<
                 .map(|poly| domain.coeff_to_extended(poly.clone()))
                 .collect();
 
-            Ok(AdviceSingle {
-                advice_values: advice,
+            AdviceSingle::<C> {
                 advice_polys,
-
                 #[cfg(not(feature = "cuda"))]
                 advice_cosets,
-            })
+            }
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Vec<_>>();
 
-    // Sample theta challenge for keeping lookup columns linearly independent
-    let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
-
-    end_timer!(timer);
-    let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
-    let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
-        instance
-            .iter()
-            .zip(advice.iter())
-            .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
-                // Construct and commit to permuted values for each lookup
-                pk.vk
-                    .cs
-                    .lookups
-                    .par_iter()
-                    .enumerate()
-                    .map(|(idx, lookup)| {
-                        GPU_GROUP_ID.set(idx);
-                        lookup
-                            .commit_permuted(
-                                pk,
-                                params,
-                                domain,
-                                theta,
-                                &advice.advice_values,
-                                &pk.fixed_values,
-                                &instance.instance_values,
-                                &mut OsRng,
-                            )
-                            .unwrap()
-                    })
-                    .unzip()
-            })
-            .unzip();
-
-    lookups_commitments.iter().for_each(|x| {
-        x.iter().for_each(|x| {
-            transcript.write_point(x[0]).unwrap();
-            transcript.write_point(x[1]).unwrap();
-        })
-    });
-
-    // Sample beta challenge
-    let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
-
-    // Sample gamma challenge
-    let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
-
-    end_timer!(timer);
-    let timer = start_timer!(|| "permutations comitted");
-
-    // Commit to permutations.
-    let permutations: Vec<permutation::prover::Committed<C>> = instance
-        .iter()
-        .zip(advice.iter())
-        .map(|(instance, advice)| {
-            pk.vk.cs.permutation.commit(
-                params,
-                pk,
-                &pk.permutation,
-                &advice.advice_values,
-                &pk.fixed_values,
-                &instance.instance_values,
-                beta,
-                gamma,
-                &mut rng,
-                transcript,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "lookups committed");
-    let lookups: Vec<Vec<_>> = lookups
-        .into_iter()
-        .map(|lookups|
-            // Construct and commit to products for each lookup
-            lookups
-                .into_par_iter()
-                .enumerate()
-                .map(|(idx, lookup)|
-                    lookup.commit_product(pk, params, beta, gamma, idx % *N_GPU))
-                .collect::<Result<Vec<_>, _>>())
-        .collect::<Result<Vec<_>, _>>()?;
-
-    let lookups: Vec<Vec<_>> = lookups
-        .into_iter()
-        .map(|lookups|
-            // Construct and commit to products for each lookup
-            lookups
-                .into_iter()
-                .map(|(p1, p2, mut z)|
-                    {
-                        for _ in 0..pk.vk.cs.blinding_factors() {
-                            z.push(C::Scalar::random(&mut rng))
-                        }
-                        (p1, p2, pk.vk.domain.lagrange_from_vec(z))
-                    })
-                .collect::<Vec<_>>())
-        .collect::<Vec<Vec<_>>>();
-
-    let lookups = {
-        let timer = start_timer!(|| "lookups msm");
-        let lookups_z_commitments = lookups
-            .iter()
-            .map(|lookups| {
-                lookups
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, l)| {
-                        GPU_GROUP_ID.set(idx);
-                        params.commit_lagrange(&l.2).to_affine()
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        end_timer!(timer);
-
-        lookups_z_commitments
-            .iter()
-            .for_each(|lookups_z_commitments| {
-                lookups_z_commitments
-                    .iter()
-                    .for_each(|lookups_z_commitment| {
-                        transcript.write_point(*lookups_z_commitment).unwrap()
-                    })
-            });
-
-        let timer = start_timer!(|| "lookups fft");
-        let lookups = lookups
-            .into_iter()
-            .map(|lookups| {
-                lookups
-                    .into_par_iter()
-                    .enumerate()
-                    .map(|(idx, l)| {
-                        GPU_GROUP_ID.set(idx);
-                        lookup::prover::Committed {
-                            permuted_input_poly: l.0,
-                            permuted_table_poly: l.1,
-                            product_poly: pk.vk.domain.lagrange_to_coeff(l.2),
-                        }
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        end_timer!(timer);
-        lookups
-    };
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "vanishing commit");
-    // Commit to the vanishing argument's random polynomial for blinding h(x_3)
-    let vanishing = vanishing::Argument::commit(params, domain, rng, transcript)?;
-
-    // Obtain challenge for keeping all separate gates linearly independent
-    let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
-
-    end_timer!(timer);
-    let timer = start_timer!(|| "h_poly");
-    // Evaluate the h(X) polynomial
-
-    #[cfg(feature = "cuda")]
     let h_poly = pk.ev.evaluate_h(
         pk,
         advice.iter().map(|a| &a.advice_polys).collect(),
         instance.iter().map(|i| &i.instance_polys).collect(),
-        *y,
-        *beta,
-        *gamma,
-        *theta,
-        &lookups,
-        &permutations,
-    );
-
-    #[cfg(not(feature = "cuda"))]
-    let h_poly = pk.ev.evaluate_h(
-        pk,
-        advice.iter().map(|a| &a.advice_cosets).collect(),
-        instance.iter().map(|i| &i.instance_cosets).collect(),
         *y,
         *beta,
         *gamma,
@@ -651,6 +682,8 @@ pub fn create_proof<
         transcript.write_scalar(*eval)?;
     }
 
+    drop(fixed_evals);
+
     end_timer!(timer);
     let timer = start_timer!(|| "eval poly vanishing");
     let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
@@ -667,8 +700,8 @@ pub fn create_proof<
         .collect::<Result<Vec<_>, _>>()?;
 
     end_timer!(timer);
-    let timer = start_timer!(|| "eval poly lookups");
 
+    let timer = start_timer!(|| "eval poly lookups");
     // Evaluate the lookups, if any, at omega^i x.
     let lookups: Vec<Vec<lookup::prover::Evaluated<C>>> = lookups
         .into_iter()
@@ -679,10 +712,9 @@ pub fn create_proof<
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-
     end_timer!(timer);
-    let timer = start_timer!(|| "multi open");
 
+    let timer = start_timer!(|| "multi open");
     let instances = instance
         .iter()
         .zip(advice.iter())
