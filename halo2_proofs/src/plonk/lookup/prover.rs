@@ -532,6 +532,13 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         }
     }
 
+    while i_unique_input_value < unique_input_values.len()
+        && unique_input_values[i_unique_input_value] == sorted_table_coeffs[i_sorted_table_coeffs]
+    {
+        i_unique_input_value += 1;
+        i_sorted_table_coeffs += 1;
+    }
+
     assert!(i_unique_input_value == unique_input_values.len());
 
     let mut permuted_table_coeffs = permuted_table_coeffs
