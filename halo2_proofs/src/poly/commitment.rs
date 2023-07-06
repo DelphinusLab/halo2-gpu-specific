@@ -5,9 +5,8 @@
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
 use crate::arithmetic::{
-    best_fft, best_multiexp, best_multiexp_gpu_cond, gpu_multiexp_bound,
-    gpu_multiexp_single_gpu_with_bound, parallelize, CurveAffine, CurveExt, Engine, FieldExt,
-    Group,
+    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine, CurveExt, Engine,
+    FieldExt, Group,
 };
 use crate::helpers::CurveRead;
 
@@ -164,7 +163,7 @@ impl<C: CurveAffine> Params<C> {
         }
 
         #[cfg(feature = "cuda")]
-        let res = gpu_multiexp_bound(&scalars, &bases[..], _max_bits);
+        let res = crate::arithmetic::gpu_multiexp_bound(&scalars, &bases[..], _max_bits);
 
         #[cfg(not(feature = "cuda"))]
         let res = best_multiexp_gpu_cond(&scalars, &bases[..]);

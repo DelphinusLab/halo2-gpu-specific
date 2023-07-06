@@ -630,10 +630,24 @@ pub fn create_proof<
         })
         .collect::<Vec<_>>();
 
+    #[cfg(feature = "cuda")]
     let h_poly = pk.ev.evaluate_h(
         pk,
         advice.iter().map(|a| &a.advice_polys).collect(),
         instance.iter().map(|i| &i.instance_polys).collect(),
+        *y,
+        *beta,
+        *gamma,
+        *theta,
+        &lookups,
+        &permutations,
+    );
+
+    #[cfg(not(feature = "cuda"))]
+    let h_poly = pk.ev.evaluate_h(
+        pk,
+        advice.iter().map(|a| &a.advice_cosets).collect(),
+        instance.iter().map(|i| &i.instance_cosets).collect(),
         *y,
         *beta,
         *gamma,

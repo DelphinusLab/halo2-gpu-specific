@@ -732,6 +732,7 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 }
 
+#[cfg(feature="cuda")]
 pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
