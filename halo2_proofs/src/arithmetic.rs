@@ -311,6 +311,16 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
 ) -> C::Curve {
+    gpu_multiexp_single_gpu_with_bound(gpu_idx, coeffs, bases, 254)
+}
+
+#[cfg(feature = "cuda")]
+pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
+    gpu_idx: usize,
+    coeffs: &[C::Scalar],
+    bases: &[C],
+    max_bits: usize,
+) -> C::Curve {
     use crate::plonk::MSM_LOCK;
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
@@ -318,20 +328,25 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
     use group::Curve;
     use pairing::bn256::Fr;
 
-    let _lock_guard = MSM_LOCK[gpu_idx].lock().unwrap();
+    if max_bits == 0 {
+        C::Curve::identity()
+    } else {
+        let _lock_guard = MSM_LOCK[gpu_idx].lock().unwrap();
 
-    let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
-    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+        let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
+        let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
 
-    let devices = Device::all();
-    let device = devices[gpu_idx % devices.len()];
-    let programs = ec_gpu_gen::program!(device).unwrap();
-    let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
-        .expect("Cannot initialize kernel!");
+        let devices = Device::all();
+        let device = devices[gpu_idx % devices.len()];
+        let programs = ec_gpu_gen::program!(device).unwrap();
+        let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
+            .expect("Cannot initialize kernel!");
 
-    let a = [kern.multiexp(bases, _coeffs).unwrap()];
-    let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
-    res[0]
+        let a = [kern.multiexp(bases, _coeffs, max_bits).unwrap()];
+
+        let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
+        res[0]
+    }
 }
 
 #[cfg(feature = "cuda")]

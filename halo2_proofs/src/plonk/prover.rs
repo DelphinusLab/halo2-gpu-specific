@@ -1,5 +1,6 @@
 use ark_std::{end_timer, start_timer};
 use ff::Field;
+use ff::PrimeField;
 use group::Curve;
 use rand_core::OsRng;
 use rand_core::RngCore;
@@ -23,6 +24,7 @@ use super::{
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
     ChallengeY, Error, ProvingKey,
 };
+use crate::plonk::lookup::prover::Permuted;
 use crate::{
     arithmetic::{eval_polynomial, BaseExt, CurveAffine, FieldExt},
     plonk::Assigned,
@@ -173,6 +175,24 @@ pub fn create_proof<
         #[cfg(not(feature = "cuda"))]
         pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
+
+    let find_max_scalar_bits = |x: &Vec<C::Scalar>| {
+        let max_scalar_repr = x
+            .iter()
+            .fold(C::Scalar::zero(), |acc, x| acc.max(*x))
+            .to_repr();
+        let max_scalar_repr_ref: &[u8] = max_scalar_repr.as_ref();
+        max_scalar_repr_ref
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (idx, v)| {
+                if *v == 0 {
+                    acc
+                } else {
+                    idx * 8 + 8 - v.leading_zeros() as usize
+                }
+            })
+    };
 
     let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> = circuits
         .iter()
@@ -340,22 +360,32 @@ pub fn create_proof<
 
             let mut advice = witness.advice;
 
-            let timer = start_timer!(|| "rng");
-            // Add blinding factors to advice columns
-            for advice in &mut advice {
-                for cell in &mut advice[unusable_rows_start..] {
-                    *cell = C::Scalar::random(&mut rng);
-                }
-            }
+            /*
+                       let timer = start_timer!(|| "rng");
+                       // Add blinding factors to advice columns
+                       for advice in &mut advice {
+                           for cell in &mut advice[unusable_rows_start..] {
+                               *cell = C::Scalar::random(&mut rng);
+                           }
+                       }
+                       end_timer!(timer);
+            */
+
+            let timer = start_timer!(|| "find column max bits");
+            let max_bits = advice
+                .par_iter()
+                .map(|x| find_max_scalar_bits(&x.values))
+                .collect::<Vec<_>>();
             end_timer!(timer);
 
             let timer = start_timer!(|| "commit_lagrange");
             let advice_commitments_projective: Vec<_> = advice
                 .iter()
+                .zip(max_bits.into_iter())
                 .enumerate()
-                .map(|(idx, poly)| {
+                .map(|(idx, (poly, max_bits))| {
                     GPU_GROUP_ID.set(idx);
-                    params.commit_lagrange(poly)
+                    params.commit_lagrange_with_bound(poly, max_bits)
                 })
                 .collect();
             end_timer!(timer);

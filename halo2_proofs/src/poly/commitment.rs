@@ -5,8 +5,8 @@
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
 use crate::arithmetic::{
-    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine,
-    CurveExt, Engine, FieldExt, Group,
+    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine, CurveExt, Engine,
+    FieldExt, Group, gpu_multiexp_single_gpu_with_bound,
 };
 use crate::helpers::CurveRead;
 
@@ -145,6 +145,21 @@ impl<C: CurveAffine> Params<C> {
         let size = scalars.len();
         assert!(bases.len() >= size);
         best_multiexp_gpu_cond(&scalars, &bases[0..size])
+    }
+
+    pub fn commit_lagrange_with_bound(
+        &self,
+        poly: &Polynomial<C::Scalar, LagrangeCoeff>,
+        max_bits: usize,
+    ) -> C::Curve {
+        //let mut scalars = Vec::with_capacity(poly.len());
+        //scalars.extend(poly.iter());
+
+        let scalars = &poly.values;
+        let bases = &self.g_lagrange;
+        let size = scalars.len();
+        assert!(bases.len() >= size);
+        gpu_multiexp_single_gpu_with_bound(0, &scalars, &bases[0..size], max_bits)
     }
 
     /// Generates an empty multiscalar multiplication struct using the

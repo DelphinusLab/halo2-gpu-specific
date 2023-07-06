@@ -14,6 +14,7 @@ use crate::{
     },
     transcript::{EncodedChallenge, TranscriptWrite},
 };
+use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
 use ff::PrimeField;
 use group::{
@@ -547,8 +548,9 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         .collect::<Vec<_>>();
 
     permuted_input_expression
-        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
-    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::random(&mut rng)));
+        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
+    permuted_table_coeffs
+        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
     assert_eq!(permuted_input_expression.len(), params.n as usize);
     assert_eq!(permuted_table_coeffs.len(), params.n as usize);
 
