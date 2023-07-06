@@ -1,5 +1,7 @@
 use super::{construct_intermediate_sets, ChallengeV, Query};
-use crate::arithmetic::{eval_polynomial, kate_division, CurveAffine, FieldExt};
+use crate::arithmetic::{
+    eval_polynomial, eval_polynomial_st, kate_division, CurveAffine, FieldExt,
+};
 use crate::poly::multiopen::ProverQuery;
 use crate::poly::Rotation;
 use crate::poly::{commitment::Params, Coeff, Polynomial};
@@ -43,11 +45,17 @@ where
             let mut poly_batch = zero();
             let mut eval_batch = C::Scalar::zero();
             let z = commitment_at_a_point.point;
-            for query in commitment_at_a_point.queries.iter() {
+
+            let evals = commitment_at_a_point
+                .queries
+                .par_iter()
+                .map(|x| x.get_eval())
+                .collect::<Vec<_>>();
+
+            for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
                 assert_eq!(query.get_point(), z);
 
                 let poly = query.get_commitment().poly;
-                let eval = query.get_eval();
                 poly_batch = poly_batch * *v + poly;
                 eval_batch = eval_batch * *v + eval;
             }
@@ -59,9 +67,7 @@ where
             };
 
             let _guard = lock.lock().unwrap();
-            //let timer = start_timer!(|| "start commit");
             *w = params.commit(&witness_poly).to_affine();
-            //end_timer!(timer);
         });
 
     for w in ws {
@@ -93,7 +99,7 @@ impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
         self.rotation
     }
     fn get_eval(&self) -> C::Scalar {
-        eval_polynomial(self.poly, self.get_point())
+        eval_polynomial_st(self.poly, self.get_point())
     }
     fn get_commitment(&self) -> Self::Commitment {
         PolynomialPointer { poly: self.poly }

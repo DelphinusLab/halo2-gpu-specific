@@ -342,7 +342,7 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
         let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
             .expect("Cannot initialize kernel!");
 
-        let a = [kern.multiexp(bases, _coeffs, max_bits).unwrap()];
+        let a = [kern.multiexp_bound(bases, _coeffs, max_bits).unwrap()];
 
         let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
         res[0]
@@ -351,38 +351,55 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
 
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    gpu_multiexp_bound(coeffs, bases, C::Scalar::NUM_BITS as usize)
+}
+
+#[cfg(feature = "cuda")]
+pub fn gpu_multiexp_bound<C: CurveAffine>(
+    coeffs: &[C::Scalar],
+    bases: &[C],
+    max_bits: usize,
+) -> C::Curve {
     use ec_gpu_gen::rust_gpu_tools::Device;
     use std::str::FromStr;
 
-    //let timer = start_timer!(|| "msm gpu");
-    let n_gpu = *crate::plonk::N_GPU;
-    let part_len = (coeffs.len() + n_gpu - 1) / n_gpu;
+    if max_bits == 0 || coeffs.len() == 0 {
+        C::Curve::identity()
+    } else {
+        //let timer = start_timer!(|| "msm gpu");
+        let n_gpu = *crate::plonk::N_GPU;
+        let part_len = (coeffs.len() + n_gpu - 1) / n_gpu;
 
-    let c = coeffs
-        .par_chunks(part_len)
-        .zip(bases.par_chunks(part_len))
-        .enumerate()
-        .map(|(gpu_idx, (c, b))| gpu_multiexp_single_gpu(gpu_idx, c, b))
-        .collect::<Vec<_>>()
-        .into_iter()
-        .reduce(|acc, x| acc + x)
-        .unwrap();
+        let c = coeffs
+            .par_chunks(part_len)
+            .zip(bases.par_chunks(part_len))
+            .enumerate()
+            .map(|(gpu_idx, (c, b))| gpu_multiexp_single_gpu_with_bound(gpu_idx, c, b, max_bits))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .reduce(|acc, x| acc + x)
+            .unwrap();
 
-    //end_timer!(timer);
-    c
+        //end_timer!(timer);
+        c
+    }
 }
 
 pub fn best_multiexp_gpu_cond<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    if coeffs.len() > 1 << 14 {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "cuda")] {
-                gpu_multiexp(coeffs, bases)
-            } else {
-                best_multiexp(coeffs, bases)
-            }
-        }
+    if coeffs.len() == 0 {
+        C::Curve::identity()
     } else {
-        best_multiexp(coeffs, bases)
+        if coeffs.len() > 1 << 14 {
+            cfg_if::cfg_if! {
+                if #[cfg(feature = "cuda")] {
+                    gpu_multiexp(coeffs, bases)
+                } else {
+                    best_multiexp(coeffs, bases)
+                }
+            }
+        } else {
+            best_multiexp(coeffs, bases)
+        }
     }
 }
 
@@ -608,17 +625,18 @@ pub fn recursive_butterfly_arithmetic<G: Group>(
     }
 }
 
+pub fn eval_polynomial_st<F: Field>(poly: &[F], point: F) -> F {
+    poly.iter()
+        .rev()
+        .fold(F::zero(), |acc, coeff| acc * point + coeff)
+}
+
 /// This evaluates a provided polynomial (in coefficient form) at `point`.
 pub fn eval_polynomial<F: Field>(poly: &[F], point: F) -> F {
-    fn evaluate<F: Field>(poly: &[F], point: F) -> F {
-        poly.iter()
-            .rev()
-            .fold(F::zero(), |acc, coeff| acc * point + coeff)
-    }
     let n = poly.len();
     let num_threads = multicore::current_num_threads();
     if n * 2 < num_threads {
-        evaluate(poly, point)
+        eval_polynomial_st(poly, point)
     } else {
         let chunk_size = (n + num_threads - 1) / num_threads;
         let mut parts = vec![F::zero(); num_threads];
@@ -628,7 +646,8 @@ pub fn eval_polynomial<F: Field>(poly: &[F], point: F) -> F {
             {
                 scope.spawn(move |_| {
                     let start = chunk_idx * chunk_size;
-                    out[0] = evaluate(poly, point) * point.pow_vartime(&[start as u64, 0, 0, 0]);
+                    out[0] = eval_polynomial_st(poly, point)
+                        * point.pow_vartime(&[start as u64, 0, 0, 0]);
                 });
             }
         });

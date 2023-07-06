@@ -3,7 +3,7 @@ use super::super::{
     ProvingKey,
 };
 use super::Argument;
-use crate::arithmetic::batch_invert;
+use crate::arithmetic::{batch_invert, eval_polynomial_st};
 use crate::plonk::evaluation::evaluate;
 use crate::poly::Basis;
 use crate::{
@@ -23,8 +23,8 @@ use group::{
 };
 use rand_core::RngCore;
 use rayon::prelude::{
-    IndexedParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
-    ParallelSliceMut,
+    IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
+    IntoParallelRefMutIterator, ParallelIterator, ParallelSliceMut,
 };
 use std::any::TypeId;
 use std::convert::TryInto;
@@ -101,8 +101,10 @@ impl<F: FieldExt> Argument<F> {
         };
 
         // Closure to construct commitment to vector of values
-        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>| {
-            params.commit_lagrange(values).to_affine()
+        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>, max_bits: usize| {
+            params
+                .commit_lagrange_with_bound(values, max_bits)
+                .to_affine()
         };
 
         // Get values of input expressions involved in the lookup and compress them
@@ -112,7 +114,12 @@ impl<F: FieldExt> Argument<F> {
         let compressed_table_expression = compress_expressions(&self.table_expressions);
 
         // Permute compressed (InputExpression, TableExpression) pair
-        let (permuted_input_expression, permuted_table_expression) = permute_expression_pair::<C, _>(
+        let (
+            permuted_input_expression,
+            permuted_table_expression,
+            permuted_input_expression_max_bits,
+            permuted_table_expression_max_bits,
+        ) = permute_expression_pair::<C, _>(
             pk,
             params,
             domain,
@@ -122,10 +129,16 @@ impl<F: FieldExt> Argument<F> {
         )?;
 
         // Commit to permuted input expression
-        let permuted_input_commitment = commit_values(&permuted_input_expression);
+        let permuted_input_commitment = commit_values(
+            &permuted_input_expression,
+            permuted_input_expression_max_bits,
+        );
 
         // Commit to permuted table expression
-        let permuted_table_commitment = commit_values(&permuted_table_expression);
+        let permuted_table_commitment = commit_values(
+            &permuted_table_expression,
+            permuted_table_expression_max_bits,
+        );
 
         Ok((
             Permuted {
@@ -206,6 +219,32 @@ impl<C: CurveAffine> Permuted<C> {
             });
         }
 
+        // Denominator uses the permuted input expression and permuted table expression
+        for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
+            .iter_mut()
+            .zip(self.permuted_input_expression.iter())
+            .zip(self.permuted_table_expression.iter())
+        {
+            *lookup_product = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
+        }
+
+        // Batch invert to obtain the denominators for the lookup product
+        // polynomials
+        lookup_product.batch_invert();
+
+        // Finish the computation of the entire fraction by computing the numerators
+        // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
+        // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
+        for ((lookup_product, compressed_input_value), compressed_table_value) in lookup_product
+            .iter_mut()
+            .zip(self.compressed_input_expression.iter())
+            .zip(self.compressed_table_expression.iter())
+        {
+            *lookup_product *=
+                (*beta + compressed_input_value) * &(*gamma + compressed_table_value);
+        }
+
+        /*
         #[cfg(feature = "cuda")]
         {
             use ec_gpu_gen::fft::FftKernel;
@@ -289,6 +328,7 @@ impl<C: CurveAffine> Permuted<C> {
                 })
                 .unwrap();
         }
+        */
 
         // The product vector is a vector of products of fractions of the form
         //
@@ -362,34 +402,27 @@ impl<C: CurveAffine> Permuted<C> {
 }
 
 impl<C: CurveAffine> Committed<C> {
-    pub(in crate::plonk) fn evaluate<E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
+    pub(in crate::plonk) fn evaluate(
         self,
         pk: &ProvingKey<C>,
         x: ChallengeX<C>,
-        transcript: &mut T,
-    ) -> Result<Evaluated<C>, Error> {
+    ) -> (Evaluated<C>, Vec<C::ScalarExt>) {
         let domain = &pk.vk.domain;
         let x_inv = domain.rotate_omega(*x, Rotation::prev());
         let x_next = domain.rotate_omega(*x, Rotation::next());
 
-        let product_eval = eval_polynomial(&self.product_poly, *x);
-        let product_next_eval = eval_polynomial(&self.product_poly, x_next);
-        let permuted_input_eval = eval_polynomial(&self.permuted_input_poly, *x);
-        let permuted_input_inv_eval = eval_polynomial(&self.permuted_input_poly, x_inv);
-        let permuted_table_eval = eval_polynomial(&self.permuted_table_poly, *x);
+        let evals = vec![
+            (&self.product_poly, *x),
+            (&self.product_poly, x_next),
+            (&self.permuted_input_poly, *x),
+            (&self.permuted_input_poly, x_inv),
+            (&self.permuted_table_poly, *x),
+        ]
+        .into_par_iter()
+        .map(|(a, b)| eval_polynomial_st(a, b))
+        .collect();
 
-        // Hash each advice evaluation
-        for eval in iter::empty()
-            .chain(Some(product_eval))
-            .chain(Some(product_next_eval))
-            .chain(Some(permuted_input_eval))
-            .chain(Some(permuted_input_inv_eval))
-            .chain(Some(permuted_table_eval))
-        {
-            transcript.write_scalar(eval)?;
-        }
-
-        Ok(Evaluated { constructed: self })
+        (Evaluated { constructed: self }, evals)
     }
 }
 
@@ -436,14 +469,19 @@ impl<C: CurveAffine> Evaluated<C> {
     }
 }
 
-type ExpressionPair<F> = (Polynomial<F, LagrangeCoeff>, Polynomial<F, LagrangeCoeff>);
+type ExpressionPair<F> = (
+    Polynomial<F, LagrangeCoeff>,
+    Polynomial<F, LagrangeCoeff>,
+    usize,
+    usize,
+);
 
 fn scalar_to_usize(s: &impl FieldExt) -> usize {
     let bytes = s.to_repr();
     usize::from_le_bytes(bytes.as_ref()[0..8].try_into().unwrap())
 }
 
-fn sort<F: FieldExt>(value: &mut Vec<F>, k: u32) {
+fn sort<F: FieldExt>(value: &mut Vec<F>) {
     let max = value.iter().reduce(|a, b| a.max(b)).unwrap();
     let expected_max = F::from(1u64 << 25);
     if max < &expected_max {
@@ -459,18 +497,7 @@ fn sort<F: FieldExt>(value: &mut Vec<F>, k: u32) {
             }
         }
     } else {
-        #[cfg(feature = "cuda")]
-        {
-            let len = value.len();
-            value.resize(1 << k, -F::one());
-            crate::arithmetic::gpu_sort(value, k);
-            value.truncate(len);
-        }
-
-        #[cfg(not(feature = "cuda"))]
         value.sort_unstable();
-
-        drop(k)
     }
 }
 
@@ -484,7 +511,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     pk: &ProvingKey<C>,
     params: &Params<C>,
     domain: &EvaluationDomain<C::Scalar>,
-    mut rng: R,
+    mut _rng: R,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, Error> {
@@ -497,8 +524,11 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     let mut sorted_table_coeffs = table_expression.to_vec();
     sorted_table_coeffs.truncate(usable_rows);
 
-    sort(&mut permuted_input_expression, params.k);
-    sort(&mut sorted_table_coeffs, params.k);
+    sort(&mut permuted_input_expression);
+    sort(&mut sorted_table_coeffs);
+
+    let max_input = *permuted_input_expression.last().unwrap();
+    let max_table = *sorted_table_coeffs.last().unwrap();
 
     let mut permuted_table_coeffs = vec![None; usable_rows];
 
@@ -547,10 +577,8 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         .filter_map(|x| *x)
         .collect::<Vec<_>>();
 
-    permuted_input_expression
-        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
-    permuted_table_coeffs
-        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
+    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
+    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
     assert_eq!(permuted_input_expression.len(), params.n as usize);
     assert_eq!(permuted_table_coeffs.len(), params.n as usize);
 
@@ -569,8 +597,25 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         }
     }
 
+    let get_scalar_bits = |x: C::Scalar| {
+        let repr = x.to_repr();
+        let max_scalar_repr_ref: &[u8] = repr.as_ref();
+        max_scalar_repr_ref
+            .iter()
+            .enumerate()
+            .fold(0, |acc, (idx, v)| {
+                if *v == 0 {
+                    acc
+                } else {
+                    idx * 8 + 8 - v.leading_zeros() as usize
+                }
+            })
+    };
+
     Ok((
         domain.lagrange_from_vec(permuted_input_expression),
         domain.lagrange_from_vec(permuted_table_coeffs),
+        16.max(get_scalar_bits(max_input)),
+        16.max(get_scalar_bits(max_table)),
     ))
 }

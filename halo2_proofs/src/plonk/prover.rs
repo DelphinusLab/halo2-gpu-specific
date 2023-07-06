@@ -1,3 +1,4 @@
+use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
 use ff::Field;
 use ff::PrimeField;
@@ -5,6 +6,7 @@ use group::Curve;
 use rand_core::OsRng;
 use rand_core::RngCore;
 use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
@@ -24,6 +26,7 @@ use super::{
     lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
     ChallengeY, Error, ProvingKey,
 };
+use crate::arithmetic::eval_polynomial_st;
 use crate::plonk::lookup::prover::Permuted;
 use crate::{
     arithmetic::{eval_polynomial, BaseExt, CurveAffine, FieldExt},
@@ -176,12 +179,9 @@ pub fn create_proof<
         pub advice_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
     }
 
-    let find_max_scalar_bits = |x: &Vec<C::Scalar>| {
-        let max_scalar_repr = x
-            .iter()
-            .fold(C::Scalar::zero(), |acc, x| acc.max(*x))
-            .to_repr();
-        let max_scalar_repr_ref: &[u8] = max_scalar_repr.as_ref();
+    let get_scalar_bits = |x: C::Scalar| {
+        let repr = x.to_repr();
+        let max_scalar_repr_ref: &[u8] = repr.as_ref();
         max_scalar_repr_ref
             .iter()
             .enumerate()
@@ -192,6 +192,10 @@ pub fn create_proof<
                     idx * 8 + 8 - v.leading_zeros() as usize
                 }
             })
+    };
+
+    let find_max_scalar_bits = |x: &Vec<C::Scalar>| {
+        get_scalar_bits(x.iter().fold(C::Scalar::zero(), |acc, x| acc.max(*x)))
     };
 
     let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> = circuits
@@ -360,16 +364,13 @@ pub fn create_proof<
 
             let mut advice = witness.advice;
 
-            /*
-                       let timer = start_timer!(|| "rng");
-                       // Add blinding factors to advice columns
-                       for advice in &mut advice {
-                           for cell in &mut advice[unusable_rows_start..] {
-                               *cell = C::Scalar::random(&mut rng);
-                           }
-                       }
-                       end_timer!(timer);
-            */
+            let timer = start_timer!(|| "rng");
+            advice.par_iter_mut().for_each(|advice| {
+                for cell in &mut advice[unusable_rows_start..] {
+                    *cell = C::Scalar::from(u16::rand(&mut OsRng) as u64);
+                }
+            });
+            end_timer!(timer);
 
             let timer = start_timer!(|| "find column max bits");
             let max_bits = advice
@@ -424,15 +425,11 @@ pub fn create_proof<
                 .cs
                 .lookups
                 .par_chunks(chunk_size)
-                .enumerate()
-                .map(|(idx, lookups)| {
-                    GPU_GROUP_ID.set(idx);
+                .map(|lookups| {
                     lookups
-                        .into_iter()
-                        .enumerate()
-                        .map(|(idx, lookup)| {
-                            let timer = start_timer!(|| format!("lookup {}", idx));
-                            let res = lookup
+                        .into_par_iter()
+                        .map(|lookup| {
+                            lookup
                                 .commit_permuted(
                                     pk,
                                     params,
@@ -443,9 +440,7 @@ pub fn create_proof<
                                     &instance.instance_values,
                                     &mut OsRng,
                                 )
-                                .unwrap();
-                            end_timer!(timer);
-                            res
+                                .unwrap()
                         })
                         .unzip()
                 })
@@ -477,7 +472,7 @@ pub fn create_proof<
                 .enumerate()
                 .map(|(idx, lookups)| {
                     lookups
-                        .into_iter()
+                        .into_par_iter()
                         .map(|lookup| {
                             lookup
                                 .commit_product(pk, params, beta, gamma, idx % *N_GPU)
@@ -654,65 +649,46 @@ pub fn create_proof<
 
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow(&[params.n as u64, 0, 0, 0]);
-
     end_timer!(timer);
+
     let timer = start_timer!(|| "eval poly");
+
+    let mut inputs = vec![];
 
     // Compute and hash instance evals for each circuit instance
     for instance in instance.iter() {
         // Evaluate polynomials at omega^i x
-        let instance_evals: Vec<_> = meta
-            .instance_queries
-            .iter()
-            .map(|&(column, at)| {
-                eval_polynomial(
-                    &instance.instance_polys[column.index()],
-                    domain.rotate_omega(*x, at),
-                )
-            })
-            .collect();
-
-        // Hash each instance column evaluation
-        for eval in instance_evals.iter() {
-            transcript.write_scalar(*eval)?;
-        }
+        meta.instance_queries.iter().for_each(|&(column, at)| {
+            inputs.push((
+                &instance.instance_polys[column.index()],
+                domain.rotate_omega(*x, at),
+            ))
+        })
     }
 
     // Compute and hash advice evals for each circuit instance
     for advice in advice.iter() {
         // Evaluate polynomials at omega^i x
-        let advice_evals: Vec<_> = meta
-            .advice_queries
-            .iter()
-            .map(|&(column, at)| {
-                eval_polynomial(
-                    &advice.advice_polys[column.index()],
-                    domain.rotate_omega(*x, at),
-                )
-            })
-            .collect();
-
-        // Hash each advice column evaluation
-        for eval in advice_evals.iter() {
-            transcript.write_scalar(*eval)?;
-        }
+        meta.advice_queries.iter().for_each(|&(column, at)| {
+            inputs.push((
+                &advice.advice_polys[column.index()],
+                domain.rotate_omega(*x, at),
+            ))
+        })
     }
 
     // Compute and hash fixed evals (shared across all circuit instances)
-    let fixed_evals: Vec<_> = meta
-        .fixed_queries
-        .iter()
-        .map(|&(column, at)| {
-            eval_polynomial(&pk.fixed_polys[column.index()], domain.rotate_omega(*x, at))
-        })
-        .collect();
+    meta.fixed_queries.iter().for_each(|&(column, at)| {
+        inputs.push((&pk.fixed_polys[column.index()], domain.rotate_omega(*x, at)))
+    });
 
-    // Hash each fixed column evaluation
-    for eval in fixed_evals.iter() {
-        transcript.write_scalar(*eval)?;
+    for eval in inputs
+        .into_par_iter()
+        .map(|(a, b)| eval_polynomial_st(a, b))
+        .collect::<Vec<_>>()
+    {
+        transcript.write_scalar(eval)?;
     }
-
-    drop(fixed_evals);
 
     end_timer!(timer);
     let timer = start_timer!(|| "eval poly vanishing");
@@ -733,15 +709,20 @@ pub fn create_proof<
 
     let timer = start_timer!(|| "eval poly lookups");
     // Evaluate the lookups, if any, at omega^i x.
-    let lookups: Vec<Vec<lookup::prover::Evaluated<C>>> = lookups
+    let (lookups, evals): (
+        Vec<Vec<lookup::prover::Evaluated<C>>>,
+        Vec<Vec<Vec<C::ScalarExt>>>,
+    ) = lookups
         .into_iter()
-        .map(|lookups| -> Result<Vec<_>, _> {
-            lookups
+        .map(|lookups| lookups.into_par_iter().map(|p| p.evaluate(pk, x)).unzip())
+        .unzip();
+    evals.into_iter().for_each(|evals| {
+        evals.into_iter().for_each(|evals| {
+            evals
                 .into_iter()
-                .map(|p| p.evaluate(pk, x, transcript))
-                .collect::<Result<Vec<_>, _>>()
+                .for_each(|eval| transcript.write_scalar(eval).unwrap())
         })
-        .collect::<Result<Vec<_>, _>>()?;
+    });
     end_timer!(timer);
 
     let timer = start_timer!(|| "multi open");

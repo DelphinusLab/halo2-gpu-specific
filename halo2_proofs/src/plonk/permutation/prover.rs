@@ -4,7 +4,7 @@ use group::{
     Curve,
 };
 use rand_core::RngCore;
-use rayon::prelude::{IntoParallelRefMutIterator, IndexedParallelIterator, ParallelIterator};
+use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::iter::{self, ExactSizeIterator};
 
 use super::super::{circuit::Any, ChallengeBeta, ChallengeGamma, ChallengeX};
