@@ -306,22 +306,17 @@ pub fn gpu_mont<F: FieldExt>(input: &mut [F]) {
 }
 
 #[cfg(feature = "cuda")]
-pub fn gpu_multiexp_single_gpu<C: CurveAffine>(
-    gpu_idx: usize,
-    coeffs: &[C::Scalar],
-    bases: &[C],
-) -> C::Curve {
-    gpu_multiexp_single_gpu_with_bound(gpu_idx, coeffs, bases, 254)
+pub fn gpu_multiexp_single_gpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    gpu_multiexp_single_gpu_with_bound(coeffs, bases, 254)
 }
 
 #[cfg(feature = "cuda")]
 pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
-    gpu_idx: usize,
     coeffs: &[C::Scalar],
     bases: &[C],
     max_bits: usize,
 ) -> C::Curve {
-    use crate::plonk::MSM_LOCK;
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
     use ec_gpu_gen::{
         fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
     };
@@ -331,7 +326,13 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
     if max_bits == 0 {
         C::Curve::identity()
     } else {
-        let _lock_guard = MSM_LOCK[gpu_idx].lock().unwrap();
+        let gpu_idx = {
+            let mut free_gpus = GPU_LOCK.lock().unwrap();
+            while free_gpus.len() == 0 {
+                free_gpus = GPU_COND_VAR.wait(free_gpus).unwrap();
+            }
+            free_gpus.pop().unwrap()
+        };
 
         let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
         let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
@@ -343,6 +344,12 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
             .expect("Cannot initialize kernel!");
 
         let a = [kern.multiexp_bound(bases, _coeffs, max_bits).unwrap()];
+
+        {
+            let mut free_gpus = GPU_LOCK.lock().unwrap();
+            free_gpus.push(gpu_idx);
+        };
+        GPU_COND_VAR.notify_one();
 
         let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
         res[0]
@@ -373,8 +380,7 @@ pub fn gpu_multiexp_bound<C: CurveAffine>(
         let c = coeffs
             .par_chunks(part_len)
             .zip(bases.par_chunks(part_len))
-            .enumerate()
-            .map(|(gpu_idx, (c, b))| gpu_multiexp_single_gpu_with_bound(gpu_idx, c, b, max_bits))
+            .map(|(c, b)| gpu_multiexp_single_gpu_with_bound(c, b, max_bits))
             .collect::<Vec<_>>()
             .into_iter()
             .reduce(|acc, x| acc + x)
@@ -439,19 +445,32 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 
 #[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    use crate::plonk::{GPU_GROUP_ID, N_GPU};
+    use crate::plonk::{GPU_COND_VAR, GPU_GROUP_ID, GPU_LOCK, N_GPU};
     use ec_gpu_gen::fft::{FftKernel, SingleFftKernel};
     use ec_gpu_gen::rust_gpu_tools::Device;
     use pairing::bn256::Fr;
 
-    let gpu_id = GPU_GROUP_ID.get() % *N_GPU;
+    let gpu_idx = {
+        let mut free_gpus = GPU_LOCK.lock().unwrap();
+        while free_gpus.len() == 0 {
+            free_gpus = GPU_COND_VAR.wait(free_gpus).unwrap();
+        }
+        free_gpus.pop().unwrap()
+    };
+
     let devices = Device::all();
-    let device = devices[gpu_id % devices.len()];
+    let device = devices[gpu_idx % devices.len()];
     let program = ec_gpu_gen::program!(device).unwrap();
     let mut kern = SingleFftKernel::<Fr>::create(program, None).expect("Cannot initialize kernel!");
     let a: &mut [Fr] = unsafe { std::mem::transmute(a) };
     let omega: &Fr = unsafe { std::mem::transmute(&omega) };
     kern.radix_fft(a, omega, log_n).expect("GPU FFT failed!");
+
+    {
+        let mut free_gpus = GPU_LOCK.lock().unwrap();
+        free_gpus.push(gpu_idx);
+    };
+    GPU_COND_VAR.notify_one();
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
@@ -868,4 +887,88 @@ fn test_lagrange_interpolate() {
             assert_eq!(eval_polynomial(&poly, *point), *eval);
         }
     }
+}
+
+pub fn best_fft_cpu_st<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
+    fn bitreverse(mut n: usize, l: usize) -> usize {
+        let mut r = 0;
+        for _ in 0..l {
+            r = (r << 1) | (n & 1);
+            n >>= 1;
+        }
+        r
+    }
+
+    let n = a.len();
+    assert_eq!(n, 1 << log_n);
+
+    for k in 0..n {
+        let rk = bitreverse(k, log_n as usize);
+        if k < rk {
+            a.swap(rk, k);
+        }
+    }
+
+    // precompute twiddle factors
+    let twiddles: Vec<_> = (0..(n / 2))
+        .scan(G::Scalar::one(), |w, _| {
+            let tw = *w;
+            *w *= &omega;
+            Some(tw)
+        })
+        .collect();
+
+    let mut chunk = 2_usize;
+    let mut twiddle_chunk = n / 2;
+    for _ in 0..log_n {
+        a.chunks_mut(chunk).for_each(|coeffs| {
+            let (left, right) = coeffs.split_at_mut(chunk / 2);
+
+            // case when twiddle factor is one
+            let (a, left) = left.split_at_mut(1);
+            let (b, right) = right.split_at_mut(1);
+            let t = b[0];
+            b[0] = a[0];
+            a[0].group_add(&t);
+            b[0].group_sub(&t);
+
+            left.iter_mut()
+                .zip(right.iter_mut())
+                .enumerate()
+                .for_each(|(i, (a, b))| {
+                    let mut t = *b;
+                    t.group_scale(&twiddles[(i + 1) * twiddle_chunk]);
+                    *b = *a;
+                    a.group_add(&t);
+                    b.group_sub(&t);
+                });
+        });
+        chunk *= 2;
+        twiddle_chunk /= 2;
+    }
+}
+
+#[test]
+fn test_fft_performance() {
+    let r = pairing::bls12_381::Fr::rand();
+    let omega = pairing::bls12_381::Fr::rand();
+    let mut buffer = vec![vec![r; 1 << 18]; 40];
+
+    let timer = start_timer!(|| "cpu fft");
+    buffer.iter_mut().for_each(|buffer| {
+        best_fft_cpu_st(&mut buffer[..], omega, 18);
+    });
+    //parallelize(&mut buffer, |buffer, start| {
+    //    for buffer in buffer {
+    //        best_fft_cpu_st(&mut buffer[..], omega, 18);
+    //    }
+    //});
+    //best_fft_cpu_st(&mut buffer[0][..], omega, 18);
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "gpu fft");
+    buffer.par_iter_mut().for_each(|buffer| {
+        gpu_fft(&mut buffer[..], omega, 18);
+    });
+    end_timer!(timer);
 }

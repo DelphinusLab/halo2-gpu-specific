@@ -12,9 +12,10 @@ use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::slice::ParallelSlice;
 use std::env::var;
+use std::iter::FromIterator;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 
@@ -65,8 +66,9 @@ lazy_static! {
         10
     )
     .unwrap();
-    pub static ref MSM_LOCK: Vec<Mutex<()>> =
-        (0..*N_GPU).into_iter().map(|_| Mutex::new(())).collect();
+    pub static ref GPU_LOCK: Mutex<Vec<usize>> =
+        Mutex::new(Vec::from_iter((0..*N_GPU).into_iter()));
+    pub static ref GPU_COND_VAR: Condvar = Condvar::new();
 }
 
 /// This creates a proof for the provided `circuit` when given the public
