@@ -801,6 +801,8 @@ impl<C: CurveAffine> Evaluator<C> {
         };
         use std::{collections::LinkedList, marker::PhantomData};
 
+        use crate::plonk::evaluation_gpu::{do_extended_fft, do_fft};
+
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
 
@@ -855,8 +857,20 @@ impl<C: CurveAffine> Evaluator<C> {
                     create_buffer_from!(l_last_buf, l_last);
                     create_buffer_from!(l_active_row_buf, l_active_row);
                     create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
-                    create_buffer_from!(first_set_buf, &first_set.permutation_product_coset[..]);
-                    create_buffer_from!(last_set_buf, &last_set.permutation_product_coset[..]);
+                    let mut _allocator = LinkedList::new();
+                    let allocator = &mut _allocator;
+                    let first_set_buf = do_extended_fft(
+                        pk,
+                        program,
+                        first_set.permutation_product_poly.clone(),
+                        allocator,
+                    )?;
+                    let last_set_buf = do_extended_fft(
+                        pk,
+                        program,
+                        last_set.permutation_product_poly.clone(),
+                        allocator,
+                    )?;
 
                     let local_work_size = 128;
                     let global_work_size = size / local_work_size;
@@ -877,8 +891,15 @@ impl<C: CurveAffine> Evaluator<C> {
                         .run()?;
 
                     let mut prev_set_buf = first_set_buf;
-                    for set in sets.iter().skip(1) {
-                        create_buffer_from!(curr_set_buf, &set.permutation_product_coset[..]);
+                    let sets_len = sets.len();
+                    for i in 1..sets_len - 1 {
+                        let set = &sets[i];
+                        let curr_set_buf = do_extended_fft(
+                            pk,
+                            program,
+                            set.permutation_product_poly.clone(),
+                            allocator,
+                        )?;
                         let kernel_name = format!("{}_eval_h_permutation_part2", "Bn256_Fr");
                         let kernel = program.create_kernel(
                             &kernel_name,
@@ -894,10 +915,30 @@ impl<C: CurveAffine> Evaluator<C> {
                             .arg(&(last_rotation.0 * rot_scale + size as i32))
                             .arg(&(size as u32))
                             .run()?;
+                        allocator.push_back(prev_set_buf);
                         prev_set_buf = curr_set_buf;
                     }
 
-                    let mut allocator = LinkedList::new();
+                    {
+                        let curr_set_buf = last_set_buf;
+                        let kernel_name = format!("{}_eval_h_permutation_part2", "Bn256_Fr");
+                        let kernel = program.create_kernel(
+                            &kernel_name,
+                            global_work_size as usize,
+                            local_work_size as usize,
+                        )?;
+                        kernel
+                            .arg(&values_buf)
+                            .arg(&curr_set_buf)
+                            .arg(&prev_set_buf)
+                            .arg(&l0_buf)
+                            .arg(&y_beta_gamma_buf)
+                            .arg(&(last_rotation.0 * rot_scale + size as i32))
+                            .arg(&(size as u32))
+                            .run()?;
+                        allocator.push_back(prev_set_buf);
+                    }
+
                     let left_buf = unsafe { program.create_buffer::<C::ScalarExt>(size)? };
                     let mut extended_data_buf =
                         unsafe { program.create_buffer::<C::ScalarExt>(size)? };
@@ -913,7 +954,12 @@ impl<C: CurveAffine> Evaluator<C> {
                         .zip(p.columns.chunks(chunk_len))
                         .zip(pk.permutation.cosets.chunks(chunk_len))
                     {
-                        create_buffer_from!(curr_set_buf, &set.permutation_product_coset[..]);
+                        let curr_set_buf = do_extended_fft(
+                            pk,
+                            program,
+                            set.permutation_product_poly.clone(),
+                            allocator,
+                        )?;
                         let kernel_name = format!("{}_eval_h_permutation_left_prepare", "Bn256_Fr");
                         let kernel = program.create_kernel(
                             &kernel_name,
@@ -958,7 +1004,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 pk,
                                 program,
                                 extended_data_buf,
-                                &mut allocator,
+                                allocator,
                             )?;
 
                             create_buffer_from!(permutation_buf, &permutation.values);

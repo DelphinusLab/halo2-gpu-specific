@@ -514,7 +514,6 @@ impl<F: FieldExt> ProveExpression<F> {
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
-        let origin_size = 1u32 << pk.vk.domain.k();
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
@@ -650,29 +649,7 @@ impl<F: FieldExt> ProveExpression<F> {
                         } => (instance[*column_index].clone(), rotation),
                     };
 
-                    //let timer = start_timer!(|| "gpu eval unit");
-                    let values = allocator.pop_front().unwrap_or_else(|| unsafe {
-                        program.create_buffer::<F>(size as usize).unwrap()
-                    });
-
-                    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
-                    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
-                    //end_timer!(timer);
-
-                    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-
-                    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                    let kernel = program.create_kernel(
-                        &kernel_name,
-                        global_work_size as usize,
-                        local_work_size as usize,
-                    )?;
-                    kernel
-                        .arg(&origin_values)
-                        .arg(&values)
-                        .arg(&origin_size)
-                        .run()?;
-                    let buffer = do_fft(pk, program, values, allocator)?;
+                    let buffer = do_extended_fft(pk, program, origin_values, allocator)?;
 
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
@@ -732,7 +709,45 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 }
 
-#[cfg(feature="cuda")]
+#[cfg(feature = "cuda")]
+pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    origin_values: Polynomial<F, Coeff>,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
+    let origin_size = 1u32 << pk.vk.domain.k();
+    let extended_size = 1u32 << pk.vk.domain.extended_k();
+    let local_work_size = 128;
+    let global_work_size = extended_size / local_work_size;
+
+    //let timer = start_timer!(|| "gpu eval unit");
+    let values = allocator
+        .pop_front()
+        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
+
+    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
+    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
+    //end_timer!(timer);
+
+    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+
+    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+    let kernel = program.create_kernel(
+        &kernel_name,
+        global_work_size as usize,
+        local_work_size as usize,
+    )?;
+    kernel
+        .arg(&origin_values)
+        .arg(&values)
+        .arg(&origin_size)
+        .run()?;
+
+    do_fft(pk, program, values, allocator)
+}
+
+#[cfg(feature = "cuda")]
 pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,

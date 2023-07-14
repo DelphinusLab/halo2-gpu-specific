@@ -608,6 +608,7 @@ pub fn create_proof<
                             let z = domain.lagrange_to_coeff(z);
                             let permutation_product_poly = z.clone();
 
+                            #[cfg(not(feature = "cuda"))]
                             let permutation_product_coset = domain.coeff_to_extended(z.clone());
 
                             let permutation_product_commitment =
@@ -620,6 +621,7 @@ pub fn create_proof<
 
                             permutation::prover::CommittedSet {
                                 permutation_product_poly,
+                                #[cfg(not(feature = "cuda"))]
                                 permutation_product_coset,
                             }
                         })

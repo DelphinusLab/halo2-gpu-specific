@@ -487,6 +487,23 @@ pub enum Expression<F> {
 }
 
 impl<F: Field> Expression<F> {
+    pub fn is_pure_fixed(&self) -> Option<usize> {
+        match self {
+            Expression::Fixed {
+                column_index,
+                rotation,
+                ..
+            } => {
+                if rotation.0 == 0 {
+                    Some(*column_index)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Evaluate the polynomial using the provided closures to perform the
     /// operations.
     pub fn evaluate<T>(

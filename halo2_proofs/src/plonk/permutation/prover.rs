@@ -23,6 +23,7 @@ use crate::{
 
 pub(crate) struct CommittedSet<C: CurveAffine> {
     pub(crate) permutation_product_poly: Polynomial<C::Scalar, Coeff>,
+    #[cfg(not(feature = "cuda"))]
     pub(crate) permutation_product_coset: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
 }
 
