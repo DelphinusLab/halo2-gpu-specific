@@ -726,11 +726,8 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .pop_front()
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
-    //let timer = start_timer!(|| "coeff_to_extended_without_fft");
-    let origin_values = pk.vk.domain.coeff_to_extended_without_fft(origin_values);
-    //end_timer!(timer);
-
     let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+    let origin_values = do_distribute_powers_zeta(pk, program, origin_values, true)?;
 
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
@@ -744,7 +741,65 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .arg(&origin_size)
         .run()?;
 
-    do_fft(pk, program, values, allocator)
+    let domain = &pk.vk.domain;
+    do_fft_pure(
+        program,
+        values,
+        domain.extended_k(),
+        domain.get_extended_omega(),
+        allocator,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn do_extended_fft2<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    origin_values: Polynomial<F, Coeff>,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
+    let origin_size = 1u32 << pk.vk.domain.k();
+    let extended_size = 1u32 << pk.vk.domain.extended_k();
+    let local_work_size = 128;
+    let global_work_size = extended_size / local_work_size;
+
+    let domain = &pk.vk.domain;
+
+    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
+    let origin_values = do_ifft(
+        program,
+        origin_values,
+        domain.k(),
+        domain.get_omega(),
+        domain.get_omega_inv(),
+        allocator,
+    )?;
+    let origin_values = do_distribute_powers_zeta(pk, program, origin_values, true)?;
+
+    //let timer = start_timer!(|| "gpu eval unit");
+    let values = allocator
+        .pop_front()
+        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
+
+    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+    let kernel = program.create_kernel(
+        &kernel_name,
+        global_work_size as usize,
+        local_work_size as usize,
+    )?;
+    kernel
+        .arg(&origin_values)
+        .arg(&values)
+        .arg(&origin_size)
+        .run()?;
+
+    do_fft_pure(
+        program,
+        values,
+        domain.extended_k(),
+        domain.get_extended_omega(),
+        allocator,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -754,9 +809,82 @@ pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     values: Buffer<F>,
     allocator: &mut LinkedList<Buffer<F>>,
 ) -> EcResult<Buffer<F>> {
-    let log_n = pk.vk.domain.extended_k();
+    do_fft_core(
+        program,
+        values,
+        pk.vk.domain.extended_k(),
+        pk.vk.domain.get_extended_omega(),
+        None,
+        allocator,
+    )
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn do_fft_pure<F: FieldExt>(
+    program: &Program,
+    values: Buffer<F>,
+    log_n: u32,
+    omega: F,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
+    do_fft_core(program, values, log_n, omega, None, allocator)
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    values: Buffer<F>,
+    into_coset: bool,
+) -> EcResult<Buffer<F>> {
+    let size = 1u32 << pk.vk.domain.k();
+    let local_work_size = 128;
+    let global_work_size = size / local_work_size;
+
+    let domain = &pk.vk.domain;
+    let coset_powers = if into_coset {
+        [domain.g_coset, domain.g_coset_inv]
+    } else {
+        [domain.g_coset_inv, domain.g_coset]
+    };
+    let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
+
+    let kernel_name = format!("{}_distribute_powers_zeta", "Bn256_Fr");
+    let kernel = program.create_kernel(
+        &kernel_name,
+        global_work_size as usize,
+        local_work_size as usize,
+    )?;
+    kernel
+        .arg(&values)
+        .arg(&coset_powers_buffer)
+        .arg(&(coset_powers.len() as u32 + 1))
+        .run()?;
+    Ok(values)
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn do_ifft<F: FieldExt>(
+    program: &Program,
+    values: Buffer<F>,
+    log_n: u32,
+    omega: F,
+    omega_inv: F,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
+    do_fft_core(program, values, log_n, omega, Some(omega_inv), allocator)
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn do_fft_core<F: FieldExt>(
+    program: &Program,
+    values: Buffer<F>,
+    log_n: u32,
+    omega: F,
+    divisor: Option<F>,
+    allocator: &mut LinkedList<Buffer<F>>,
+) -> EcResult<Buffer<F>> {
     let n = 1 << log_n;
-    let omega = pk.vk.domain.get_extended_omega();
     const MAX_LOG2_RADIX: u32 = 8;
     const LOG2_MAX_ELEMENTS: usize = 32;
     const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
@@ -821,6 +949,26 @@ pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 
         log_p += deg;
         std::mem::swap(&mut src_buffer, &mut dst_buffer);
+    }
+
+    if let Some(divisor) = divisor {
+        let divisor = vec![divisor];
+        let divisor_buffer = program.create_buffer_from_slice(&divisor[..])?;
+        let local_work_size = 128;
+        let global_work_size = n / local_work_size;
+        let kernel_name = format!("{}_eval_mul_c", "Bn256_Fr");
+        let kernel = program.create_kernel(
+            &kernel_name,
+            global_work_size as usize,
+            local_work_size as usize,
+        )?;
+        kernel
+            .arg(&src_buffer)
+            .arg(&src_buffer)
+            .arg(&0u32)
+            .arg(&divisor_buffer)
+            .arg(&(n as u32))
+            .run()?;
     }
 
     allocator.push_back(dst_buffer);
