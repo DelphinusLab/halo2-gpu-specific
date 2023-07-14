@@ -43,12 +43,7 @@ pub(crate) struct Evaluated<C: CurveAffine> {
 }
 
 impl Argument {
-    pub(in crate::plonk) fn commit<
-        C: CurveAffine,
-        E: EncodedChallenge<C>,
-        R: RngCore,
-        T: TranscriptWrite<C, E>,
-    >(
+    pub(in crate::plonk) fn commit<C: CurveAffine, R: RngCore>(
         &self,
         params: &Params<C>,
         pk: &plonk::ProvingKey<C>,
@@ -59,8 +54,7 @@ impl Argument {
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
         mut rng: R,
-        transcript: &mut T,
-    ) -> Result<Committed<C>, Error> {
+    ) -> Result<Vec<Polynomial<C::ScalarExt, LagrangeCoeff>>, Error> {
         let domain = &pk.vk.domain;
 
         // How many columns can be included in a single permutation polynomial?
@@ -72,7 +66,7 @@ impl Argument {
         let blinding_factors = pk.vk.cs.blinding_factors();
 
         // Each column gets its own delta power.
-        let mut deltaomega = C::Scalar::one();
+        let mut delta_omega = C::Scalar::one();
 
         // Track the "last" value from the previous column set
         let mut last_z = C::Scalar::one();
@@ -101,19 +95,14 @@ impl Argument {
                     Any::Fixed => fixed,
                     Any::Instance => instance,
                 };
-                parallelize(&mut modified_values, |modified_values, start| {
-                    for ((modified_values, value), permuted_value) in modified_values
-                        .iter_mut()
-                        .zip(values[column.index()][start..].iter())
-                        .zip(permuted_column_values[start..].iter())
-                    {
-                        *modified_values *= &(*beta * permuted_value + &*gamma + value);
-                    }
-                });
+                for i in 0..params.n as usize {
+                    modified_values[i] *=
+                        &(*beta * permuted_column_values[i] + &*gamma + values[column.index()][i]);
+                }
             }
 
             // Invert to obtain the denominator for the permutation product polynomial
-            batch_invert(&mut modified_values);
+            modified_values.iter_mut().batch_invert();
 
             // Iterate over each column again, this time finishing the computation
             // of the entire fraction by computing the numerators
@@ -124,18 +113,12 @@ impl Argument {
                     Any::Fixed => fixed,
                     Any::Instance => instance,
                 };
-                parallelize(&mut modified_values, |modified_values, start| {
-                    let mut deltaomega = deltaomega * &omega.pow_vartime(&[start as u64, 0, 0, 0]);
-                    for (modified_values, value) in modified_values
-                        .iter_mut()
-                        .zip(values[column.index()][start..].iter())
-                    {
-                        // Multiply by p_j(\omega^i) + \delta^j \omega^i \beta
-                        *modified_values *= &(deltaomega * &*beta + &*gamma + value);
-                        deltaomega *= &omega;
-                    }
-                });
-                deltaomega *= &C::Scalar::DELTA;
+                for i in 0..params.n as usize {
+                    modified_values[i] *=
+                        &(delta_omega * &*beta + &*gamma + values[column.index()][i]);
+                    delta_omega *= &omega;
+                }
+                delta_omega *= &C::Scalar::DELTA;
             }
 
             // The modified_values vector is a vector of products of fractions
@@ -151,13 +134,15 @@ impl Argument {
             // over our domain, starting with z[0] = 1
 
             let mut z = vec![C::Scalar::zero(); params.n as usize];
-            z.par_iter_mut().enumerate().for_each(|(i, z)| {
+            z.iter_mut().enumerate().for_each(|(i, z)| {
                 if i > 0 {
                     *z = modified_values[i - 1];
                 }
             });
             z[0] = last_z;
-            mul_acc(&mut z);
+            for i in 0..z.len() - 1 {
+                z[i + 1] = z[i] * z[i + 1];
+            }
 
             let mut z = domain.lagrange_from_vec(z);
             // Set blinding factors
@@ -167,25 +152,10 @@ impl Argument {
             // Set new last_z
             last_z = z[params.n as usize - (blinding_factors + 1)];
 
-            let permutation_product_commitment_projective = params.commit_lagrange(&z);
-            let z = domain.lagrange_to_coeff(z);
-            let permutation_product_poly = z.clone();
-
-            let permutation_product_coset = domain.coeff_to_extended(z.clone());
-
-            let permutation_product_commitment =
-                permutation_product_commitment_projective.to_affine();
-
-            // Hash the permutation product commitment
-            transcript.write_point(permutation_product_commitment)?;
-
-            sets.push(CommittedSet {
-                permutation_product_poly,
-                permutation_product_coset,
-            });
+            sets.push(z);
         }
 
-        Ok(Committed { sets })
+        Ok(sets)
     }
 }
 

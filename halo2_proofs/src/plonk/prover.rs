@@ -507,89 +507,134 @@ pub fn create_proof<
         .collect::<Vec<Vec<_>>>();
     end_timer!(timer);
 
-    let timer = start_timer!(|| "lookups msm");
-    let lookups_z_commitments = lookups
-        .iter()
-        .flat_map(|lookups| {
-            lookups
-                .into_iter()
-                .flat_map(|lookups| {
-                    lookups
+    let (lookups, permutations) = std::thread::scope(|s| {
+        let permutations = s.spawn(|| {
+            // prepare permutation value.
+            instance
+                .iter()
+                .zip(advice.iter())
+                .map(|(instance, advice)| {
+                    pk.vk.cs.permutation.commit(
+                        params,
+                        pk,
+                        &pk.permutation,
+                        &advice,
+                        &pk.fixed_values,
+                        &instance.instance_values,
+                        beta,
+                        gamma.clone(),
+                        &mut OsRng,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        });
+
+        let timer = start_timer!(|| "lookups msm");
+        let lookups_z_commitments = lookups
+            .iter()
+            .flat_map(|lookups| {
+                lookups
+                    .into_iter()
+                    .flat_map(|lookups| {
+                        lookups
+                            .into_iter()
+                            .enumerate()
+                            .map(|(idx, l)| {
+                                GPU_GROUP_ID.set(idx);
+                                params.commit_lagrange(&l.2).to_affine()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "lookups fft");
+        let lookups = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_par_iter()
+                    .enumerate()
+                    .flat_map(|(idx, lookups)| {
+                        GPU_GROUP_ID.set(idx);
+                        lookups
+                            .into_iter()
+                            .map(
+                                |(
+                                    lookup_permuted_input,
+                                    lookup_permuted_table,
+                                    lookups_product,
+                                )| {
+                                    lookup::prover::Committed {
+                                        permuted_input_poly: pk
+                                            .vk
+                                            .domain
+                                            .lagrange_to_coeff_st(lookup_permuted_input),
+                                        permuted_table_poly: pk
+                                            .vk
+                                            .domain
+                                            .lagrange_to_coeff_st(lookup_permuted_table),
+                                        product_poly: pk
+                                            .vk
+                                            .domain
+                                            .lagrange_to_coeff_st(lookups_product),
+                                    }
+                                },
+                            )
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "permutation commit");
+        let permutations = permutations
+            .join()
+            .expect("permutations thread failed unexpectedly");
+
+        let permutations = permutations
+            .into_iter()
+            .map(|permutations| {
+                permutation::prover::Committed {
+                    sets: permutations
                         .into_iter()
-                        .enumerate()
-                        .map(|(idx, l)| {
-                            GPU_GROUP_ID.set(idx);
-                            params.commit_lagrange(&l.2).to_affine()
+                        .map(|z| {
+                            let permutation_product_commitment_projective =
+                                params.commit_lagrange(&z);
+                            let z = domain.lagrange_to_coeff(z);
+                            let permutation_product_poly = z.clone();
+
+                            let permutation_product_coset = domain.coeff_to_extended(z.clone());
+
+                            let permutation_product_commitment =
+                                permutation_product_commitment_projective.to_affine();
+
+                            // Hash the permutation product commitment
+                            transcript
+                                .write_point(permutation_product_commitment)
+                                .unwrap();
+
+                            permutation::prover::CommittedSet {
+                                permutation_product_poly,
+                                permutation_product_coset,
+                            }
                         })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    end_timer!(timer);
+                        .collect(),
+                }
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
 
-    let timer = start_timer!(|| "lookups fft");
+        lookups_z_commitments
+            .into_iter()
+            .for_each(|lookups_z_commitment| transcript.write_point(lookups_z_commitment).unwrap());
 
-    let lookups = lookups
-        .into_iter()
-        .map(|lookups| {
-            lookups
-                .into_par_iter()
-                .enumerate()
-                .flat_map(|(idx, lookups)| {
-                    GPU_GROUP_ID.set(idx);
-                    lookups
-                        .into_iter()
-                        .map(
-                            |(lookup_permuted_input, lookup_permuted_table, lookups_product)| {
-                                lookup::prover::Committed {
-                                    permuted_input_poly: pk
-                                        .vk
-                                        .domain
-                                        .lagrange_to_coeff_st(lookup_permuted_input),
-                                    permuted_table_poly: pk
-                                        .vk
-                                        .domain
-                                        .lagrange_to_coeff_st(lookup_permuted_table),
-                                    product_poly: pk
-                                        .vk
-                                        .domain
-                                        .lagrange_to_coeff_st(lookups_product),
-                                }
-                            },
-                        )
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "permutations committed");
-    // Commit to permutations.
-    let permutations: Vec<permutation::prover::Committed<C>> = instance
-        .iter()
-        .zip(advice.iter())
-        .map(|(instance, advice)| {
-            pk.vk.cs.permutation.commit(
-                params,
-                pk,
-                &pk.permutation,
-                &advice,
-                &pk.fixed_values,
-                &instance.instance_values,
-                beta,
-                gamma,
-                &mut rng,
-                transcript,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    end_timer!(timer);
-
-    lookups_z_commitments
-        .into_iter()
-        .for_each(|lookups_z_commitment| transcript.write_point(lookups_z_commitment).unwrap());
+        (lookups, permutations)
+    });
 
     let timer = start_timer!(|| "vanishing commit");
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
