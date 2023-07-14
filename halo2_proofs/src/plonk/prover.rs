@@ -372,21 +372,12 @@ pub fn create_proof<
             });
             end_timer!(timer);
 
-            let timer = start_timer!(|| "find column max bits");
-            let max_bits = advice
-                .par_iter()
-                .map(|x| find_max_scalar_bits(&x.values))
-                .collect::<Vec<_>>();
-            end_timer!(timer);
-
             let timer = start_timer!(|| "commit_lagrange");
             let advice_commitments_projective: Vec<_> = advice
-                .iter()
-                .zip(max_bits.into_iter())
-                .enumerate()
-                .map(|(idx, (poly, max_bits))| {
-                    GPU_GROUP_ID.set(idx);
-                    params.commit_lagrange_with_bound(poly, max_bits)
+                .par_iter()
+                .map(|advice| {
+                    let max_bits = find_max_scalar_bits(&advice.values);
+                    params.commit_lagrange_with_bound(advice, max_bits)
                 })
                 .collect();
             end_timer!(timer);
