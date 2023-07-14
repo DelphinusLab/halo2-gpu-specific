@@ -752,7 +752,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) fn do_extended_fft2<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+pub(crate) fn _do_extended_fft2<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
     origin_values: Polynomial<F, Coeff>,
@@ -766,7 +766,7 @@ pub(crate) fn do_extended_fft2<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     let domain = &pk.vk.domain;
 
     let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-    let origin_values = do_ifft(
+    let origin_values = _do_ifft(
         program,
         origin_values,
         domain.k(),
@@ -864,7 +864,7 @@ pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = 
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) fn do_ifft<F: FieldExt>(
+pub(crate) fn _do_ifft<F: FieldExt>(
     program: &Program,
     values: Buffer<F>,
     log_n: u32,
