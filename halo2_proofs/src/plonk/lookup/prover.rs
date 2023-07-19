@@ -511,7 +511,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     pk: &ProvingKey<C>,
     params: &Params<C>,
     domain: &EvaluationDomain<C::Scalar>,
-    mut _rng: R,
+    mut rng: R,
     input_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
     table_expression: &Polynomial<C::Scalar, LagrangeCoeff>,
 ) -> Result<ExpressionPair<C::Scalar>, Error> {
@@ -577,8 +577,8 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         .filter_map(|x| *x)
         .collect::<Vec<_>>();
 
-    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
-    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::zero()));
+    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)));
+    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_|C::Scalar::from(u16::rand(&mut rng) as u64)));
     assert_eq!(permuted_input_expression.len(), params.n as usize);
     assert_eq!(permuted_table_coeffs.len(), params.n as usize);
 
