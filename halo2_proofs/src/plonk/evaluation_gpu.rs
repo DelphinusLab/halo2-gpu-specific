@@ -374,7 +374,7 @@ impl<T: std::fmt::Debug> Cache<T> {
                 .0
                 .clone();
             let drop_value = self.data.remove(&min_ts).unwrap().0;
-            if Rc::strong_count(&value) == 1 {
+            if Rc::strong_count(&drop_value) == 1 {
                 on_drop(Rc::try_unwrap(drop_value).unwrap());
             }
             self.data.insert(key, (value.clone(), self.ts));
