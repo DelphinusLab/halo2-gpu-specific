@@ -487,9 +487,50 @@ pub enum Expression<F> {
 }
 
 impl<F: Field> Expression<F> {
+    pub fn is_constant(&self) -> Option<F> {
+        match self {
+            Expression::Constant(c) => Some(*c),
+            _ => None,
+        }
+    }
+
     pub fn is_pure_fixed(&self) -> Option<usize> {
         match self {
             Expression::Fixed {
+                column_index,
+                rotation,
+                ..
+            } => {
+                if rotation.0 == 0 {
+                    Some(*column_index)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_pure_advice(&self) -> Option<usize> {
+        match self {
+            Expression::Advice {
+                column_index,
+                rotation,
+                ..
+            } => {
+                if rotation.0 == 0 {
+                    Some(*column_index)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_pure_instance(&self) -> Option<usize> {
+        match self {
+            Expression::Instance {
                 column_index,
                 rotation,
                 ..
@@ -885,6 +926,17 @@ impl<F: Field> Add for Expression<F> {
         if self.contains_simple_selector() || rhs.contains_simple_selector() {
             panic!("attempted to use a simple selector in an addition");
         }
+        if Some(F::zero()) == self.is_constant() {
+            return rhs;
+        }
+        if Some(F::zero()) == rhs.is_constant() {
+            return self;
+        }
+        if let Some(l) = rhs.is_constant() {
+            if let Some(r) = self.is_constant() {
+                return Expression::Constant(l + r);
+            }
+        }
         Expression::Sum(Box::new(self), Box::new(rhs))
     }
 }
@@ -904,6 +956,17 @@ impl<F: Field> Mul for Expression<F> {
     fn mul(self, rhs: Expression<F>) -> Expression<F> {
         if self.contains_simple_selector() && rhs.contains_simple_selector() {
             panic!("attempted to multiply two expressions containing simple selectors");
+        }
+        if Some(F::one()) == self.is_constant() {
+            return rhs;
+        }
+        if Some(F::one()) == rhs.is_constant() {
+            return self;
+        }
+        if let Some(l) = rhs.is_constant() {
+            if let Some(r) = self.is_constant() {
+                return Expression::Constant(l * r);
+            }
         }
         Expression::Product(Box::new(self), Box::new(rhs))
     }

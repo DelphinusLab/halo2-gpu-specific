@@ -1324,6 +1324,18 @@ pub fn evaluate<F: FieldExt, B: Basis>(
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
 ) -> Vec<F> {
+    if let Some(idx) = expression.is_pure_fixed() {
+        return fixed[idx].to_vec();
+    }
+
+    if let Some(idx) = expression.is_pure_advice() {
+        return advice[idx].to_vec();
+    }
+
+    if let Some(idx) = expression.is_pure_instance() {
+        return instance[idx].to_vec();
+    }
+
     let mut values = vec![F::zero(); size];
     let isize = size as i32;
     parallelize(&mut values, |values, start| {
@@ -1356,5 +1368,59 @@ pub fn evaluate<F: FieldExt, B: Basis>(
             );
         }
     });
+    values
+}
+
+/// Simple evaluation of an expression
+pub fn evaluate_st<F: FieldExt, B: Basis>(
+    expression: &Expression<F>,
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+) -> Vec<F> {
+    if let Some(idx) = expression.is_pure_fixed() {
+        return fixed[idx].to_vec();
+    }
+
+    if let Some(idx) = expression.is_pure_advice() {
+        return advice[idx].to_vec();
+    }
+
+    if let Some(idx) = expression.is_pure_instance() {
+        return instance[idx].to_vec();
+    }
+
+    let mut values = vec![F::zero(); size];
+    let isize = size as i32;
+    for (i, value) in values.iter_mut().enumerate() {
+        let idx = i;
+        *value = expression.evaluate(
+            &|scalar| scalar,
+            &|_| panic!("virtual selectors are removed during optimization"),
+            &|_, column_index, rotation| {
+                fixed[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+            },
+            &|_, column_index, rotation| {
+                advice[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+            },
+            &|_, column_index, rotation| {
+                instance[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+            },
+            &|a| -a,
+            &|a, b| a + &b,
+            &|a, b| {
+                let a = a();
+
+                if a == F::zero() {
+                    a
+                } else {
+                    a * b()
+                }
+            },
+            &|a, scalar| a * scalar,
+        );
+    }
     values
 }

@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::Argument;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
-use crate::plonk::evaluation::evaluate;
+use crate::plonk::evaluation::{evaluate, evaluate_st};
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -94,9 +94,9 @@ impl<F: FieldExt> Argument<F> {
                         instance_values,
                     ))
                 })
-                .fold(domain.empty_lagrange(), |acc, expression| {
+                .reduce(|acc, expression| {
                     acc * *theta + &expression
-                });
+                }).unwrap();
             compressed_expression
         };
 
