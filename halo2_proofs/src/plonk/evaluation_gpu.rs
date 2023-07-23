@@ -421,7 +421,7 @@ impl<F: FieldExt> ProveExpression<F> {
             self.gen_cache_policy(&mut unit_cache);
             unit_cache.analyze();
 
-            let helper = gen_do_extended_fft(pk, program)?;
+            let mut helper = gen_do_extended_fft(pk, program)?;
             let values_buf = self._eval_gpu(
                 pk,
                 program,
@@ -430,7 +430,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 &mut ys,
                 &mut unit_cache,
                 &mut LinkedList::new(),
-                &helper,
+                &mut helper,
             )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
 
@@ -468,10 +468,10 @@ impl<F: FieldExt> ProveExpression<F> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let helper = gen_do_extended_fft(pk, program)?;
+        let mut helper = gen_do_extended_fft(pk, program)?;
 
         let v = self._eval_gpu(
-            pk, program, advice, instance, y, unit_cache, allocator, &helper,
+            pk, program, advice, instance, y, unit_cache, allocator, &mut helper,
         )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
@@ -520,7 +520,7 @@ impl<F: FieldExt> ProveExpression<F> {
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
-        helper: &ExtendedFFTHelper<F>,
+        helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -725,6 +725,7 @@ impl<F: FieldExt> ProveExpression<F> {
 
 #[cfg(feature = "cuda")]
 pub(crate) struct ExtendedFFTHelper<F: FieldExt> {
+    pub(crate) origin_value_buffer: Rc<Buffer<F>>,
     pub(crate) coset_powers_buffer: Rc<Buffer<F>>,
     pub(crate) pq_buffer: Rc<Buffer<F>>,
     pub(crate) omegas_buffer: Rc<Buffer<F>>,
@@ -768,7 +769,10 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     }
     let omegas_buffer = Rc::new(program.create_buffer_from_slice(&omegas)?);
 
+    let origin_value_buffer = Rc::new(unsafe { program.create_buffer::<F>(1 << domain.k())? });
+
     Ok(ExtendedFFTHelper {
+        origin_value_buffer,
         omegas_buffer,
         coset_powers_buffer,
         pq_buffer,
@@ -781,7 +785,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     program: &Program,
     origin_values: Polynomial<F, Coeff>,
     allocator: &mut LinkedList<Buffer<F>>,
-    helper: &ExtendedFFTHelper<F>,
+    helper: &mut ExtendedFFTHelper<F>,
 ) -> EcResult<Buffer<F>> {
     let origin_size = 1u32 << pk.vk.domain.k();
     let extended_size = 1u32 << pk.vk.domain.extended_k();
@@ -793,9 +797,15 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .pop_front()
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
-    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-    let origin_values =
-        do_distribute_powers_zeta(pk, program, origin_values, &helper.coset_powers_buffer)?;
+    let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
+    program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
+
+    do_distribute_powers_zeta(
+        pk,
+        program,
+        origin_values_buffer,
+        &helper.coset_powers_buffer,
+    )?;
 
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
@@ -804,7 +814,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         local_work_size as usize,
     )?;
     kernel
-        .arg(&origin_values)
+        .arg(origin_values_buffer)
         .arg(&values)
         .arg(&origin_size)
         .run()?;
@@ -814,7 +824,6 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         program,
         values,
         domain.extended_k(),
-        domain.get_extended_omega(),
         allocator,
         &helper.pq_buffer,
         &helper.omegas_buffer,
@@ -834,7 +843,6 @@ pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         program,
         values,
         pk.vk.domain.extended_k(),
-        pk.vk.domain.get_extended_omega(),
         None,
         allocator,
         pq_buffer,
@@ -847,7 +855,6 @@ pub(crate) fn do_fft_pure<F: FieldExt>(
     program: &Program,
     values: Buffer<F>,
     log_n: u32,
-    omega: F,
     allocator: &mut LinkedList<Buffer<F>>,
     pq_buffer: &Buffer<F>,
     omegas_buffer: &Buffer<F>,
@@ -856,7 +863,6 @@ pub(crate) fn do_fft_pure<F: FieldExt>(
         program,
         values,
         log_n,
-        omega,
         None,
         allocator,
         pq_buffer,
@@ -868,9 +874,9 @@ pub(crate) fn do_fft_pure<F: FieldExt>(
 pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
-    values: Buffer<F>,
+    values: &mut Buffer<F>,
     coset_powers_buffer: &Buffer<F>,
-) -> EcResult<Buffer<F>> {
+) -> EcResult<()> {
     let size = 1u32 << pk.vk.domain.k();
     let local_work_size = 128;
     let global_work_size = size / local_work_size;
@@ -881,8 +887,8 @@ pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = 
         global_work_size as usize,
         local_work_size as usize,
     )?;
-    kernel.arg(&values).arg(coset_powers_buffer).arg(&3).run()?;
-    Ok(values)
+    kernel.arg(values).arg(coset_powers_buffer).arg(&3).run()?;
+    Ok(())
 }
 
 #[cfg(feature = "cuda")]
@@ -890,7 +896,6 @@ pub(crate) fn _do_ifft<F: FieldExt>(
     program: &Program,
     values: Buffer<F>,
     log_n: u32,
-    omega: F,
     omega_inv: F,
     allocator: &mut LinkedList<Buffer<F>>,
     pq_buffer: &Buffer<F>,
@@ -900,7 +905,6 @@ pub(crate) fn _do_ifft<F: FieldExt>(
         program,
         values,
         log_n,
-        omega,
         Some(omega_inv),
         allocator,
         pq_buffer,
@@ -913,7 +917,6 @@ pub(crate) fn do_fft_core<F: FieldExt>(
     program: &Program,
     values: Buffer<F>,
     log_n: u32,
-    omega: F,
     divisor: Option<F>,
     allocator: &mut LinkedList<Buffer<F>>,
     pq_buffer: &Buffer<F>,
