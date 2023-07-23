@@ -420,6 +420,11 @@ impl<F: FieldExt> ProveExpression<F> {
             let mut unit_cache = Cache::new(cache_size);
             self.gen_cache_policy(&mut unit_cache);
             unit_cache.analyze();
+
+            let domain = &pk.vk.domain;
+            let coset_powers = [domain.g_coset, domain.g_coset_inv];
+            let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
+
             let values_buf = self._eval_gpu(
                 pk,
                 program,
@@ -428,6 +433,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 &mut ys,
                 &mut unit_cache,
                 &mut LinkedList::new(),
+                &coset_powers_buffer,
             )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
 
@@ -465,7 +471,20 @@ impl<F: FieldExt> ProveExpression<F> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let v = self._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
+        let domain = &pk.vk.domain;
+        let coset_powers = [domain.g_coset, domain.g_coset_inv];
+        let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
+
+        let v = self._eval_gpu(
+            pk,
+            program,
+            advice,
+            instance,
+            y,
+            unit_cache,
+            allocator,
+            &coset_powers_buffer,
+        )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
@@ -513,6 +532,7 @@ impl<F: FieldExt> ProveExpression<F> {
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
+        coset_powers_buffer: &Buffer<F>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -521,8 +541,26 @@ impl<F: FieldExt> ProveExpression<F> {
 
         match self {
             ProveExpression::Op(l, r, op) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
-                let r = r._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
+                let l = l._eval_gpu(
+                    pk,
+                    program,
+                    advice,
+                    instance,
+                    y,
+                    unit_cache,
+                    allocator,
+                    coset_powers_buffer,
+                )?;
+                let r = r._eval_gpu(
+                    pk,
+                    program,
+                    advice,
+                    instance,
+                    y,
+                    unit_cache,
+                    allocator,
+                    coset_powers_buffer,
+                )?;
                 //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                 let res = match (l.0, r.0) {
                     (Some(l), Some(r)) => {
@@ -649,7 +687,13 @@ impl<F: FieldExt> ProveExpression<F> {
                         } => (instance[*column_index].clone(), rotation),
                     };
 
-                    let buffer = do_extended_fft(pk, program, origin_values, allocator)?;
+                    let buffer = do_extended_fft(
+                        pk,
+                        program,
+                        origin_values,
+                        allocator,
+                        coset_powers_buffer,
+                    )?;
 
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
@@ -664,7 +708,16 @@ impl<F: FieldExt> ProveExpression<F> {
                 Ok((Some((values, rotation.0 * rot_scale)), None))
             }
             ProveExpression::Scale(l, ys) => {
-                let l = l._eval_gpu(pk, program, advice, instance, y, unit_cache, allocator)?;
+                let l = l._eval_gpu(
+                    pk,
+                    program,
+                    advice,
+                    instance,
+                    y,
+                    unit_cache,
+                    allocator,
+                    coset_powers_buffer,
+                )?;
                 let l = l.0.unwrap();
                 let max_y_order = ys.keys().max().unwrap();
                 for _ in (y.len() as u32)..max_y_order + 1 {
@@ -715,6 +768,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     program: &Program,
     origin_values: Polynomial<F, Coeff>,
     allocator: &mut LinkedList<Buffer<F>>,
+    coset_powers_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
     let origin_size = 1u32 << pk.vk.domain.k();
     let extended_size = 1u32 << pk.vk.domain.extended_k();
@@ -727,7 +781,8 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
     let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-    let origin_values = do_distribute_powers_zeta(pk, program, origin_values, true)?;
+    let origin_values =
+        do_distribute_powers_zeta(pk, program, origin_values, coset_powers_buffer, true)?;
 
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
@@ -742,57 +797,6 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .run()?;
 
     let domain = &pk.vk.domain;
-    do_fft_pure(
-        program,
-        values,
-        domain.extended_k(),
-        domain.get_extended_omega(),
-        allocator,
-    )
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) fn _do_extended_fft2<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
-    pk: &ProvingKey<C>,
-    program: &Program,
-    origin_values: Polynomial<F, Coeff>,
-    allocator: &mut LinkedList<Buffer<F>>,
-) -> EcResult<Buffer<F>> {
-    let origin_size = 1u32 << pk.vk.domain.k();
-    let extended_size = 1u32 << pk.vk.domain.extended_k();
-    let local_work_size = 128;
-    let global_work_size = extended_size / local_work_size;
-
-    let domain = &pk.vk.domain;
-
-    let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
-    let origin_values = _do_ifft(
-        program,
-        origin_values,
-        domain.k(),
-        domain.get_omega(),
-        domain.get_omega_inv(),
-        allocator,
-    )?;
-    let origin_values = do_distribute_powers_zeta(pk, program, origin_values, true)?;
-
-    //let timer = start_timer!(|| "gpu eval unit");
-    let values = allocator
-        .pop_front()
-        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
-
-    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-    let kernel = program.create_kernel(
-        &kernel_name,
-        global_work_size as usize,
-        local_work_size as usize,
-    )?;
-    kernel
-        .arg(&origin_values)
-        .arg(&values)
-        .arg(&origin_size)
-        .run()?;
-
     do_fft_pure(
         program,
         values,
@@ -835,19 +839,12 @@ pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = 
     pk: &ProvingKey<C>,
     program: &Program,
     values: Buffer<F>,
+    coset_powers_buffer: &Buffer<F>,
     into_coset: bool,
 ) -> EcResult<Buffer<F>> {
     let size = 1u32 << pk.vk.domain.k();
     let local_work_size = 128;
     let global_work_size = size / local_work_size;
-
-    let domain = &pk.vk.domain;
-    let coset_powers = if into_coset {
-        [domain.g_coset, domain.g_coset_inv]
-    } else {
-        [domain.g_coset_inv, domain.g_coset]
-    };
-    let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
 
     let kernel_name = format!("{}_distribute_powers_zeta", "Bn256_Fr");
     let kernel = program.create_kernel(
@@ -855,11 +852,7 @@ pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = 
         global_work_size as usize,
         local_work_size as usize,
     )?;
-    kernel
-        .arg(&values)
-        .arg(&coset_powers_buffer)
-        .arg(&(coset_powers.len() as u32 + 1))
-        .run()?;
+    kernel.arg(&values).arg(coset_powers_buffer).arg(&3).run()?;
     Ok(values)
 }
 
