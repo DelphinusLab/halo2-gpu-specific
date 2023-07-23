@@ -421,10 +421,7 @@ impl<F: FieldExt> ProveExpression<F> {
             self.gen_cache_policy(&mut unit_cache);
             unit_cache.analyze();
 
-            let domain = &pk.vk.domain;
-            let coset_powers = [domain.g_coset, domain.g_coset_inv];
-            let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
-
+            let helper = gen_do_extended_fft(pk, program)?;
             let values_buf = self._eval_gpu(
                 pk,
                 program,
@@ -433,7 +430,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 &mut ys,
                 &mut unit_cache,
                 &mut LinkedList::new(),
-                &coset_powers_buffer,
+                &helper,
             )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
 
@@ -471,19 +468,10 @@ impl<F: FieldExt> ProveExpression<F> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let domain = &pk.vk.domain;
-        let coset_powers = [domain.g_coset, domain.g_coset_inv];
-        let coset_powers_buffer = program.create_buffer_from_slice(&coset_powers[..])?;
+        let helper = gen_do_extended_fft(pk, program)?;
 
         let v = self._eval_gpu(
-            pk,
-            program,
-            advice,
-            instance,
-            y,
-            unit_cache,
-            allocator,
-            &coset_powers_buffer,
+            pk, program, advice, instance, y, unit_cache, allocator, &helper,
         )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
@@ -532,7 +520,7 @@ impl<F: FieldExt> ProveExpression<F> {
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
-        coset_powers_buffer: &Buffer<F>,
+        helper: &ExtendedFFTHelper<F>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
@@ -542,24 +530,10 @@ impl<F: FieldExt> ProveExpression<F> {
         match self {
             ProveExpression::Op(l, r, op) => {
                 let l = l._eval_gpu(
-                    pk,
-                    program,
-                    advice,
-                    instance,
-                    y,
-                    unit_cache,
-                    allocator,
-                    coset_powers_buffer,
+                    pk, program, advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk,
-                    program,
-                    advice,
-                    instance,
-                    y,
-                    unit_cache,
-                    allocator,
-                    coset_powers_buffer,
+                    pk, program, advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                 let res = match (l.0, r.0) {
@@ -687,13 +661,7 @@ impl<F: FieldExt> ProveExpression<F> {
                         } => (instance[*column_index].clone(), rotation),
                     };
 
-                    let buffer = do_extended_fft(
-                        pk,
-                        program,
-                        origin_values,
-                        allocator,
-                        coset_powers_buffer,
-                    )?;
+                    let buffer = do_extended_fft(pk, program, origin_values, allocator, helper)?;
 
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
@@ -709,14 +677,7 @@ impl<F: FieldExt> ProveExpression<F> {
             }
             ProveExpression::Scale(l, ys) => {
                 let l = l._eval_gpu(
-                    pk,
-                    program,
-                    advice,
-                    instance,
-                    y,
-                    unit_cache,
-                    allocator,
-                    coset_powers_buffer,
+                    pk, program, advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 let l = l.0.unwrap();
                 let max_y_order = ys.keys().max().unwrap();
@@ -763,12 +724,64 @@ impl<F: FieldExt> ProveExpression<F> {
 }
 
 #[cfg(feature = "cuda")]
+pub(crate) struct ExtendedFFTHelper<F: FieldExt> {
+    pub(crate) coset_powers_buffer: Rc<Buffer<F>>,
+    pub(crate) pq_buffer: Rc<Buffer<F>>,
+    pub(crate) omegas_buffer: Rc<Buffer<F>>,
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+) -> EcResult<ExtendedFFTHelper<F>> {
+    const MAX_LOG2_RADIX: u32 = 8;
+    const LOG2_MAX_ELEMENTS: usize = 32;
+
+    let domain = &pk.vk.domain;
+    let coset_powers = [domain.g_coset, domain.g_coset_inv];
+    let coset_powers_buffer = Rc::new(program.create_buffer_from_slice(&coset_powers[..])?);
+
+    let log_n = pk.vk.domain.extended_k();
+    let n = 1 << log_n;
+    let omega = pk.vk.domain.get_extended_omega();
+    let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+    // Precalculate:
+    // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
+    let mut pq = vec![F::zero(); 1 << max_deg >> 1];
+    let twiddle = omega.pow_vartime([(n >> max_deg) as u64]);
+    pq[0] = F::one();
+    if max_deg > 1 {
+        pq[1] = twiddle;
+        for i in 2..(1 << max_deg >> 1) {
+            pq[i] = pq[i - 1];
+            pq[i].mul_assign(&twiddle);
+        }
+    }
+    let pq_buffer = Rc::new(program.create_buffer_from_slice(&pq)?);
+
+    // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
+    let mut omegas = vec![F::zero(); 32];
+    omegas[0] = omega;
+    for i in 1..LOG2_MAX_ELEMENTS {
+        omegas[i] = omegas[i - 1].pow_vartime([2u64]);
+    }
+    let omegas_buffer = Rc::new(program.create_buffer_from_slice(&omegas)?);
+
+    Ok(ExtendedFFTHelper {
+        omegas_buffer,
+        coset_powers_buffer,
+        pq_buffer,
+    })
+}
+
+#[cfg(feature = "cuda")]
 pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
     origin_values: Polynomial<F, Coeff>,
     allocator: &mut LinkedList<Buffer<F>>,
-    coset_powers_buffer: &Buffer<F>,
+    helper: &ExtendedFFTHelper<F>,
 ) -> EcResult<Buffer<F>> {
     let origin_size = 1u32 << pk.vk.domain.k();
     let extended_size = 1u32 << pk.vk.domain.extended_k();
@@ -782,7 +795,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 
     let origin_values = program.create_buffer_from_slice(&origin_values.values)?;
     let origin_values =
-        do_distribute_powers_zeta(pk, program, origin_values, coset_powers_buffer, true)?;
+        do_distribute_powers_zeta(pk, program, origin_values, &helper.coset_powers_buffer)?;
 
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
@@ -803,6 +816,8 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         domain.extended_k(),
         domain.get_extended_omega(),
         allocator,
+        &helper.pq_buffer,
+        &helper.omegas_buffer,
     )
 }
 
@@ -812,6 +827,8 @@ pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     program: &Program,
     values: Buffer<F>,
     allocator: &mut LinkedList<Buffer<F>>,
+    pq_buffer: &Buffer<F>,
+    omegas_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
     do_fft_core(
         program,
@@ -820,6 +837,8 @@ pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         pk.vk.domain.get_extended_omega(),
         None,
         allocator,
+        pq_buffer,
+        omegas_buffer,
     )
 }
 
@@ -830,8 +849,19 @@ pub(crate) fn do_fft_pure<F: FieldExt>(
     log_n: u32,
     omega: F,
     allocator: &mut LinkedList<Buffer<F>>,
+    pq_buffer: &Buffer<F>,
+    omegas_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
-    do_fft_core(program, values, log_n, omega, None, allocator)
+    do_fft_core(
+        program,
+        values,
+        log_n,
+        omega,
+        None,
+        allocator,
+        pq_buffer,
+        omegas_buffer,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -840,7 +870,6 @@ pub(crate) fn do_distribute_powers_zeta<F: FieldExt, C: CurveAffine<ScalarExt = 
     program: &Program,
     values: Buffer<F>,
     coset_powers_buffer: &Buffer<F>,
-    into_coset: bool,
 ) -> EcResult<Buffer<F>> {
     let size = 1u32 << pk.vk.domain.k();
     let local_work_size = 128;
@@ -864,8 +893,19 @@ pub(crate) fn _do_ifft<F: FieldExt>(
     omega: F,
     omega_inv: F,
     allocator: &mut LinkedList<Buffer<F>>,
+    pq_buffer: &Buffer<F>,
+    omegas_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
-    do_fft_core(program, values, log_n, omega, Some(omega_inv), allocator)
+    do_fft_core(
+        program,
+        values,
+        log_n,
+        omega,
+        Some(omega_inv),
+        allocator,
+        pq_buffer,
+        omegas_buffer,
+    )
 }
 
 #[cfg(feature = "cuda")]
@@ -876,10 +916,11 @@ pub(crate) fn do_fft_core<F: FieldExt>(
     omega: F,
     divisor: Option<F>,
     allocator: &mut LinkedList<Buffer<F>>,
+    pq_buffer: &Buffer<F>,
+    omegas_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
     let n = 1 << log_n;
     const MAX_LOG2_RADIX: u32 = 8;
-    const LOG2_MAX_ELEMENTS: usize = 32;
     const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
 
     let mut src_buffer = values;
@@ -888,28 +929,6 @@ pub(crate) fn do_fft_core<F: FieldExt>(
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(n).unwrap() });
     // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
     let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
-
-    // Precalculate:
-    // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
-    let mut pq = vec![F::zero(); 1 << max_deg >> 1];
-    let twiddle = omega.pow_vartime([(n >> max_deg) as u64]);
-    pq[0] = F::one();
-    if max_deg > 1 {
-        pq[1] = twiddle;
-        for i in 2..(1 << max_deg >> 1) {
-            pq[i] = pq[i - 1];
-            pq[i].mul_assign(&twiddle);
-        }
-    }
-    let pq_buffer = program.create_buffer_from_slice(&pq)?;
-
-    // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
-    let mut omegas = vec![F::zero(); 32];
-    omegas[0] = omega;
-    for i in 1..LOG2_MAX_ELEMENTS {
-        omegas[i] = omegas[i - 1].pow_vartime([2u64]);
-    }
-    let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
 
     //let timer = start_timer!(|| format!("fft main {}", log_n));
     // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
@@ -931,8 +950,8 @@ pub(crate) fn do_fft_core<F: FieldExt>(
         kernel
             .arg(&src_buffer)
             .arg(&dst_buffer)
-            .arg(&pq_buffer)
-            .arg(&omegas_buffer)
+            .arg(pq_buffer)
+            .arg(omegas_buffer)
             .arg(&LocalBuffer::<F>::new(1 << deg))
             .arg(&n)
             .arg(&log_p)

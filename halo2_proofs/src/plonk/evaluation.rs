@@ -801,7 +801,7 @@ impl<C: CurveAffine> Evaluator<C> {
         };
         use std::{collections::LinkedList, marker::PhantomData};
 
-        use crate::plonk::evaluation_gpu::{do_extended_fft, do_fft};
+        use crate::plonk::evaluation_gpu::{do_extended_fft, do_fft, gen_do_extended_fft};
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -858,10 +858,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     create_buffer_from!(l_active_row_buf, l_active_row);
                     create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
-                    let domain = &pk.vk.domain;
-                    let coset_powers = [domain.g_coset, domain.g_coset_inv];
-                    let coset_powers_buffer =
-                        program.create_buffer_from_slice(&coset_powers[..])?;
+                    let helper = gen_do_extended_fft(pk, program)?;
 
                     let mut _allocator = LinkedList::new();
                     let allocator = &mut _allocator;
@@ -870,14 +867,14 @@ impl<C: CurveAffine> Evaluator<C> {
                         program,
                         first_set.permutation_product_poly.clone(),
                         allocator,
-                        &coset_powers_buffer,
+                        &helper,
                     )?;
                     let last_set_buf = do_extended_fft(
                         pk,
                         program,
                         last_set.permutation_product_poly.clone(),
                         allocator,
-                        &coset_powers_buffer,
+                        &helper,
                     )?;
 
                     let local_work_size = 128;
@@ -907,7 +904,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             program,
                             set.permutation_product_poly.clone(),
                             allocator,
-                            &coset_powers_buffer,
+                            &helper,
                         )?;
                         let kernel_name = format!("{}_eval_h_permutation_part2", "Bn256_Fr");
                         let kernel = program.create_kernel(
@@ -968,7 +965,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             program,
                             set.permutation_product_poly.clone(),
                             allocator,
-                            &coset_powers_buffer,
+                            &helper,
                         )?;
                         let kernel_name = format!("{}_eval_h_permutation_left_prepare", "Bn256_Fr");
                         let kernel = program.create_kernel(
@@ -1015,6 +1012,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                 program,
                                 extended_data_buf,
                                 allocator,
+                                &helper.pq_buffer,
+                                &helper.omegas_buffer,
                             )?;
 
                             create_buffer_from!(permutation_buf, &permutation.values);
