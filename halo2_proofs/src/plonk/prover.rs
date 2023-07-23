@@ -456,50 +456,6 @@ pub fn create_proof<
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
-    let timer = start_timer!(|| "lookups commit product");
-    let lookups: Vec<Vec<_>> = lookups
-        .into_iter()
-        .map(|lookups| {
-            lookups
-                .into_par_iter()
-                .enumerate()
-                .map(|(idx, lookups)| {
-                    lookups
-                        .into_par_iter()
-                        .map(|lookup| {
-                            lookup
-                                .commit_product(pk, params, beta, gamma, idx % *N_GPU)
-                                .unwrap()
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<Vec<_>>>()
-        })
-        .collect::<Vec<_>>();
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "lookups add blinding value");
-    let lookups: Vec<Vec<_>> = lookups
-        .into_iter()
-        .map(|lookups| {
-            lookups
-                .into_iter()
-                .map(|lookups| {
-                    lookups
-                        .into_iter()
-                        .map(|(l0, l1, mut z)| {
-                            for _ in 0..pk.vk.cs.blinding_factors() {
-                                z.push(C::Scalar::random(&mut rng))
-                            }
-                            (l0, l1, pk.vk.domain.lagrange_from_vec(z))
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<Vec<_>>>();
-    end_timer!(timer);
-
     let (lookups, permutations) = std::thread::scope(|s| {
         let permutations = s.spawn(|| {
             // prepare permutation value.
@@ -523,12 +479,56 @@ pub fn create_proof<
                 .unwrap()
         });
 
+        let timer = start_timer!(|| "lookups commit product");
+        let lookups: Vec<Vec<_>> = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(idx, lookups)| {
+                        lookups
+                            .into_par_iter()
+                            .map(|lookup| {
+                                lookup
+                                    .commit_product(pk, params, beta, gamma, idx % *N_GPU)
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<Vec<_>>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "lookups add blinding value");
+        let lookups: Vec<Vec<_>> = lookups
+            .into_iter()
+            .map(|lookups| {
+                lookups
+                    .into_iter()
+                    .map(|lookups| {
+                        lookups
+                            .into_iter()
+                            .map(|(l0, l1, mut z)| {
+                                for _ in 0..pk.vk.cs.blinding_factors() {
+                                    z.push(C::Scalar::random(&mut rng))
+                                }
+                                (l0, l1, pk.vk.domain.lagrange_from_vec(z))
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<Vec<_>>>();
+        end_timer!(timer);
+
         let timer = start_timer!(|| "lookups msm");
         let lookups_z_commitments = lookups
             .iter()
             .flat_map(|lookups| {
                 lookups
-                    .into_iter()
+                    .into_par_iter()
                     .flat_map(|lookups| {
                         lookups
                             .into_iter()

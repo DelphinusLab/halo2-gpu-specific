@@ -4,6 +4,7 @@ use group::{
     Curve,
 };
 use rand_core::RngCore;
+use rayon::prelude::ParallelSlice;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelRefMutIterator, ParallelIterator};
 use std::iter::{self, ExactSizeIterator};
 
@@ -66,80 +67,88 @@ impl Argument {
         let chunk_len = pk.vk.cs.degree() - 2;
         let blinding_factors = pk.vk.cs.blinding_factors();
 
-        // Each column gets its own delta power.
-        let mut delta_omega = C::Scalar::one();
+        let mut sets = vec![];
+
+        let raw_zs = self
+            .columns
+            .par_chunks(chunk_len)
+            .zip(pkey.permutations.par_chunks(chunk_len))
+            .enumerate()
+            .map(|(i, (columns, permutations))| {
+                // Each column gets its own delta power.
+                let mut delta_omega =
+                    C::Scalar::DELTA.pow(&[i as u64 * columns.len() as u64, 0, 0, 0]);
+
+                // Goal is to compute the products of fractions
+                //
+                // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
+                // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
+                //
+                // where p_j(X) is the jth column in this permutation,
+                // and i is the ith row of the column.
+
+                let mut modified_values = vec![C::Scalar::one(); params.n as usize];
+
+                // Iterate over each column of the permutation
+                for (&column, permuted_column_values) in columns.iter().zip(permutations.iter()) {
+                    let values = match column.column_type() {
+                        Any::Advice => advice,
+                        Any::Fixed => fixed,
+                        Any::Instance => instance,
+                    };
+                    for i in 0..params.n as usize {
+                        modified_values[i] *= &(*beta * permuted_column_values[i]
+                            + &*gamma
+                            + values[column.index()][i]);
+                    }
+                }
+
+                // Invert to obtain the denominator for the permutation product polynomial
+                modified_values.iter_mut().batch_invert();
+
+                // Iterate over each column again, this time finishing the computation
+                // of the entire fraction by computing the numerators
+                for &column in columns.iter() {
+                    let omega = domain.get_omega();
+                    let values = match column.column_type() {
+                        Any::Advice => advice,
+                        Any::Fixed => fixed,
+                        Any::Instance => instance,
+                    };
+                    for i in 0..params.n as usize {
+                        modified_values[i] *=
+                            &(delta_omega * &*beta + &*gamma + values[column.index()][i]);
+                        delta_omega *= &omega;
+                    }
+                    delta_omega *= &C::Scalar::DELTA;
+                }
+
+                // The modified_values vector is a vector of products of fractions
+                // of the form
+                //
+                // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
+                // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
+                //
+                // where i is the index into modified_values, for the jth column in
+                // the permutation
+
+                // Compute the evaluations of the permutation product polynomial
+                // over our domain, starting with z[0] = 1
+
+                let mut z = vec![C::Scalar::zero(); params.n as usize];
+                z.iter_mut().enumerate().for_each(|(i, z)| {
+                    if i > 0 {
+                        *z = modified_values[i - 1];
+                    }
+                });
+                z
+            })
+            .collect::<Vec<_>>();
 
         // Track the "last" value from the previous column set
         let mut last_z = C::Scalar::one();
 
-        let mut sets = vec![];
-
-        for (columns, permutations) in self
-            .columns
-            .chunks(chunk_len)
-            .zip(pkey.permutations.chunks(chunk_len))
-        {
-            // Goal is to compute the products of fractions
-            //
-            // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
-            // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
-            //
-            // where p_j(X) is the jth column in this permutation,
-            // and i is the ith row of the column.
-
-            let mut modified_values = vec![C::Scalar::one(); params.n as usize];
-
-            // Iterate over each column of the permutation
-            for (&column, permuted_column_values) in columns.iter().zip(permutations.iter()) {
-                let values = match column.column_type() {
-                    Any::Advice => advice,
-                    Any::Fixed => fixed,
-                    Any::Instance => instance,
-                };
-                for i in 0..params.n as usize {
-                    modified_values[i] *=
-                        &(*beta * permuted_column_values[i] + &*gamma + values[column.index()][i]);
-                }
-            }
-
-            // Invert to obtain the denominator for the permutation product polynomial
-            modified_values.iter_mut().batch_invert();
-
-            // Iterate over each column again, this time finishing the computation
-            // of the entire fraction by computing the numerators
-            for &column in columns.iter() {
-                let omega = domain.get_omega();
-                let values = match column.column_type() {
-                    Any::Advice => advice,
-                    Any::Fixed => fixed,
-                    Any::Instance => instance,
-                };
-                for i in 0..params.n as usize {
-                    modified_values[i] *=
-                        &(delta_omega * &*beta + &*gamma + values[column.index()][i]);
-                    delta_omega *= &omega;
-                }
-                delta_omega *= &C::Scalar::DELTA;
-            }
-
-            // The modified_values vector is a vector of products of fractions
-            // of the form
-            //
-            // (p_j(\omega^i) + \delta^j \omega^i \beta + \gamma) /
-            // (p_j(\omega^i) + \beta s_j(\omega^i) + \gamma)
-            //
-            // where i is the index into modified_values, for the jth column in
-            // the permutation
-
-            // Compute the evaluations of the permutation product polynomial
-            // over our domain, starting with z[0] = 1
-
-            let mut z = vec![C::Scalar::zero(); params.n as usize];
-            z.iter_mut().enumerate().for_each(|(i, z)| {
-                if i > 0 {
-                    *z = modified_values[i - 1];
-                }
-            });
+        for mut z in raw_zs.into_iter() {
             z[0] = last_z;
             for i in 0..z.len() - 1 {
                 z[i + 1] = z[i] * z[i + 1];
