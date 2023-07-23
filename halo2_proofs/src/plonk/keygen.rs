@@ -258,6 +258,10 @@ where
 
     let cs = cs;
 
+    for (i, gates) in vk.cs.gates.iter().enumerate() {
+        println!("gate {}: {}", i, gates.name());
+    }
+
     if (params.n as usize) < cs.minimum_rows() {
         return Err(Error::not_enough_rows_available(params.k));
     }
