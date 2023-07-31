@@ -22,12 +22,11 @@ pub trait ColumnType:
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Column<C: ColumnType> {
     pub index: usize,
-    column_type: C,
+    pub column_type: C,
 }
 
 impl<C: ColumnType> Column<C> {
-    #[cfg(test)]
-    pub(crate) fn new(index: usize, column_type: C) -> Self {
+    pub fn new(index: usize, column_type: C) -> Self {
         Column { index, column_type }
     }
 
@@ -987,9 +986,9 @@ pub(crate) struct PointIndex(pub usize);
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
 #[derive(Clone, Debug)]
-pub(crate) struct VirtualCell {
-    pub(crate) column: Column<Any>,
-    pub(crate) rotation: Rotation,
+pub struct VirtualCell {
+    pub column: Column<Any>,
+    pub rotation: Rotation,
 }
 
 impl<Col: Into<Column<Any>>> From<(Col, Rotation)> for VirtualCell {
@@ -1036,10 +1035,19 @@ pub struct Gate<F: Field> {
     /// We track queried selectors separately from other cells, so that we can use them to
     /// trigger debug checks on gates.
     queried_selectors: Vec<Selector>,
-    queried_cells: Vec<VirtualCell>,
+    pub queried_cells: Vec<VirtualCell>,
 }
 
 impl<F: Field> Gate<F> {
+    pub(crate) fn new_with_polys_and_queries(polys: Vec<Expression<F>>, queried_cells: Vec<VirtualCell>) -> Self {
+        Gate {
+            name: "",
+            constraint_names: vec![],
+            polys,
+            queried_cells,
+            queried_selectors: vec![],
+        }
+    }
     pub(crate) fn name(&self) -> &'static str {
         self.name
     }
@@ -1075,7 +1083,7 @@ pub struct ConstraintSystem<F: Field> {
     // Contains an integer for each advice column
     // identifying how many distinct queries it has
     // so far; should be same length as num_advice_columns.
-    num_advice_queries: Vec<usize>,
+    pub(crate) num_advice_queries: Vec<usize>,
     pub instance_queries: Vec<(Column<Instance>, Rotation)>,
     pub fixed_queries: Vec<(Column<Fixed>, Rotation)>,
 

@@ -79,7 +79,7 @@ pub struct VerifyingKey<C: CurveAffine> {
 }
 
 impl<C: CurveAffine> VerifyingKey<C> {
-    pub(crate) fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+    pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         for commitment in &self.commitments {
             writer.write_all(commitment.to_bytes().as_ref())?;
         }
@@ -87,7 +87,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
         Ok(())
     }
 
-    pub(crate) fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
+    pub fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
         let commitments = (0..argument.columns.len())
             .map(|_| C::read(reader))
             .collect::<Result<Vec<_>, _>>()?;

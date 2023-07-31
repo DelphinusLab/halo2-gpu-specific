@@ -21,7 +21,7 @@ mod error;
 mod evaluation;
 mod evaluation_gpu;
 mod keygen;
-mod lookup;
+pub(crate) mod lookup;
 pub(crate) mod permutation;
 mod vanishing;
 
