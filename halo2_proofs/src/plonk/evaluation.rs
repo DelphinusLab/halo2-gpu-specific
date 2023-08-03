@@ -1,4 +1,4 @@
-use super::{ConstraintSystem, Expression};
+use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
 use crate::plonk::evaluation_gpu::{LookupProveExpression, ProveExpression};
 use crate::plonk::lookup::prover::Committed;
@@ -33,6 +33,7 @@ use std::{
     ops::{Index, Mul, MulAssign},
 };
 
+#[cfg(not(feature = "cuda"))]
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
 fn get_rotation_idx(idx: usize, rot: i32, rot_scale: i32, isize: i32) -> usize {
     (((idx as i32) + (rot * rot_scale)).rem_euclid(isize)) as usize
@@ -1315,6 +1316,189 @@ impl<T> ThreadBox<T> {
     }
 }
 
+#[cfg(feature = "cuda")]
+/// Simple evaluation of an expression
+fn _evaluate_gpu<F: FieldExt, B: Basis>(
+    program: &ec_gpu_gen::rust_gpu_tools::cuda::Program,
+    expression: &Expression<F>,
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+    tmp_buffer: &mut ec_gpu_gen::rust_gpu_tools::cuda::Buffer<F>,
+) -> ec_gpu_gen::EcResult<(ec_gpu_gen::rust_gpu_tools::cuda::Buffer<F>, i32)> {
+    let local_work_size = 128;
+    let global_work_size = size / local_work_size;
+    match expression {
+        Expression::Constant(c) => {
+            let c = vec![*c];
+            let c_buffer = program.create_buffer_from_slice(&c[..])?;
+            let buffer = unsafe { program.create_buffer::<F>(size)? };
+            let kernel_name = format!("{}_eval_constant", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel.arg(&buffer).arg(&c_buffer).run()?;
+            Ok((buffer, 0))
+        }
+        Expression::Fixed {
+            column_index,
+            rotation,
+            ..
+        } => Ok((
+            program.create_buffer_from_slice(&fixed[*column_index].values)?,
+            rotation.0 * rot_scale,
+        )),
+        Expression::Advice {
+            column_index,
+            rotation,
+            ..
+        } => Ok((
+            program.create_buffer_from_slice(&advice[*column_index].values)?,
+            rotation.0 * rot_scale,
+        )),
+        Expression::Instance {
+            column_index,
+            rotation,
+            ..
+        } => Ok((
+            program.create_buffer_from_slice(&instance[*column_index].values)?,
+            rotation.0 * rot_scale,
+        )),
+        Expression::Negated(l) => {
+            let c = vec![-F::one()];
+            let c_buffer = program.create_buffer_from_slice(&c[..])?;
+            let mut buffer = _evaluate_gpu(
+                program, &l, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let kernel_name = format!("{}_eval_mul_c", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(tmp_buffer)
+                .arg(&buffer.0)
+                .arg(&buffer.1)
+                .arg(&c_buffer)
+                .arg(&(size as u32))
+                .run()?;
+            std::mem::swap(tmp_buffer, &mut buffer.0);
+            Ok((buffer.0, 0))
+        }
+        Expression::Sum(l, r) => {
+            let mut l = _evaluate_gpu(
+                program, &l, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let r = _evaluate_gpu(
+                program, &r, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(tmp_buffer)
+                .arg(&l.0)
+                .arg(&r.0)
+                .arg(&l.1)
+                .arg(&r.1)
+                .arg(&(size as u32))
+                .run()?;
+            std::mem::swap(tmp_buffer, &mut l.0);
+            Ok((l.0, 0))
+        }
+        Expression::Product(l, r) => {
+            let mut l = _evaluate_gpu(
+                program, &l, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let r = _evaluate_gpu(
+                program, &r, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let kernel_name = format!("{}_eval_mul", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(tmp_buffer)
+                .arg(&l.0)
+                .arg(&r.0)
+                .arg(&l.1)
+                .arg(&r.1)
+                .arg(&(size as u32))
+                .run()?;
+            std::mem::swap(tmp_buffer, &mut l.0);
+            Ok((l.0, 0))
+        }
+        _ => unimplemented!(),
+    }
+}
+
+#[cfg(feature = "cuda")]
+/// Simple evaluation of an expression
+fn evaluate_gpu<F: FieldExt, B: Basis>(
+    expression: &Expression<F>,
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+) -> Vec<F> {
+    use crate::arithmetic::release_gpu;
+    use crate::arithmetic::require_gpu;
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
+    use ec_gpu_gen::rust_gpu_tools::program_closures;
+    use ec_gpu_gen::{
+        fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let mut values = vec![F::zero(); size];
+
+    let gpu_idx = require_gpu();
+
+    let closures = program_closures!(|program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
+        let mut tmp_buffer = unsafe { program.create_buffer(size)? };
+        let buffer = _evaluate_gpu(
+            program,
+            expression,
+            size,
+            rot_scale,
+            fixed,
+            advice,
+            instance,
+            &mut tmp_buffer,
+        )?;
+        if buffer.1 != 0 {
+            panic!("Evaluate expression failed, find non-zero rotation of pure column");
+        }
+        program.read_into_buffer(&buffer.0, input)?;
+        Ok(())
+    });
+
+    let devices = Device::all();
+    let device = devices[gpu_idx % devices.len()];
+    let program = ec_gpu_gen::program!(device).unwrap();
+    program
+        .run(closures, unsafe {
+            std::mem::transmute::<_, &mut [F]>(&mut values[..])
+        })
+        .unwrap();
+
+    release_gpu(gpu_idx);
+
+    values
+}
+
 /// Simple evaluation of an expression
 pub fn evaluate<F: FieldExt, B: Basis>(
     expression: &Expression<F>,
@@ -1336,91 +1520,45 @@ pub fn evaluate<F: FieldExt, B: Basis>(
         return instance[idx].to_vec();
     }
 
-    let mut values = vec![F::zero(); size];
-    let isize = size as i32;
-    parallelize(&mut values, |values, start| {
-        for (i, value) in values.iter_mut().enumerate() {
-            let idx = start + i;
-            *value = expression.evaluate(
-                &|scalar| scalar,
-                &|_| panic!("virtual selectors are removed during optimization"),
-                &|_, column_index, rotation| {
-                    fixed[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-                },
-                &|_, column_index, rotation| {
-                    advice[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-                },
-                &|_, column_index, rotation| {
-                    instance[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-                },
-                &|a| -a,
-                &|a, b| a + &b,
-                &|a, b| {
-                    let a = a();
+    #[cfg(not(feature = "cuda"))]
+    {
+        let mut values = vec![F::zero(); size];
+        let isize = size as i32;
+        parallelize(&mut values, |values, start| {
+            for (i, value) in values.iter_mut().enumerate() {
+                let idx = start + i;
+                *value = expression.evaluate(
+                    &|scalar| scalar,
+                    &|_| panic!("virtual selectors are removed during optimization"),
+                    &|_, column_index, rotation| {
+                        fixed[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                    },
+                    &|_, column_index, rotation| {
+                        advice[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                    },
+                    &|_, column_index, rotation| {
+                        instance[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                    },
+                    &|a| -a,
+                    &|a, b| a + &b,
+                    &|a, b| {
+                        let a = a();
 
-                    if a == F::zero() {
-                        a
-                    } else {
-                        a * b()
-                    }
-                },
-                &|a, scalar| a * scalar,
-            );
-        }
-    });
-    values
-}
-
-/// Simple evaluation of an expression
-pub fn evaluate_st<F: FieldExt, B: Basis>(
-    expression: &Expression<F>,
-    size: usize,
-    rot_scale: i32,
-    fixed: &[Polynomial<F, B>],
-    advice: &[Polynomial<F, B>],
-    instance: &[Polynomial<F, B>],
-) -> Vec<F> {
-    if let Some(idx) = expression.is_pure_fixed() {
-        return fixed[idx].to_vec();
+                        if a == F::zero() {
+                            a
+                        } else {
+                            a * b()
+                        }
+                    },
+                    &|a, scalar| a * scalar,
+                );
+            }
+        });
+        return values;
     }
 
-    if let Some(idx) = expression.is_pure_advice() {
-        return advice[idx].to_vec();
+    #[cfg(feature = "cuda")]
+    {
+        return evaluate_gpu(expression, size, rot_scale, fixed, advice, instance);
     }
-
-    if let Some(idx) = expression.is_pure_instance() {
-        return instance[idx].to_vec();
-    }
-
-    let mut values = vec![F::zero(); size];
-    let isize = size as i32;
-    for (i, value) in values.iter_mut().enumerate() {
-        let idx = i;
-        *value = expression.evaluate(
-            &|scalar| scalar,
-            &|_| panic!("virtual selectors are removed during optimization"),
-            &|_, column_index, rotation| {
-                fixed[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-            },
-            &|_, column_index, rotation| {
-                advice[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-            },
-            &|_, column_index, rotation| {
-                instance[column_index][get_rotation_idx(idx, rotation.0, rot_scale, isize)]
-            },
-            &|a| -a,
-            &|a, b| a + &b,
-            &|a, b| {
-                let a = a();
-
-                if a == F::zero() {
-                    a
-                } else {
-                    a * b()
-                }
-            },
-            &|a, scalar| a * scalar,
-        );
-    }
-    values
 }

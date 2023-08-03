@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::Argument;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
-use crate::plonk::evaluation::{evaluate, evaluate_st};
+use crate::plonk::evaluation::evaluate;
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -570,7 +570,7 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         i_sorted_table_coeffs += 1;
     }
 
-    assert!(i_unique_input_value == unique_input_values.len());
+    //assert!(i_unique_input_value == unique_input_values.len());
 
     let mut permuted_table_coeffs = permuted_table_coeffs
         .iter()

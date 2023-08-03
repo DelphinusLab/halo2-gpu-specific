@@ -311,6 +311,26 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]
 }
 
 #[cfg(feature = "cuda")]
+pub fn require_gpu() -> usize {
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
+    let mut free_gpus = GPU_LOCK.lock().unwrap();
+    while free_gpus.len() == 0 {
+        free_gpus = GPU_COND_VAR.wait(free_gpus).unwrap();
+    }
+    free_gpus.pop().unwrap()
+}
+
+#[cfg(feature = "cuda")]
+pub fn release_gpu(gpu_idx: usize) {
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
+    {
+        let mut free_gpus = GPU_LOCK.lock().unwrap();
+        free_gpus.push(gpu_idx);
+    }
+    GPU_COND_VAR.notify_one();
+}
+
+#[cfg(feature = "cuda")]
 pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
@@ -326,13 +346,7 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
     if max_bits == 0 {
         C::Curve::identity()
     } else {
-        let gpu_idx = {
-            let mut free_gpus = GPU_LOCK.lock().unwrap();
-            while free_gpus.len() == 0 {
-                free_gpus = GPU_COND_VAR.wait(free_gpus).unwrap();
-            }
-            free_gpus.pop().unwrap()
-        };
+        let gpu_idx = require_gpu();
 
         let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
         let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
@@ -345,11 +359,7 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
 
         let a = [kern.multiexp_bound(bases, _coeffs, max_bits).unwrap()];
 
-        {
-            let mut free_gpus = GPU_LOCK.lock().unwrap();
-            free_gpus.push(gpu_idx);
-        };
-        GPU_COND_VAR.notify_one();
+        release_gpu(gpu_idx);
 
         let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
         res[0]
