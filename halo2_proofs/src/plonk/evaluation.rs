@@ -802,7 +802,7 @@ impl<C: CurveAffine> Evaluator<C> {
         };
         use std::{collections::LinkedList, marker::PhantomData};
 
-        use crate::plonk::evaluation_gpu::{do_extended_fft, do_fft, gen_do_extended_fft};
+        use crate::plonk::evaluation_gpu::{do_extended_fft, gen_do_extended_fft};
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -947,8 +947,6 @@ impl<C: CurveAffine> Evaluator<C> {
                     }
 
                     let left_buf = unsafe { program.create_buffer::<C::ScalarExt>(size)? };
-                    let mut extended_data_buf =
-                        unsafe { program.create_buffer::<C::ScalarExt>(size)? };
 
                     let mut beta_term = vec![delta_start];
                     for _ in 1..size {
@@ -992,7 +990,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             })
                             .zip(cosets.iter())
                         {
-                            extended_data_buf =
+                            let extended_data_buf =
                                 do_extended_fft(pk, program, values, allocator, &mut helper)?;
 
                             create_buffer_from!(permutation_buf, &permutation.values);
@@ -1093,37 +1091,6 @@ impl<C: CurveAffine> Evaluator<C> {
                         create_buffer_from!(l_last_buf, l_last);
                         create_buffer_from!(l_active_row_buf, l_active_row);
                         create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
-
-                        const MAX_LOG2_RADIX: u32 = 8;
-                        const LOG2_MAX_ELEMENTS: usize = 32;
-                        const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
-
-                        let buf = vec![pk.vk.domain.get_extended_omega()];
-                        let omega: &[Fr] = unsafe { std::mem::transmute(&buf[..]) };
-                        let omega = omega[0];
-                        let log_n = domain.extended_k();
-                        let n = 1 << log_n;
-                        let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
-
-                        // Precalculate:
-                        // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
-                        let mut pq = vec![Fr::zero(); 1 << (max_deg - 1)];
-                        let twiddle: Fr = omega.pow_vartime([(n >> max_deg) as u64]);
-                        pq[0] = Fr::one();
-                        if max_deg > 1 {
-                            pq[1] = twiddle;
-                            for i in 2..(1 << max_deg >> 1) {
-                                pq[i] = pq[i - 1];
-                                pq[i].mul_assign(&twiddle);
-                            }
-                        }
-                        let pq_buffer = program.create_buffer_from_slice(&pq)?;
-
-                        // Precalculate [omega, omega^2, omega^4, omega^8, ..., omega^(2^31)]
-                        let mut omegas = vec![omega];
-                        for _ in 1..LOG2_MAX_ELEMENTS {
-                            omegas.push(omegas.last().unwrap().square());
-                        }
 
                         let mut helper = gen_do_extended_fft(pk, program)?;
                         let mut allocator = LinkedList::new();

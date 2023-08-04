@@ -837,26 +837,6 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) fn do_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
-    pk: &ProvingKey<C>,
-    program: &Program,
-    values: Buffer<F>,
-    allocator: &mut LinkedList<Buffer<F>>,
-    pq_buffer: &Buffer<F>,
-    omegas_buffer: &Buffer<F>,
-) -> EcResult<Buffer<F>> {
-    do_fft_core(
-        program,
-        values,
-        pk.vk.domain.extended_k(),
-        None,
-        allocator,
-        pq_buffer,
-        omegas_buffer,
-    )
-}
-
-#[cfg(feature = "cuda")]
 pub(crate) fn do_fft_pure<F: FieldExt>(
     program: &Program,
     values: Buffer<F>,
