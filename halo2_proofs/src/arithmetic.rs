@@ -455,7 +455,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 
 #[cfg(feature = "cuda")]
 pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
-    use crate::plonk::{GPU_COND_VAR, GPU_GROUP_ID, GPU_LOCK, N_GPU};
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK, N_GPU};
     use ec_gpu_gen::fft::{FftKernel, SingleFftKernel};
     use ec_gpu_gen::rust_gpu_tools::Device;
     use pairing::bn256::Fr;

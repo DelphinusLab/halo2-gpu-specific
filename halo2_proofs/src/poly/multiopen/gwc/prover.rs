@@ -39,9 +39,7 @@ where
     commitment_data
         .par_iter()
         .zip(ws.par_iter_mut())
-        .enumerate()
-        .for_each(|(idx, (commitment_at_a_point, w))| {
-            crate::plonk::GPU_GROUP_ID.set(idx);
+        .for_each(|(commitment_at_a_point, w)| {
             let mut poly_batch = zero();
             let mut eval_batch = C::Scalar::zero();
             let z = commitment_at_a_point.point;

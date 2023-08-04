@@ -47,10 +47,6 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 
-thread_local! {
-    pub static GPU_GROUP_ID: std::cell::Cell<usize>  =  std::cell::Cell::new(0);
-}
-
 lazy_static! {
     pub static ref N_GPU: usize = usize::from_str_radix(
         &std::env::var("HALO2_PROOFS_N_GPU").unwrap_or({
@@ -532,11 +528,7 @@ pub fn create_proof<
                     .flat_map(|lookups| {
                         lookups
                             .into_iter()
-                            .enumerate()
-                            .map(|(idx, l)| {
-                                GPU_GROUP_ID.set(idx);
-                                params.commit_lagrange(&l.2).to_affine()
-                            })
+                            .map(|l| params.commit_lagrange(&l.2).to_affine())
                             .collect::<Vec<_>>()
                     })
                     .collect::<Vec<_>>()
@@ -550,9 +542,7 @@ pub fn create_proof<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .enumerate()
-                    .flat_map(|(idx, lookups)| {
-                        GPU_GROUP_ID.set(idx);
+                    .flat_map(|lookups| {
                         lookups
                             .into_iter()
                             .map(
@@ -649,11 +639,7 @@ pub fn create_proof<
             let timer = start_timer!(|| "lagrange_to_coeff_st");
             let advice_polys: Vec<_> = advice
                 .into_par_iter()
-                .enumerate()
-                .map(|(idx, poly)| {
-                    GPU_GROUP_ID.set(idx);
-                    domain.lagrange_to_coeff_st(poly)
-                })
+                .map(|poly| domain.lagrange_to_coeff_st(poly))
                 .collect();
             end_timer!(timer);
 
