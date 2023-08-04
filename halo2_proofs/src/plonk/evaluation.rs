@@ -1088,7 +1088,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         let y_beta_gamma = vec![y, beta, gamma];
 
-                        create_buffer_from!(values_buf, input);
+                        let values_buf = unsafe { program.create_buffer(domain.extended_len())? };
                         create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
                         let mut helper = gen_do_extended_fft(pk, program)?;
