@@ -38,8 +38,6 @@ where
         .par_iter()
         .zip(ws.par_iter_mut())
         .for_each(|(commitment_at_a_point, w)| {
-            let mut poly_batch = zero();
-            let mut eval_batch = C::Scalar::zero();
             let z = commitment_at_a_point.point;
 
             let evals = commitment_at_a_point
@@ -48,13 +46,121 @@ where
                 .map(|x| x.get_eval())
                 .collect::<Vec<_>>();
 
-            for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
-                assert_eq!(query.get_point(), z);
+            #[cfg(not(feature = "cuda"))]
+            let (poly_batch, eval_batch) = {
+                let mut poly_batch = zero();
+                let mut eval_batch = C::Scalar::zero();
+                for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
+                    assert_eq!(query.get_point(), z);
 
-                let poly = query.get_commitment().poly;
-                poly_batch = poly_batch * *v + poly;
-                eval_batch = eval_batch * *v + eval;
-            }
+                    let poly = query.get_commitment().poly;
+                    poly_batch = poly_batch * *v + poly;
+                    eval_batch = eval_batch * *v + eval;
+                }
+                (poly_batch, eval_batch)
+            };
+
+            #[cfg(feature = "cuda")]
+            let (poly_batch, eval_batch) = {
+                if commitment_at_a_point.queries.len() < 10 {
+                    let mut poly_batch = zero();
+                    let mut eval_batch = C::Scalar::zero();
+                    for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
+                        assert_eq!(query.get_point(), z);
+
+                        let poly = query.get_commitment().poly;
+                        poly_batch = poly_batch * *v + poly;
+                        eval_batch = eval_batch * *v + eval;
+                    }
+                    (poly_batch, eval_batch)
+                } else {
+                    use crate::arithmetic::release_gpu;
+                    use crate::arithmetic::require_gpu;
+                    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
+                    use ec_gpu_gen::rust_gpu_tools::program_closures;
+                    use ec_gpu_gen::{
+                        fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device,
+                        threadpool::Worker,
+                    };
+                    use group::Curve;
+                    use pairing::bn256::Fr;
+
+                    let mut eval_batch = C::Scalar::zero();
+                    let mut poly_batch = zero();
+
+                    let gpu_idx = require_gpu();
+                    let closures =
+                        program_closures!(|program,
+                                           input: &mut [C::ScalarExt]|
+                         -> ec_gpu_gen::EcResult<()> {
+                            let size = params.n as usize;
+                            let local_work_size = 128;
+                            let global_work_size = size / local_work_size;
+                            let vl = vec![*v];
+                            let v_buffer = program.create_buffer_from_slice(&vl[..])?;
+                            let mut it = commitment_at_a_point.queries.iter().zip(evals.iter());
+                            let mut tmp_buffer = unsafe { program.create_buffer(size)? };
+                            let (query, eval) = it.next().unwrap();
+                            eval_batch = *eval;
+                            let res_buffer = program.create_buffer_from_slice(
+                                &query.get_commitment().poly.values[..],
+                            )?;
+                            for (query, eval) in it {
+                                eval_batch = eval_batch * *v + eval;
+
+                                let kernel_name = format!("{}_eval_mul_c", "Bn256_Fr");
+                                let kernel = program.create_kernel(
+                                    &kernel_name,
+                                    global_work_size as usize,
+                                    local_work_size as usize,
+                                )?;
+                                kernel
+                                    .arg(&res_buffer)
+                                    .arg(&res_buffer)
+                                    .arg(&0)
+                                    .arg(&v_buffer)
+                                    .arg(&(size as u32))
+                                    .run()?;
+
+                                program.write_from_buffer(
+                                    &mut tmp_buffer,
+                                    &query.get_commitment().poly.values[..],
+                                )?;
+
+                                let kernel_name = format!("{}_eval_sum", "Bn256_Fr");
+                                let kernel = program.create_kernel(
+                                    &kernel_name,
+                                    global_work_size as usize,
+                                    local_work_size as usize,
+                                )?;
+                                kernel
+                                    .arg(&res_buffer)
+                                    .arg(&res_buffer)
+                                    .arg(&tmp_buffer)
+                                    .arg(&0)
+                                    .arg(&0)
+                                    .arg(&(size as u32))
+                                    .run()?;
+                            }
+                            program.read_into_buffer(&res_buffer, input)?;
+                            Ok(())
+                        });
+
+                    let devices = Device::all();
+                    let device = devices[gpu_idx % devices.len()];
+                    let program = ec_gpu_gen::program!(device).unwrap();
+                    program
+                        .run(closures, unsafe {
+                            std::mem::transmute::<_, &mut [C::ScalarExt]>(
+                                &mut poly_batch.values[..],
+                            )
+                        })
+                        .unwrap();
+
+                    release_gpu(gpu_idx);
+                    (poly_batch, eval_batch)
+                }
+            };
 
             let poly_batch = &poly_batch - eval_batch;
             let witness_poly = Polynomial {
