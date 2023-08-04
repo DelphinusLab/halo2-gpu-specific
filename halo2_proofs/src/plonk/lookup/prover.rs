@@ -94,9 +94,8 @@ impl<F: FieldExt> Argument<F> {
                         instance_values,
                     ))
                 })
-                .reduce(|acc, expression| {
-                    acc * *theta + &expression
-                }).unwrap();
+                .reduce(|acc, expression| acc * *theta + &expression)
+                .unwrap();
             compressed_expression
         };
 
@@ -480,24 +479,16 @@ fn scalar_to_usize(s: &impl FieldExt) -> usize {
     usize::from_le_bytes(bytes.as_ref()[0..8].try_into().unwrap())
 }
 
-fn sort<F: FieldExt>(value: &mut Vec<F>) {
-    let max = value.iter().reduce(|a, b| a.max(b)).unwrap();
-    let expected_max = F::from(1u64 << 25);
-    if max < &expected_max {
-        let mut slot = vec![0; scalar_to_usize(max) + 1];
-        for v in value.iter() {
-            slot[scalar_to_usize(v)] += 1;
-        }
-        let mut index = 0;
-        for (v, c) in slot.into_iter().enumerate() {
-            for _ in 0..c {
-                value[index] = F::from(v as u64);
-                index += 1;
-            }
-        }
-    } else {
-        value.sort_unstable();
-    }
+fn sort_get_max<F: FieldExt>(value: &mut Vec<F>) -> F {
+    let max = *value.iter().reduce(|a, b| a.max(b)).unwrap();
+
+    value.sort_unstable_by(|a, b| unsafe {
+        let a: &[u64; 4] = std::mem::transmute(a);
+        let b: &[u64; 4] = std::mem::transmute(b);
+        a.cmp(b)
+    });
+
+    max
 }
 
 /// Given a vector of input values A and a vector of table values S,
@@ -523,11 +514,8 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
     let mut sorted_table_coeffs = table_expression.to_vec();
     sorted_table_coeffs.truncate(usable_rows);
 
-    sort(&mut permuted_input_expression);
-    sort(&mut sorted_table_coeffs);
-
-    let max_input = *permuted_input_expression.last().unwrap();
-    let max_table = *sorted_table_coeffs.last().unwrap();
+    let max_input = sort_get_max(&mut permuted_input_expression);
+    let max_table = sort_get_max(&mut sorted_table_coeffs);
 
     let mut permuted_table_coeffs = vec![None; usable_rows];
 
@@ -576,8 +564,10 @@ fn permute_expression_pair<C: CurveAffine, R: RngCore>(
         .filter_map(|x| *x)
         .collect::<Vec<_>>();
 
-    permuted_input_expression.extend((0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)));
-    permuted_table_coeffs.extend((0..(blinding_factors + 1)).map(|_|C::Scalar::from(u16::rand(&mut rng) as u64)));
+    permuted_input_expression
+        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)));
+    permuted_table_coeffs
+        .extend((0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)));
     assert_eq!(permuted_input_expression.len(), params.n as usize);
     assert_eq!(permuted_table_coeffs.len(), params.n as usize);
 
