@@ -339,9 +339,14 @@ pub fn create_proof<
 
             let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
 
+            let timer = start_timer!(|| "prepare collection");
+            let advice = (0..meta.num_advice_columns)
+                .into_par_iter()
+                .map(|_| domain.empty_lagrange())
+                .collect();
             let mut witness = WitnessCollection {
                 k: params.k,
-                advice: vec![domain.empty_lagrange(); meta.num_advice_columns],
+                advice,
                 instances,
                 // The prover will not be allowed to assign values to advice
                 // cells that exist within inactive rows, which include some
@@ -350,7 +355,9 @@ pub fn create_proof<
                 usable_rows: ..unusable_rows_start,
                 _marker: std::marker::PhantomData,
             };
+            end_timer!(timer);
 
+            let timer = start_timer!(|| "synthesize");
             // Synthesize the circuit to obtain the witness and other information.
             ConcreteCircuit::FloorPlanner::synthesize(
                 &mut witness,
@@ -359,6 +366,7 @@ pub fn create_proof<
                 meta.constants.clone(),
             )
             .unwrap();
+            end_timer!(timer);
 
             let mut advice = witness.advice;
 

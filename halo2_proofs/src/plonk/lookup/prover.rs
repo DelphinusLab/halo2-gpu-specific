@@ -474,11 +474,6 @@ type ExpressionPair<F> = (
     usize,
 );
 
-fn scalar_to_usize(s: &impl FieldExt) -> usize {
-    let bytes = s.to_repr();
-    usize::from_le_bytes(bytes.as_ref()[0..8].try_into().unwrap())
-}
-
 fn sort_get_max<F: FieldExt>(value: &mut Vec<F>) -> F {
     let max = *value.iter().reduce(|a, b| a.max(b)).unwrap();
 
