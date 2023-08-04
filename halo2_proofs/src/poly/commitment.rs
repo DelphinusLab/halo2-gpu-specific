@@ -127,24 +127,18 @@ impl<C: CurveAffine> Params<C> {
     /// slice of coefficients. The commitment will be blinded by the blinding
     /// factor `r`.
     pub fn commit(&self, poly: &Polynomial<C::Scalar, Coeff>) -> C::Curve {
-        let mut scalars = Vec::with_capacity(poly.len());
-        scalars.extend(poly.iter());
-        let bases = &self.g;
-        let size = scalars.len();
-        assert!(bases.len() >= size);
-        best_multiexp_gpu_cond(&scalars, &bases[0..size])
+        let size = poly.values.len();
+        assert!(self.g.len() >= size);
+        best_multiexp_gpu_cond(&poly.values[..], &self.g[0..size])
     }
 
     /// This commits to a polynomial using its evaluations over the $2^k$ size
     /// evaluation domain. The commitment will be blinded by the blinding factor
     /// `r`.
     pub fn commit_lagrange(&self, poly: &Polynomial<C::Scalar, LagrangeCoeff>) -> C::Curve {
-        let mut scalars = Vec::with_capacity(poly.len());
-        scalars.extend(poly.iter());
-        let bases = &self.g_lagrange;
-        let size = scalars.len();
-        assert!(bases.len() >= size);
-        best_multiexp_gpu_cond(&scalars, &bases[0..size])
+        let size = poly.values.len();
+        assert!(self.g.len() >= size);
+        best_multiexp_gpu_cond(&poly.values[..], &self.g_lagrange[0..size])
     }
 
     pub fn commit_lagrange_with_bound(
