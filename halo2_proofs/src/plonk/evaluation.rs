@@ -854,15 +854,17 @@ impl<C: CurveAffine> Evaluator<C> {
                     let y_beta_gamma = vec![y, beta, gamma, C::Scalar::DELTA];
 
                     create_buffer_from!(values_buf, values);
-                    create_buffer_from!(l0_buf, l0);
-                    create_buffer_from!(l_last_buf, l_last);
-                    create_buffer_from!(l_active_row_buf, l_active_row);
                     create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
+                    create_buffer_from!(l_active_row_buf, &l_active_row[..]);
 
                     let mut helper = gen_do_extended_fft(pk, program)?;
-
                     let mut _allocator = LinkedList::new();
                     let allocator = &mut _allocator;
+
+                    let l0_buf = do_extended_fft(pk, program, &l0, allocator, &mut helper)?;
+
+                    let l_last_buf = do_extended_fft(pk, program, &l_last, allocator, &mut helper)?;
+
                     let first_set_buf = do_extended_fft(
                         pk,
                         program,
@@ -1087,13 +1089,16 @@ impl<C: CurveAffine> Evaluator<C> {
                         let y_beta_gamma = vec![y, beta, gamma];
 
                         create_buffer_from!(values_buf, input);
-                        create_buffer_from!(l0_buf, l0);
-                        create_buffer_from!(l_last_buf, l_last);
-                        create_buffer_from!(l_active_row_buf, l_active_row);
                         create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
                         let mut helper = gen_do_extended_fft(pk, program)?;
                         let mut allocator = LinkedList::new();
+
+                        let l0_buf =
+                            do_extended_fft(pk, program, &l0, &mut allocator, &mut helper)?;
+                        let l_last_buf =
+                            do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
+                        create_buffer_from!(l_active_row_buf, &l_active_row[..]);
 
                         let cache_size =
                             std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
@@ -1365,7 +1370,7 @@ fn _evaluate_gpu<F: FieldExt, B: Basis>(
                 .run()?;
             std::mem::swap(tmp_buffer, &mut buffer.0);
             Ok((buffer.0, 0))
-        },
+        }
     }
 }
 

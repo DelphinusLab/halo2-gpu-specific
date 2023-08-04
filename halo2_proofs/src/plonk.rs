@@ -133,9 +133,19 @@ pub struct PinnedVerificationKey<'a, C: CurveAffine> {
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
     vk: VerifyingKey<C>,
-    l0: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
-    l_last: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    
     l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+
+    #[cfg(not(feature = "cuda"))]
+    l0: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    #[cfg(not(feature = "cuda"))]
+    l_last: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    
+    #[cfg(feature = "cuda")]
+    l0: Polynomial<C::Scalar, Coeff>,
+    #[cfg(feature = "cuda")]
+    l_last: Polynomial<C::Scalar, Coeff>,
+
     fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
     fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
 

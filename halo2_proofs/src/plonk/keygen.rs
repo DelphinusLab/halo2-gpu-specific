@@ -307,6 +307,7 @@ where
     let mut l0 = vk.domain.empty_lagrange();
     l0[0] = C::Scalar::one();
     let l0 = vk.domain.lagrange_to_coeff(l0);
+    #[cfg(not(feature = "cuda"))]
     let l0 = vk.domain.coeff_to_extended(l0);
 
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
@@ -316,22 +317,23 @@ where
         *evaluation = C::Scalar::one();
     }
     let l_blind = vk.domain.lagrange_to_coeff(l_blind);
-    let l_blind = vk.domain.coeff_to_extended(l_blind);
+    let l_blind_extended = vk.domain.coeff_to_extended(l_blind);
 
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
     l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::one();
     let l_last = vk.domain.lagrange_to_coeff(l_last);
-    let l_last = vk.domain.coeff_to_extended(l_last);
+    let l_last_extended = vk.domain.coeff_to_extended(l_last.clone());
 
     // Compute l_active_row(X)
     let one = C::Scalar::one();
+
     let mut l_active_row = vk.domain.empty_extended();
     parallelize(&mut l_active_row, |values, start| {
         for (i, value) in values.iter_mut().enumerate() {
             let idx = i + start;
-            *value = one - (l_last[idx] + l_blind[idx]);
+            *value = one - (l_last_extended[idx] + l_blind_extended[idx]);
         }
     });
 
