@@ -1343,7 +1343,29 @@ fn _evaluate_gpu<F: FieldExt, B: Basis>(
             std::mem::swap(tmp_buffer, &mut l.0);
             Ok((l.0, 0))
         }
-        _ => unimplemented!(),
+        Expression::Selector(_) => unreachable!(),
+        Expression::Scaled(l, r) => {
+            let c = vec![*r];
+            let c_buffer = program.create_buffer_from_slice(&c[..])?;
+            let mut buffer = _evaluate_gpu(
+                program, &l, size, rot_scale, fixed, advice, instance, tmp_buffer,
+            )?;
+            let kernel_name = format!("{}_eval_mul_c", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(tmp_buffer)
+                .arg(&buffer.0)
+                .arg(&buffer.1)
+                .arg(&c_buffer)
+                .arg(&(size as u32))
+                .run()?;
+            std::mem::swap(tmp_buffer, &mut buffer.0);
+            Ok((buffer.0, 0))
+        },
     }
 }
 
