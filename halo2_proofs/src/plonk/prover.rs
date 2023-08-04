@@ -400,49 +400,37 @@ pub fn create_proof<
 
     end_timer!(timer);
     let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
-    let (lookups, lookups_commitments): (
-        Vec<Vec<Vec<lookup::prover::Permuted<C>>>>,
-        Vec<Vec<Vec<[C; 2]>>>,
-    ) = instance
-        .iter()
-        .zip(advice.iter())
-        .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
-            // Construct and commit to permuted values for each lookup
-            let groups = *N_GPU * 2;
-            let chunk_size = (pk.vk.cs.lookups.len() + groups - 1) / groups;
-            pk.vk
-                .cs
-                .lookups
-                .par_chunks(chunk_size)
-                .map(|lookups| {
-                    lookups
-                        .into_par_iter()
-                        .map(|lookup| {
-                            lookup
-                                .commit_permuted(
-                                    pk,
-                                    params,
-                                    domain,
-                                    theta,
-                                    &advice,
-                                    &pk.fixed_values,
-                                    &instance.instance_values,
-                                    &mut OsRng,
-                                )
-                                .unwrap()
-                        })
-                        .unzip()
-                })
-                .unzip()
-        })
-        .unzip();
+    let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
+        instance
+            .iter()
+            .zip(advice.iter())
+            .map(|(instance, advice)| -> (Vec<_>, Vec<_>) {
+                pk.vk
+                    .cs
+                    .lookups
+                    .par_iter()
+                    .map(|lookup| {
+                        lookup
+                            .commit_permuted(
+                                pk,
+                                params,
+                                domain,
+                                theta,
+                                &advice,
+                                &pk.fixed_values,
+                                &instance.instance_values,
+                                &mut OsRng,
+                            )
+                            .unwrap()
+                    })
+                    .unzip()
+            })
+            .unzip();
 
     lookups_commitments.into_iter().for_each(|x| {
         x.iter().for_each(|x| {
-            x.iter().for_each(|x| {
-                transcript.write_point(x[0]).unwrap();
-                transcript.write_point(x[1]).unwrap();
-            })
+            transcript.write_point(x[0]).unwrap();
+            transcript.write_point(x[1]).unwrap();
         })
     });
     end_timer!(timer);
@@ -481,18 +469,8 @@ pub fn create_proof<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .enumerate()
-                    .map(|(idx, lookups)| {
-                        lookups
-                            .into_par_iter()
-                            .map(|lookup| {
-                                lookup
-                                    .commit_product(pk, params, beta, gamma, idx % *N_GPU)
-                                    .unwrap()
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                    .collect::<Vec<Vec<_>>>()
+                    .map(|lookup| lookup.commit_product(pk, params, beta, gamma).unwrap())
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
         end_timer!(timer);
@@ -503,16 +481,11 @@ pub fn create_proof<
             .map(|lookups| {
                 lookups
                     .into_iter()
-                    .map(|lookups| {
-                        lookups
-                            .into_iter()
-                            .map(|(l0, l1, mut z)| {
-                                for _ in 0..pk.vk.cs.blinding_factors() {
-                                    z.push(C::Scalar::random(&mut rng))
-                                }
-                                (l0, l1, pk.vk.domain.lagrange_from_vec(z))
-                            })
-                            .collect::<Vec<_>>()
+                    .map(|(l0, l1, mut z)| {
+                        for _ in 0..pk.vk.cs.blinding_factors() {
+                            z.push(C::Scalar::random(&mut rng))
+                        }
+                        (l0, l1, pk.vk.domain.lagrange_from_vec(z))
                     })
                     .collect::<Vec<_>>()
             })
@@ -525,12 +498,7 @@ pub fn create_proof<
             .flat_map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .flat_map(|lookups| {
-                        lookups
-                            .into_iter()
-                            .map(|l| params.commit_lagrange(&l.2).to_affine())
-                            .collect::<Vec<_>>()
-                    })
+                    .map(|l| params.commit_lagrange(&l.2).to_affine())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -542,33 +510,21 @@ pub fn create_proof<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .flat_map(|lookups| {
-                        lookups
-                            .into_iter()
-                            .map(
-                                |(
-                                    lookup_permuted_input,
-                                    lookup_permuted_table,
-                                    lookups_product,
-                                )| {
-                                    lookup::prover::Committed {
-                                        permuted_input_poly: pk
-                                            .vk
-                                            .domain
-                                            .lagrange_to_coeff_st(lookup_permuted_input),
-                                        permuted_table_poly: pk
-                                            .vk
-                                            .domain
-                                            .lagrange_to_coeff_st(lookup_permuted_table),
-                                        product_poly: pk
-                                            .vk
-                                            .domain
-                                            .lagrange_to_coeff_st(lookups_product),
-                                    }
-                                },
-                            )
-                            .collect::<Vec<_>>()
-                    })
+                    .map(
+                        |(lookup_permuted_input, lookup_permuted_table, lookups_product)| {
+                            lookup::prover::Committed {
+                                permuted_input_poly: pk
+                                    .vk
+                                    .domain
+                                    .lagrange_to_coeff_st(lookup_permuted_input),
+                                permuted_table_poly: pk
+                                    .vk
+                                    .domain
+                                    .lagrange_to_coeff_st(lookup_permuted_table),
+                                product_poly: pk.vk.domain.lagrange_to_coeff_st(lookups_product),
+                            }
+                        },
+                    )
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();

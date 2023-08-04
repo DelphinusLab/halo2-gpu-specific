@@ -164,7 +164,6 @@ impl<C: CurveAffine> Permuted<C> {
         params: &Params<C>,
         beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
-        _gpu_idx: usize,
     ) -> Result<
         (
             Polynomial<C::Scalar, LagrangeCoeff>,
