@@ -866,14 +866,14 @@ impl<C: CurveAffine> Evaluator<C> {
                     let first_set_buf = do_extended_fft(
                         pk,
                         program,
-                        first_set.permutation_product_poly.clone(),
+                        &first_set.permutation_product_poly,
                         allocator,
                         &mut helper,
                     )?;
                     let last_set_buf = do_extended_fft(
                         pk,
                         program,
-                        last_set.permutation_product_poly.clone(),
+                        &last_set.permutation_product_poly,
                         allocator,
                         &mut helper,
                     )?;
@@ -903,7 +903,7 @@ impl<C: CurveAffine> Evaluator<C> {
                         let curr_set_buf = do_extended_fft(
                             pk,
                             program,
-                            set.permutation_product_poly.clone(),
+                            &set.permutation_product_poly,
                             allocator,
                             &mut helper,
                         )?;
@@ -964,7 +964,7 @@ impl<C: CurveAffine> Evaluator<C> {
                         let curr_set_buf = do_extended_fft(
                             pk,
                             program,
-                            set.permutation_product_poly.clone(),
+                            &set.permutation_product_poly,
                             allocator,
                             &mut helper,
                         )?;
@@ -986,36 +986,14 @@ impl<C: CurveAffine> Evaluator<C> {
                         for (values, permutation) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
-                                Any::Advice => advice_poly[0][column.index()].clone(),
-                                Any::Fixed => fixed[column.index()].clone(),
-                                Any::Instance => instance_poly[0][column.index()].clone(),
+                                Any::Advice => &advice_poly[0][column.index()],
+                                Any::Fixed => &fixed[column.index()],
+                                Any::Instance => &instance_poly[0][column.index()],
                             })
                             .zip(cosets.iter())
                         {
-                            let values = domain.coeff_to_extended_without_fft(values);
-
-                            create_buffer_from!(origin_buf, &values.values);
-
-                            let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
-                            let kernel = program.create_kernel(
-                                &kernel_name,
-                                global_work_size as usize,
-                                local_work_size as usize,
-                            )?;
-                            kernel
-                                .arg(&origin_buf)
-                                .arg(&extended_data_buf)
-                                .arg(&(1 << domain.k()))
-                                .run()?;
-
-                            extended_data_buf = crate::plonk::evaluation_gpu::do_fft(
-                                pk,
-                                program,
-                                extended_data_buf,
-                                allocator,
-                                &helper.pq_buffer,
-                                &helper.omegas_buffer,
-                            )?;
+                            extended_data_buf =
+                                do_extended_fft(pk, program, values, allocator, &mut helper)?;
 
                             create_buffer_from!(permutation_buf, &permutation.values);
 
@@ -1125,7 +1103,6 @@ impl<C: CurveAffine> Evaluator<C> {
                         let omega = omega[0];
                         let log_n = domain.extended_k();
                         let n = 1 << log_n;
-                        let mut dst_buffer = unsafe { program.create_buffer::<Fr>(n)? };
                         let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
 
                         // Precalculate:
@@ -1148,6 +1125,9 @@ impl<C: CurveAffine> Evaluator<C> {
                             omegas.push(omegas.last().unwrap().square());
                         }
 
+                        let mut helper = gen_do_extended_fft(pk, program)?;
+                        let mut allocator = LinkedList::new();
+
                         let cache_size =
                             std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
                         let cache_size = usize::from_str_radix(&cache_size, 10)
@@ -1167,75 +1147,33 @@ impl<C: CurveAffine> Evaluator<C> {
                                     theta,
                                     gamma,
                                     &mut unit_cache,
-                                    &mut LinkedList::new(),
+                                    &mut allocator,
+                                    &mut helper,
                                 )
                                 .unwrap()
                                 .0;
 
-                            let product_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.product_poly.clone());
-                            let permuted_input_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.permuted_input_poly.clone());
-                            let permuted_table_coset = pk
-                                .vk
-                                .domain
-                                .coeff_to_extended_without_fft(lookup.permuted_table_poly.clone());
-
-                            let mut permuted_input_coset_buf =
-                                unsafe { program.create_buffer::<Fr>(size)? };
-                            let mut permuted_table_coset_buf =
-                                unsafe { program.create_buffer::<Fr>(size)? };
-                            let mut product_coset_buf =
-                                unsafe { program.create_buffer::<Fr>(size)? };
-
-                            for (src_buffer, data) in vec![
-                                (&mut product_coset_buf, &product_coset),
-                                (&mut permuted_input_coset_buf, &permuted_input_coset),
-                                (&mut permuted_table_coset_buf, &permuted_table_coset),
-                            ] {
-                                buffer[..data.values.len()].copy_from_slice(&data[..]);
-                                program.write_from_buffer(src_buffer, unsafe {
-                                    std::mem::transmute::<_, &[Fr]>(&buffer[..])
-                                })?;
-
-                                let omegas_buffer = program.create_buffer_from_slice(&omegas)?;
-
-                                let mut log_p = 0u32;
-                                // Each iteration performs a FFT round
-                                while log_p < log_n {
-                                    // 1=>radix2, 2=>radix4, 3=>radix8, ...
-                                    let deg = cmp::min(max_deg, log_n - log_p);
-
-                                    let n = 1u32 << log_n;
-                                    let local_work_size =
-                                        1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
-                                    let global_work_size = n >> deg;
-                                    let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
-                                    let kernel = program.create_kernel(
-                                        &kernel_name,
-                                        global_work_size as usize,
-                                        local_work_size as usize,
-                                    )?;
-                                    kernel
-                                        .arg(src_buffer)
-                                        .arg(&dst_buffer)
-                                        .arg(&pq_buffer)
-                                        .arg(&omegas_buffer)
-                                        .arg(&LocalBuffer::<Fr>::new(1 << deg))
-                                        .arg(&n)
-                                        .arg(&log_p)
-                                        .arg(&deg)
-                                        .arg(&max_deg)
-                                        .run()?;
-
-                                    log_p += deg;
-                                    std::mem::swap(src_buffer, &mut dst_buffer);
-                                }
-                            }
+                            let permuted_input_coset_buf = do_extended_fft(
+                                pk,
+                                program,
+                                &lookup.permuted_input_poly,
+                                &mut allocator,
+                                &mut helper,
+                            )?;
+                            let permuted_table_coset_buf = do_extended_fft(
+                                pk,
+                                program,
+                                &lookup.permuted_table_poly,
+                                &mut allocator,
+                                &mut helper,
+                            )?;
+                            let product_coset_buf = do_extended_fft(
+                                pk,
+                                program,
+                                &lookup.product_poly,
+                                &mut allocator,
+                                &mut helper,
+                            )?;
 
                             let local_work_size = 128;
                             let global_work_size = size / local_work_size;

@@ -102,21 +102,24 @@ impl<F: FieldExt> LookupProveExpression<F> {
         gamma: F,
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
+        helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Rc<Buffer<F>>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
 
         match self {
-            LookupProveExpression::Expression(e) => {
-                e._eval_gpu_buffer(pk, program, advice, instance, y, unit_cache, allocator)
-            }
+            LookupProveExpression::Expression(e) => e._eval_gpu_buffer(
+                pk, program, advice, instance, y, unit_cache, allocator, helper,
+            ),
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
                 )?;
                 let r = r._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
@@ -159,9 +162,11 @@ impl<F: FieldExt> LookupProveExpression<F> {
             LookupProveExpression::LcBeta(l, r) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
                 )?;
                 let r = r._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
@@ -203,6 +208,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
             LookupProveExpression::AddGamma(l) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
                 )?;
                 let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
@@ -464,14 +470,14 @@ impl<F: FieldExt> ProveExpression<F> {
         y: &mut Vec<F>,
         unit_cache: &mut Cache<Buffer<F>>,
         allocator: &mut LinkedList<Buffer<F>>,
+        helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Rc<Buffer<F>>, i32)> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
-        let mut helper = gen_do_extended_fft(pk, program)?;
 
         let v = self._eval_gpu(
-            pk, program, advice, instance, y, unit_cache, allocator, &mut helper,
+            pk, program, advice, instance, y, unit_cache, allocator, helper,
         )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
@@ -650,15 +656,15 @@ impl<F: FieldExt> ProveExpression<F> {
                         ProveExpressionUnit::Fixed {
                             column_index,
                             rotation,
-                        } => (pk.fixed_polys[*column_index].clone(), rotation),
+                        } => (&pk.fixed_polys[*column_index], rotation),
                         ProveExpressionUnit::Advice {
                             column_index,
                             rotation,
-                        } => (advice[*column_index].clone(), rotation),
+                        } => (&advice[*column_index], rotation),
                         ProveExpressionUnit::Instance {
                             column_index,
                             rotation,
-                        } => (instance[*column_index].clone(), rotation),
+                        } => (&instance[*column_index], rotation),
                     };
 
                     let buffer = do_extended_fft(pk, program, origin_values, allocator, helper)?;
@@ -783,7 +789,7 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
-    origin_values: Polynomial<F, Coeff>,
+    origin_values: &Polynomial<F, Coeff>,
     allocator: &mut LinkedList<Buffer<F>>,
     helper: &mut ExtendedFFTHelper<F>,
 ) -> EcResult<Buffer<F>> {
