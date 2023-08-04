@@ -599,10 +599,11 @@ pub fn create_proof<
                             let permutation_product_commitment_projective =
                                 params.commit_lagrange(&z);
                             let z = domain.lagrange_to_coeff(z);
-                            let permutation_product_poly = z.clone();
 
                             #[cfg(not(feature = "cuda"))]
                             let permutation_product_coset = domain.coeff_to_extended(z.clone());
+
+                            let permutation_product_poly = z;
 
                             let permutation_product_commitment =
                                 permutation_product_commitment_projective.to_affine();

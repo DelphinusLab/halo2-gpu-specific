@@ -174,9 +174,9 @@ impl<C: CurveAffine> Committed<C> {
         Constructed {
             sets: self
                 .sets
-                .iter()
+                .into_iter()
                 .map(|set| ConstructedSet {
-                    permutation_product_poly: set.permutation_product_poly.clone(),
+                    permutation_product_poly: set.permutation_product_poly,
                 })
                 .collect(),
         }
