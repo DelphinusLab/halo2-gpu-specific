@@ -34,8 +34,6 @@ where
 
     let mut ws = vec![C::identity(); commitment_data.len()];
 
-    let lock = Mutex::new(0);
-
     commitment_data
         .par_iter()
         .zip(ws.par_iter_mut())
@@ -64,7 +62,6 @@ where
                 _marker: PhantomData,
             };
 
-            let _guard = lock.lock().unwrap();
             *w = params.commit(&witness_poly).to_affine();
         });
 
