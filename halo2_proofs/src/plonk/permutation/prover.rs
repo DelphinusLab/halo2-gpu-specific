@@ -77,7 +77,7 @@ impl Argument {
             .map(|(i, (columns, permutations))| {
                 // Each column gets its own delta power.
                 let mut delta_omega =
-                    C::Scalar::DELTA.pow(&[i as u64 * columns.len() as u64, 0, 0, 0]);
+                    C::Scalar::DELTA.pow(&[i as u64 * chunk_len as u64, 0, 0, 0]);
 
                 // Goal is to compute the products of fractions
                 //
