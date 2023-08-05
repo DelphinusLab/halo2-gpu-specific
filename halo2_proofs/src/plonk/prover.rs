@@ -63,7 +63,7 @@ lazy_static! {
     )
     .unwrap();
     pub static ref GPU_LOCK: Mutex<Vec<usize>> =
-        Mutex::new(Vec::from_iter((0..*N_GPU).into_iter()));
+        Mutex::new(Vec::from_iter((0..*N_GPU * 2).into_iter()));
     pub static ref GPU_COND_VAR: Condvar = Condvar::new();
 }
 

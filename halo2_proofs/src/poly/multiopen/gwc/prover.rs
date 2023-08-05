@@ -75,7 +75,7 @@ where
                     (poly_batch, eval_batch)
                 } else {
                     use crate::arithmetic::release_gpu;
-                    use crate::arithmetic::require_gpu;
+                    use crate::arithmetic::acquire_gpu;
                     use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
                     use ec_gpu_gen::rust_gpu_tools::program_closures;
                     use ec_gpu_gen::{
@@ -88,7 +88,7 @@ where
                     let mut eval_batch = C::Scalar::zero();
                     let mut poly_batch = zero();
 
-                    let gpu_idx = require_gpu();
+                    let gpu_idx = acquire_gpu();
                     let closures =
                         program_closures!(|program,
                                            input: &mut [C::ScalarExt]|

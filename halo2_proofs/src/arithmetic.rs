@@ -311,7 +311,7 @@ pub fn gpu_multiexp_single_gpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]
 }
 
 #[cfg(feature = "cuda")]
-pub fn require_gpu() -> usize {
+pub fn acquire_gpu() -> usize {
     use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
     let mut free_gpus = GPU_LOCK.lock().unwrap();
     while free_gpus.len() == 0 {
@@ -346,7 +346,7 @@ pub fn gpu_multiexp_single_gpu_with_bound<C: CurveAffine>(
     if max_bits == 0 {
         C::Curve::identity()
     } else {
-        let gpu_idx = require_gpu();
+        let gpu_idx = acquire_gpu();
 
         let _coeffs: &[Fr] = unsafe { std::mem::transmute(&coeffs[..]) };
         let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
@@ -460,13 +460,7 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     use ec_gpu_gen::rust_gpu_tools::Device;
     use pairing::bn256::Fr;
 
-    let gpu_idx = {
-        let mut free_gpus = GPU_LOCK.lock().unwrap();
-        while free_gpus.len() == 0 {
-            free_gpus = GPU_COND_VAR.wait(free_gpus).unwrap();
-        }
-        free_gpus.pop().unwrap()
-    };
+    let gpu_idx = acquire_gpu();
 
     let devices = Device::all();
     let device = devices[gpu_idx % devices.len()];
@@ -476,11 +470,7 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     let omega: &Fr = unsafe { std::mem::transmute(&omega) };
     kern.radix_fft(a, omega, log_n).expect("GPU FFT failed!");
 
-    {
-        let mut free_gpus = GPU_LOCK.lock().unwrap();
-        free_gpus.push(gpu_idx);
-    };
-    GPU_COND_VAR.notify_one();
+    release_gpu(gpu_idx);
 }
 
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size

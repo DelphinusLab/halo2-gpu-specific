@@ -1385,7 +1385,7 @@ fn evaluate_gpu<F: FieldExt, B: Basis>(
     instance: &[Polynomial<F, B>],
 ) -> Vec<F> {
     use crate::arithmetic::release_gpu;
-    use crate::arithmetic::require_gpu;
+    use crate::arithmetic::acquire_gpu;
     use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
     use ec_gpu_gen::rust_gpu_tools::program_closures;
     use ec_gpu_gen::{
@@ -1396,7 +1396,7 @@ fn evaluate_gpu<F: FieldExt, B: Basis>(
 
     let mut values = vec![F::zero(); size];
 
-    let gpu_idx = require_gpu();
+    let gpu_idx = acquire_gpu();
 
     let closures = program_closures!(|program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
         let mut tmp_buffer = unsafe { program.create_buffer(size)? };
