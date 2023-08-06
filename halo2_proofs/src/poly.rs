@@ -61,7 +61,7 @@ impl Basis for PreparedExtendedLagrangeCoeff {}
 #[derive(Clone, Debug)]
 pub struct Polynomial<F, B> {
     pub values: Vec<F>,
-    _marker: PhantomData<B>,
+    pub _marker: PhantomData<B>,
 }
 
 impl<F, B> Index<usize> for Polynomial<F, B> {

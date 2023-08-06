@@ -956,10 +956,10 @@ impl<C: CurveAffine> Evaluator<C> {
                     }
                     create_buffer_from!(beta_term_buf, &beta_term);
 
-                    for ((set, columns), cosets) in sets
+                    for ((set, columns), polys) in sets
                         .iter()
                         .zip(p.columns.chunks(chunk_len))
-                        .zip(pk.permutation.cosets.chunks(chunk_len))
+                        .zip(pk.permutation.polys.chunks(chunk_len))
                     {
                         let curr_set_buf = do_extended_fft(
                             pk,
@@ -990,12 +990,17 @@ impl<C: CurveAffine> Evaluator<C> {
                                 Any::Fixed => &fixed[column.index()],
                                 Any::Instance => &instance_poly[0][column.index()],
                             })
-                            .zip(cosets.iter())
+                            .zip(polys.iter())
                         {
                             let extended_data_buf =
                                 do_extended_fft(pk, program, values, allocator, &mut helper)?;
-
-                            create_buffer_from!(permutation_buf, &permutation.values);
+                            let permutation_buf = do_extended_fft(
+                                pk,
+                                program,
+                                permutation,
+                                allocator,
+                                &mut helper,
+                            )?;
 
                             let kernel_name =
                                 format!("{}_eval_h_permutation_left_right", "Bn256_Fr");
@@ -1384,8 +1389,8 @@ fn evaluate_gpu<F: FieldExt, B: Basis>(
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
 ) -> Vec<F> {
-    use crate::arithmetic::release_gpu;
     use crate::arithmetic::acquire_gpu;
+    use crate::arithmetic::release_gpu;
     use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
     use ec_gpu_gen::rust_gpu_tools::program_closures;
     use ec_gpu_gen::{

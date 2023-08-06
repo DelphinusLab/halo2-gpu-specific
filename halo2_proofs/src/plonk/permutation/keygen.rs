@@ -116,7 +116,7 @@ impl Assembly {
         }
 
         // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-        let mut deltaomega = Vec::with_capacity(p.columns.len());
+        let mut delta_omegas = Vec::with_capacity(p.columns.len());
         {
             let mut cur = C::Scalar::one();
             for _ in 0..p.columns.len() {
@@ -125,7 +125,7 @@ impl Assembly {
                     *o *= &cur;
                 }
 
-                deltaomega.push(omega_powers);
+                delta_omegas.push(omega_powers);
 
                 cur *= &C::Scalar::DELTA;
             }
@@ -139,7 +139,7 @@ impl Assembly {
             let mut permutation_poly = domain.empty_lagrange();
             for (j, p) in permutation_poly.iter_mut().enumerate() {
                 let (permuted_i, permuted_j) = self.mapping[i][j];
-                *p = deltaomega[permuted_i][permuted_j];
+                *p = delta_omegas[permuted_i][permuted_j];
             }
 
             // Compute commitment to permutation polynomial
@@ -155,24 +155,23 @@ impl Assembly {
         p: &Argument,
     ) -> ProvingKey<C> {
         // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-
-        let mut omega_powers = vec![domain.get_omega(); params.n as usize];
-        omega_powers[0] = C::ScalarExt::one();
-        mul_acc(&mut omega_powers);
-
-        // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers * \delta^m]
-        let mut deltaomega = Vec::with_capacity(p.columns.len());
-        {
-            let mut cur = C::Scalar::one();
-            for _ in 0..p.columns.len() {
-                let mut omega_powers = omega_powers.clone();
-                omega_powers.par_iter_mut().for_each(|o| *o *= &cur);
-                deltaomega.push(omega_powers);
-
-                cur *= &C::Scalar::DELTA;
-            }
+        let timer = start_timer!(|| "prepare delta_omegas");
+        let mut deltas = vec![C::Scalar::one()];
+        for _ in 1..p.columns.len() {
+            deltas.push(C::Scalar::DELTA * deltas.last().unwrap());
         }
 
+        let mut delta_omegas = vec![vec![]; p.columns.len()];
+        let omega = domain.get_omega();
+        delta_omegas.par_iter_mut().enumerate().for_each(|(i, x)| {
+            x.push(deltas[i]);
+            for _ in 1..params.n {
+                x.push(omega * x.last().unwrap())
+            }
+        });
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "prepare permutations");
         // Compute permutation polynomials, convert to coset form.
         let mut permutations = vec![];
         for i in 0..p.columns.len() {
@@ -184,33 +183,33 @@ impl Assembly {
                 permutation_poly.iter_mut().enumerate().for_each(|(j, p)| {
                     let j = start + j;
                     let (permuted_i, permuted_j) = self.mapping[i][j];
-                    *p = deltaomega[permuted_i][permuted_j];
+                    *p = delta_omegas[permuted_i][permuted_j];
                 });
             });
 
             // Store permutation polynomial and precompute its coset evaluation
             permutations.push(permutation_poly.clone());
         }
+        end_timer!(timer);
 
-        let (polys, cosets) = rayon::ThreadPoolBuilder::new()
-            .num_threads(2)
-            .build()
-            .unwrap()
-            .install(|| {
-                let polys: Vec<_> = permutations
-                    .par_iter()
-                    .map(|permutation_poly| domain.lagrange_to_coeff(permutation_poly.clone()))
-                    .collect();
-                let cosets = polys
-                    .par_iter()
-                    .map(|poly| domain.coeff_to_extended(poly.clone()))
-                    .collect();
-                (polys, cosets)
-            });
+        let timer = start_timer!(|| "prepare poly");
+        let polys: Vec<_> = permutations
+            .par_iter()
+            .map(|permutation_poly| domain.lagrange_to_coeff_st(permutation_poly.clone()))
+            .collect();
+        end_timer!(timer);
+
+        #[cfg(not(feature = "cuda"))]
+        let cosets = polys
+            .par_iter()
+            .map(|poly| domain.coeff_to_extended(poly.clone()))
+            .collect();
 
         ProvingKey {
             permutations,
             polys,
+
+            #[cfg(not(feature = "cuda"))]
             cosets,
         }
     }

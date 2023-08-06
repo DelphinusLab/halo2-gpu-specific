@@ -2,8 +2,10 @@
 
 use std::ops::Range;
 
+use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
+use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 use super::{
     circuit::{
@@ -279,18 +281,44 @@ where
         cs.constants.clone(),
     )?;
 
-    let mut fixed = batch_invert_assigned(assembly.fixed);
-    let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
-    fixed.extend(
-        selector_polys
-            .into_iter()
-            .map(|poly| vk.domain.lagrange_from_vec(poly)),
-    );
+    let timer = start_timer!(|| "unnecessary part");
+    let (cs, fixed) = if false {
+        let mut fixed = batch_invert_assigned(assembly.fixed);
+        let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
+        fixed.extend(
+            selector_polys
+                .into_iter()
+                .map(|poly| vk.domain.lagrange_from_vec(poly)),
+        );
+        (cs, fixed)
+    } else {
+        assert!(assembly.selectors.len() == 0);
+        (
+            cs,
+            assembly
+                .fixed
+                .into_par_iter()
+                .map(|x| Polynomial {
+                    values: x
+                        .into_iter()
+                        .map(|x| {
+                            assert!(x.denominator().is_none());
+                            x.numerator()
+                        })
+                        .collect(),
+                    _marker: std::marker::PhantomData,
+                })
+                .collect::<Vec<_>>(),
+        )
+    };
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "fix poly");
     let fixed_polys: Vec<_> = fixed
-        .iter()
-        .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
+        .par_iter()
+        .map(|poly| vk.domain.lagrange_to_coeff_st(poly.clone()))
         .collect();
+    end_timer!(timer);
 
     #[cfg(not(feature = "cuda"))]
     let fixed_cosets = fixed_polys
@@ -298,10 +326,13 @@ where
         .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
         .collect();
 
+    let timer = start_timer!(|| "assembly build pkey");
     let permutation_pk = assembly
         .permutation
         .build_pk(params, &vk.domain, &cs.permutation);
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "l poly");
     // Compute l_0(X)
     // TODO: this can be done more efficiently
     let mut l0 = vk.domain.empty_lagrange();
@@ -336,9 +367,12 @@ where
             *value = one - (l_last_extended[idx] + l_blind_extended[idx]);
         }
     });
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "prepare ev");
     // Compute the optimized evaluation data structure
     let ev = Evaluator::new(&vk.cs);
+    end_timer!(timer);
 
     Ok(ProvingKey {
         vk,
