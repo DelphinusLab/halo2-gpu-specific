@@ -40,12 +40,6 @@ where
         .for_each(|(commitment_at_a_point, w)| {
             let z = commitment_at_a_point.point;
 
-            let evals = commitment_at_a_point
-                .queries
-                .par_iter()
-                .map(|x| x.get_eval())
-                .collect::<Vec<_>>();
-
             #[cfg(not(feature = "cuda"))]
             let (poly_batch, eval_batch) = {
                 let mut poly_batch = zero();
@@ -61,21 +55,19 @@ where
             };
 
             #[cfg(feature = "cuda")]
-            let (poly_batch, eval_batch) = {
+            let poly_batch = {
                 if commitment_at_a_point.queries.len() < 10 {
                     let mut poly_batch = zero();
-                    let mut eval_batch = C::Scalar::zero();
-                    for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
+                    for query in commitment_at_a_point.queries.iter() {
                         assert_eq!(query.get_point(), z);
 
                         let poly = query.get_commitment().poly;
                         poly_batch = poly_batch * *v + poly;
-                        eval_batch = eval_batch * *v + eval;
                     }
-                    (poly_batch, eval_batch)
+                    poly_batch
                 } else {
-                    use crate::arithmetic::release_gpu;
                     use crate::arithmetic::acquire_gpu;
+                    use crate::arithmetic::release_gpu;
                     use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
                     use ec_gpu_gen::rust_gpu_tools::program_closures;
                     use ec_gpu_gen::{
@@ -85,7 +77,6 @@ where
                     use group::Curve;
                     use pairing::bn256::Fr;
 
-                    let mut eval_batch = C::Scalar::zero();
                     let mut poly_batch = zero();
 
                     let gpu_idx = acquire_gpu();
@@ -98,16 +89,13 @@ where
                             let global_work_size = size / local_work_size;
                             let vl = vec![*v];
                             let v_buffer = program.create_buffer_from_slice(&vl[..])?;
-                            let mut it = commitment_at_a_point.queries.iter().zip(evals.iter());
+                            let mut it = commitment_at_a_point.queries.iter();
                             let mut tmp_buffer = unsafe { program.create_buffer(size)? };
-                            let (query, eval) = it.next().unwrap();
-                            eval_batch = *eval;
+                            let query = it.next().unwrap();
                             let res_buffer = program.create_buffer_from_slice(
                                 &query.get_commitment().poly.values[..],
                             )?;
-                            for (query, eval) in it {
-                                eval_batch = eval_batch * *v + eval;
-
+                            for query in it {
                                 let kernel_name = format!("{}_eval_mul_c", "Bn256_Fr");
                                 let kernel = program.create_kernel(
                                     &kernel_name,
@@ -158,9 +146,12 @@ where
                         .unwrap();
 
                     release_gpu(gpu_idx);
-                    (poly_batch, eval_batch)
+                    poly_batch
                 }
             };
+
+            let eval_batch =
+                eval_polynomial_st(&poly_batch, commitment_at_a_point.queries[0].get_point());
 
             let poly_batch = &poly_batch - eval_batch;
             let witness_poly = Polynomial {
