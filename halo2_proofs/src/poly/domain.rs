@@ -31,7 +31,7 @@ pub struct EvaluationDomain<G: Group> {
     pub(crate) g_coset: G::Scalar,
     pub(crate) g_coset_inv: G::Scalar,
     quotient_poly_degree: u64,
-    ifft_divisor: G::Scalar,
+    pub(crate) ifft_divisor: G::Scalar,
     extended_ifft_divisor: G::Scalar,
     t_evaluations: Vec<G::Scalar>,
     barycentric_weight: G::Scalar,

@@ -500,42 +500,33 @@ pub fn create_proof<
             .collect::<Vec<Vec<_>>>();
         end_timer!(timer);
 
-        let timer = start_timer!(|| "lookups msm");
-        let lookups_z_commitments = lookups
-            .iter()
-            .flat_map(|lookups| {
-                lookups
-                    .into_par_iter()
-                    .map(|l| params.commit_lagrange(&l.2).to_affine())
-                    .collect::<Vec<_>>()
-            })
-            .collect::<Vec<_>>();
-        end_timer!(timer);
-
-        let timer = start_timer!(|| "lookups fft");
-        let lookups = lookups
+        let timer = start_timer!(|| "lookups msm and fft");
+        let (lookups_z_commitments, lookups): (Vec<Vec<_>>, Vec<Vec<_>>) = lookups
             .into_iter()
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .map(
-                        |(lookup_permuted_input, lookup_permuted_table, lookups_product)| {
+                    .map(|l| {
+                        let (product_poly, c) = params.commit_lagrange_and_ifft(
+                            l.2,
+                            &pk.vk.domain.get_omega_inv(),
+                            &pk.vk.domain.ifft_divisor,
+                        );
+                        let c = c.to_affine();
+                        (
+                            c,
                             lookup::prover::Committed {
-                                permuted_input_poly: pk
-                                    .vk
-                                    .domain
-                                    .lagrange_to_coeff_st(lookup_permuted_input),
-                                permuted_table_poly: pk
-                                    .vk
-                                    .domain
-                                    .lagrange_to_coeff_st(lookup_permuted_table),
-                                product_poly: pk.vk.domain.lagrange_to_coeff_st(lookups_product),
-                            }
-                        },
-                    )
+                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
+                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1),
+                                product_poly,
+                            },
+                        )
+                    })
                     .collect::<Vec<_>>()
+                    .into_iter()
+                    .unzip()
             })
-            .collect::<Vec<_>>();
+            .unzip();
         end_timer!(timer);
 
         let timer = start_timer!(|| "permutation commit");
@@ -549,13 +540,16 @@ pub fn create_proof<
                 let (c, sets): (Vec<_>, _) = permutations
                     .into_par_iter()
                     .map(|z| {
-                        let permutation_product_commitment_projective = params.commit_lagrange(&z);
-                        let z = domain.lagrange_to_coeff_st(z);
+                        let (permutation_product_poly, permutation_product_commitment_projective) =
+                            params.commit_lagrange_and_ifft(
+                                z,
+                                &pk.vk.domain.get_omega_inv(),
+                                &pk.vk.domain.ifft_divisor,
+                            );
 
                         #[cfg(not(feature = "cuda"))]
-                        let permutation_product_coset = domain.coeff_to_extended(z.clone());
-
-                        let permutation_product_poly = z;
+                        let permutation_product_coset =
+                            domain.coeff_to_extended(permutation_product_poly.clone());
 
                         let permutation_product_commitment =
                             permutation_product_commitment_projective.to_affine();
@@ -581,12 +575,17 @@ pub fn create_proof<
         }
 
         let permutations: Vec<_> = permutations.into_iter().map(|x| x.1).collect();
-
         end_timer!(timer);
 
         lookups_z_commitments
             .into_iter()
-            .for_each(|lookups_z_commitment| transcript.write_point(lookups_z_commitment).unwrap());
+            .for_each(|lookups_z_commitments| {
+                lookups_z_commitments
+                    .into_iter()
+                    .for_each(|lookups_z_commitment| {
+                        transcript.write_point(lookups_z_commitment).unwrap()
+                    })
+            });
 
         (lookups, permutations)
     });

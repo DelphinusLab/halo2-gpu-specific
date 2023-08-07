@@ -4,6 +4,7 @@
 //! [halo]: https://eprint.iacr.org/2019/1021
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
+use crate::arithmetic::gpu_multiexp_bound_and_fft;
 use crate::arithmetic::{
     best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine, CurveExt, Engine,
     FieldExt, Group,
@@ -139,6 +140,33 @@ impl<C: CurveAffine> Params<C> {
         let size = poly.values.len();
         assert!(self.g.len() >= size);
         best_multiexp_gpu_cond(&poly.values[..], &self.g_lagrange[0..size])
+    }
+
+    /// This commits to a polynomial using its evaluations over the $2^k$ size
+    /// evaluation domain. The commitment will be blinded by the blinding factor
+    /// `r`.
+    pub fn commit_lagrange_and_ifft(
+        &self,
+        poly: Polynomial<C::Scalar, LagrangeCoeff>,
+        omega: &C::Scalar,
+        ifft_divisor: &C::Scalar,
+    ) -> (Polynomial<C::Scalar, Coeff>, C::Curve) {
+        let mut values = poly.values;
+        let c = gpu_multiexp_bound_and_fft(
+            &mut values,
+            &self.g_lagrange[..],
+            C::Scalar::NUM_BITS as usize,
+            omega,
+            ifft_divisor,
+            self.k,
+        );
+        (
+            Polynomial {
+                values,
+                _marker: PhantomData,
+            },
+            c,
+        )
     }
 
     pub fn commit_lagrange_with_bound(

@@ -372,6 +372,44 @@ pub fn gpu_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cur
 }
 
 #[cfg(feature = "cuda")]
+pub fn gpu_multiexp_bound_and_fft<C: CurveAffine>(
+    coeffs: &mut [C::Scalar],
+    bases: &[C],
+    max_bits: usize,
+    omega: &C::Scalar,
+    divisor: &C::Scalar,
+    log_n: u32,
+) -> C::Curve {
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK};
+    use ec_gpu_gen::{
+        fft::FftKernel, multiexp::SingleMultiexpKernel, rust_gpu_tools::Device, threadpool::Worker,
+    };
+    use group::Curve;
+    use pairing::bn256::Fr;
+
+    let gpu_idx = acquire_gpu();
+    let _coeffs: &mut [Fr] = unsafe { std::mem::transmute(coeffs) };
+    let bases: &[G1Affine] = unsafe { std::mem::transmute(bases) };
+    let omega: &Fr = unsafe { std::mem::transmute(omega) };
+    let divisor: &Fr = unsafe { std::mem::transmute(divisor) };
+
+    let devices = Device::all();
+    let device = devices[gpu_idx % devices.len()];
+    let programs = ec_gpu_gen::program!(device).unwrap();
+    let kern = SingleMultiexpKernel::<G1Affine>::create(programs, device, None)
+        .expect("Cannot initialize kernel!");
+
+    let a = [kern
+        .multiexp_bound_and_ifft(bases, _coeffs, max_bits, omega, divisor, log_n)
+        .unwrap()];
+    release_gpu(gpu_idx);
+
+    let res: &[C::Curve] = unsafe { std::mem::transmute(&a[..]) };
+
+    res[0]
+}
+
+#[cfg(feature = "cuda")]
 pub fn gpu_multiexp_bound<C: CurveAffine>(
     coeffs: &[C::Scalar],
     bases: &[C],
@@ -473,7 +511,6 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     release_gpu(gpu_idx);
 }
 
-
 #[cfg(feature = "cuda")]
 pub fn gpu_ifft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32, divisor: G::Scalar) {
     use crate::plonk::{GPU_COND_VAR, GPU_LOCK, N_GPU};
@@ -490,7 +527,8 @@ pub fn gpu_ifft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32, divisor: G:
     let a: &mut [Fr] = unsafe { std::mem::transmute(a) };
     let omega: &Fr = unsafe { std::mem::transmute(&omega) };
     let divisor: &Fr = unsafe { std::mem::transmute(&divisor) };
-    kern.radix_ifft(a, omega, divisor, log_n).expect("GPU FFT failed!");
+    kern.radix_ifft(a, omega, divisor, log_n)
+        .expect("GPU FFT failed!");
 
     release_gpu(gpu_idx);
 }
