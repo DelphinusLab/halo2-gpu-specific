@@ -5,7 +5,8 @@ use group::Curve;
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use rand_core::RngCore;
-use rayon::prelude::ParallelIterator;
+use rayon::prelude::{ParallelIterator, IntoParallelRefIterator};
+use rayon::slice::ParallelSlice;
 
 use super::Argument;
 use crate::poly::Rotation;
@@ -83,7 +84,7 @@ impl<C: CurveAffine> Committed<C> {
 
         // Split h(X) up into pieces
         let h_pieces = h_poly
-            .chunks_exact(params.n as usize)
+            .par_chunks_exact(params.n as usize)
             .map(|v| domain.coeff_from_vec(v.to_vec()))
             .collect::<Vec<_>>();
         drop(h_poly);
@@ -95,7 +96,6 @@ impl<C: CurveAffine> Committed<C> {
             .collect();
         let mut h_commitments = vec![C::identity(); h_commitments_projective.len()];
         C::Curve::batch_normalize(&h_commitments_projective, &mut h_commitments);
-        let h_commitments = h_commitments;
 
         // Hash each h(X) piece
         for c in h_commitments.iter() {
