@@ -397,13 +397,19 @@ impl<G: Group> EvaluationDomain<G> {
     }
 
     fn ifft(a: &mut [G], omega_inv: G::Scalar, log_n: u32, divisor: G::Scalar) {
-        best_fft(a, omega_inv, log_n);
-        parallelize(a, |a, _| {
-            for a in a {
-                // Finish iFFT
-                a.group_scale(&divisor);
-            }
-        });
+        #[cfg(not(feature = "cuda"))]
+        {
+            best_fft(a, omega_inv, log_n);
+            parallelize(a, |a, _| {
+                for a in a {
+                    // Finish iFFT
+                    a.group_scale(&divisor);
+                }
+            });
+        }
+
+        #[cfg(feature = "cuda")]
+        gpu_ifft(a, omega_inv, log_n, divisor)
     }
 
     #[cfg(not(feature = "cuda"))]
