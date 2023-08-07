@@ -1173,10 +1173,9 @@ impl<C: CurveAffine> Evaluator<C> {
                                 .arg(&(rot_scale as u32))
                                 .arg(&(size as u32))
                                 .run()?;
-
-                            program.read_into_buffer(&values_buf, input)?;
                         }
 
+                        program.read_into_buffer(&values_buf, input)?;
                         Ok(())
                     }
                 );
