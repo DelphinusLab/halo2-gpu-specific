@@ -473,6 +473,28 @@ pub fn gpu_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     release_gpu(gpu_idx);
 }
 
+
+#[cfg(feature = "cuda")]
+pub fn gpu_ifft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32, divisor: G::Scalar) {
+    use crate::plonk::{GPU_COND_VAR, GPU_LOCK, N_GPU};
+    use ec_gpu_gen::fft::{FftKernel, SingleFftKernel};
+    use ec_gpu_gen::rust_gpu_tools::Device;
+    use pairing::bn256::Fr;
+
+    let gpu_idx = acquire_gpu();
+
+    let devices = Device::all();
+    let device = devices[gpu_idx % devices.len()];
+    let program = ec_gpu_gen::program!(device).unwrap();
+    let mut kern = SingleFftKernel::<Fr>::create(program, None).expect("Cannot initialize kernel!");
+    let a: &mut [Fr] = unsafe { std::mem::transmute(a) };
+    let omega: &Fr = unsafe { std::mem::transmute(&omega) };
+    let divisor: &Fr = unsafe { std::mem::transmute(&divisor) };
+    kern.radix_ifft(a, omega, divisor, log_n).expect("GPU FFT failed!");
+
+    release_gpu(gpu_idx);
+}
+
 /// Performs a radix-$2$ Fast-Fourier Transformation (FFT) on a vector of size
 /// $n = 2^k$, when provided `log_n` = $k$ and an element of multiplicative
 /// order $n$ called `omega` ($\omega$). The result is that the vector `a`, when

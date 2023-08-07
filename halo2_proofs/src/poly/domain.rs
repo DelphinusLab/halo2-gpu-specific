@@ -2,7 +2,7 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{batch_invert, best_fft, parallelize, FieldExt, Group},
+    arithmetic::{batch_invert, best_fft, gpu_ifft, parallelize, FieldExt, Group},
     plonk::Assigned,
 };
 
@@ -245,10 +245,17 @@ impl<G: Group> EvaluationDomain<G> {
     ///
     /// This function will panic if the provided vector is not the correct
     /// length.
-    pub fn lagrange_to_coeff_st(&self, mut a: Polynomial<G, LagrangeCoeff>) -> Polynomial<G, Coeff> {
+    pub fn lagrange_to_coeff_st(
+        &self,
+        mut a: Polynomial<G, LagrangeCoeff>,
+    ) -> Polynomial<G, Coeff> {
         assert_eq!(a.values.len(), 1 << self.k);
 
+        #[cfg(feature = "cuda")]
         // Perform inverse FFT to obtain the polynomial in coefficient form
+        gpu_ifft(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
+
+        #[cfg(not(feature = "cuda"))]
         Self::ifft_st(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
 
         Polynomial {
@@ -399,6 +406,7 @@ impl<G: Group> EvaluationDomain<G> {
         });
     }
 
+    #[cfg(not(feature = "cuda"))]
     fn ifft_st(a: &mut [G], omega_inv: G::Scalar, log_n: u32, divisor: G::Scalar) {
         best_fft(a, omega_inv, log_n);
         for a in a {

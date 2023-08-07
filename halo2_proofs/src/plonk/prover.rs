@@ -543,40 +543,45 @@ pub fn create_proof<
             .join()
             .expect("permutations thread failed unexpectedly");
 
-        let permutations = permutations
+        let permutations: Vec<_> = permutations
             .into_iter()
             .map(|permutations| {
-                permutation::prover::Committed {
-                    sets: permutations
-                        .into_iter()
-                        .map(|z| {
-                            let permutation_product_commitment_projective =
-                                params.commit_lagrange(&z);
-                            let z = domain.lagrange_to_coeff(z);
+                let (c, sets): (Vec<_>, _) = permutations
+                    .into_par_iter()
+                    .map(|z| {
+                        let permutation_product_commitment_projective = params.commit_lagrange(&z);
+                        let z = domain.lagrange_to_coeff_st(z);
 
-                            #[cfg(not(feature = "cuda"))]
-                            let permutation_product_coset = domain.coeff_to_extended(z.clone());
+                        #[cfg(not(feature = "cuda"))]
+                        let permutation_product_coset = domain.coeff_to_extended(z.clone());
 
-                            let permutation_product_poly = z;
+                        let permutation_product_poly = z;
 
-                            let permutation_product_commitment =
-                                permutation_product_commitment_projective.to_affine();
+                        let permutation_product_commitment =
+                            permutation_product_commitment_projective.to_affine();
 
-                            // Hash the permutation product commitment
-                            transcript
-                                .write_point(permutation_product_commitment)
-                                .unwrap();
-
+                        (
+                            permutation_product_commitment,
                             permutation::prover::CommittedSet {
                                 permutation_product_poly,
                                 #[cfg(not(feature = "cuda"))]
                                 permutation_product_coset,
-                            }
-                        })
-                        .collect(),
-                }
+                            },
+                        )
+                    })
+                    .unzip();
+                (c, permutation::prover::Committed { sets })
             })
-            .collect::<Vec<_>>();
+            .collect();
+
+        for (cl, _) in permutations.iter() {
+            for c in cl {
+                transcript.write_point(*c).unwrap();
+            }
+        }
+
+        let permutations: Vec<_> = permutations.into_iter().map(|x| x.1).collect();
+
         end_timer!(timer);
 
         lookups_z_commitments
