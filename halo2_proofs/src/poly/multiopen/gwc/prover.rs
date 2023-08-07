@@ -32,31 +32,31 @@ where
         _marker: PhantomData,
     };
 
-    let mut ws = vec![C::identity(); commitment_data.len()];
+    let mut commitment_data = commitment_data.into_iter().enumerate().collect::<Vec<_>>();
+    commitment_data.sort_by(|a, b| a.1.queries.len().cmp(&b.1.queries.len()));
 
-    commitment_data
+    // Sort by len to compute large batch first
+    let mut ws = commitment_data
         .par_iter()
-        .zip(ws.par_iter_mut())
-        .for_each(|(commitment_at_a_point, w)| {
+        .rev()
+        .map(|(idx, commitment_at_a_point)| {
             let z = commitment_at_a_point.point;
 
             #[cfg(not(feature = "cuda"))]
-            let (poly_batch, eval_batch) = {
+            let poly_batch = {
                 let mut poly_batch = zero();
-                let mut eval_batch = C::Scalar::zero();
-                for (query, eval) in commitment_at_a_point.queries.iter().zip(evals.iter()) {
+                for query in commitment_at_a_point.queries.iter() {
                     assert_eq!(query.get_point(), z);
 
                     let poly = query.get_commitment().poly;
                     poly_batch = poly_batch * *v + poly;
-                    eval_batch = eval_batch * *v + eval;
                 }
-                (poly_batch, eval_batch)
+                poly_batch
             };
 
             #[cfg(feature = "cuda")]
             let poly_batch = {
-                if commitment_at_a_point.queries.len() < 10 {
+                if commitment_at_a_point.queries.len() <= 4 {
                     let mut poly_batch = zero();
                     for query in commitment_at_a_point.queries.iter() {
                         assert_eq!(query.get_point(), z);
@@ -159,11 +159,14 @@ where
                 _marker: PhantomData,
             };
 
-            *w = params.commit(&witness_poly).to_affine();
-        });
+            (idx, params.commit(&witness_poly).to_affine())
+        })
+        .collect::<Vec<_>>();
+
+    ws.sort_by(|a, b| a.0.cmp(&b.0));
 
     for w in ws {
-        transcript.write_point(w)?;
+        transcript.write_point(w.1)?;
     }
 
     Ok(())
