@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::Argument;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
-use crate::plonk::evaluation::evaluate;
+use crate::plonk::evaluation::{evaluate, evaluate_with_theta};
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -82,21 +82,15 @@ impl<F: FieldExt> Argument<F> {
     {
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
-            let compressed_expression = expressions
-                .iter()
-                .map(|expression| {
-                    pk.vk.domain.lagrange_from_vec(evaluate(
-                        expression,
-                        params.n as usize,
-                        1,
-                        fixed_values,
-                        advice_values,
-                        instance_values,
-                    ))
-                })
-                .reduce(|acc, expression| acc * *theta + &expression)
-                .unwrap();
-            compressed_expression
+            pk.vk.domain.lagrange_from_vec(evaluate_with_theta(
+                expressions,
+                params.n as usize,
+                1,
+                fixed_values,
+                advice_values,
+                instance_values,
+                *theta,
+            ))
         };
 
         // Closure to construct commitment to vector of values

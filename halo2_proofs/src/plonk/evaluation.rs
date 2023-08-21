@@ -994,13 +994,8 @@ impl<C: CurveAffine> Evaluator<C> {
                         {
                             let extended_data_buf =
                                 do_extended_fft(pk, program, values, allocator, &mut helper)?;
-                            let permutation_buf = do_extended_fft(
-                                pk,
-                                program,
-                                permutation,
-                                allocator,
-                                &mut helper,
-                            )?;
+                            let permutation_buf =
+                                do_extended_fft(pk, program, permutation, allocator, &mut helper)?;
 
                             let kernel_name =
                                 format!("{}_eval_h_permutation_left_right", "Bn256_Fr");
@@ -1381,12 +1376,13 @@ fn _evaluate_gpu<F: FieldExt, B: Basis>(
 #[cfg(feature = "cuda")]
 /// Simple evaluation of an expression
 fn evaluate_gpu<F: FieldExt, B: Basis>(
-    expression: &Expression<F>,
+    expression: &[Expression<F>],
     size: usize,
     rot_scale: i32,
     fixed: &[Polynomial<F, B>],
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
+    theta: F,
 ) -> Vec<F> {
     use crate::arithmetic::acquire_gpu;
     use crate::arithmetic::release_gpu;
@@ -1403,10 +1399,14 @@ fn evaluate_gpu<F: FieldExt, B: Basis>(
     let gpu_idx = acquire_gpu();
 
     let closures = program_closures!(|program, input: &mut [F]| -> ec_gpu_gen::EcResult<()> {
+        let local_work_size = 128;
+        let global_work_size = size / local_work_size;
+
         let mut tmp_buffer = unsafe { program.create_buffer(size)? };
-        let buffer = _evaluate_gpu(
+        let mut it = expression.iter();
+        let mut buffer = _evaluate_gpu(
             program,
-            expression,
+            it.next().unwrap(),
             size,
             rot_scale,
             fixed,
@@ -1414,9 +1414,44 @@ fn evaluate_gpu<F: FieldExt, B: Basis>(
             instance,
             &mut tmp_buffer,
         )?;
+
+        let c = vec![theta];
+        let c_buffer = program.create_buffer_from_slice(&c[..])?;
+
+        for expression in it {
+            let buffer_r = _evaluate_gpu(
+                program,
+                expression,
+                size,
+                rot_scale,
+                fixed,
+                advice,
+                instance,
+                &mut tmp_buffer,
+            )?;
+            let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
+            let kernel = program.create_kernel(
+                &kernel_name,
+                global_work_size as usize,
+                local_work_size as usize,
+            )?;
+            kernel
+                .arg(&tmp_buffer)
+                .arg(&buffer.0)
+                .arg(&buffer_r.0)
+                .arg(&buffer.1)
+                .arg(&buffer_r.1)
+                .arg(&(size as u32))
+                .arg(&c_buffer)
+                .run()?;
+            std::mem::swap(&mut tmp_buffer, &mut buffer.0);
+            buffer.1 = 0;
+        }
+
         if buffer.1 != 0 {
             panic!("Evaluate expression failed, find non-zero rotation of pure column");
         }
+
         program.read_into_buffer(&buffer.0, input)?;
         Ok(())
     });
@@ -1443,6 +1478,7 @@ pub fn evaluate<F: FieldExt, B: Basis>(
     fixed: &[Polynomial<F, B>],
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
+    theta: F,
 ) -> Vec<F> {
     if let Some(idx) = expression.is_pure_fixed() {
         return fixed[idx].to_vec();
@@ -1495,6 +1531,85 @@ pub fn evaluate<F: FieldExt, B: Basis>(
 
     #[cfg(feature = "cuda")]
     {
-        return evaluate_gpu(expression, size, rot_scale, fixed, advice, instance);
+        return evaluate_gpu(
+            &[expression.clone()],
+            size,
+            rot_scale,
+            fixed,
+            advice,
+            instance,
+            theta,
+        );
+    }
+}
+
+/// Simple evaluation of an expression
+pub fn evaluate_with_theta<F: FieldExt, B: Basis>(
+    expressions: &[Expression<F>],
+    size: usize,
+    rot_scale: i32,
+    fixed: &[Polynomial<F, B>],
+    advice: &[Polynomial<F, B>],
+    instance: &[Polynomial<F, B>],
+    theta: F,
+) -> Vec<F> {
+    if expressions.len() == 1 {
+        evaluate(
+            &expressions[0],
+            size,
+            rot_scale,
+            fixed,
+            advice,
+            instance,
+            theta,
+        )
+    } else {
+        #[cfg(not(feature = "cuda"))]
+        {
+            let mut values = vec![F::zero(); size];
+            let isize = size as i32;
+            parallelize(&mut values, |values, start| {
+                for (i, value) in values.iter_mut().enumerate() {
+                    let idx = start + i;
+                    for expression in expressions {
+                        *value = value * theta;
+                        *value += expression.evaluate(
+                            &|scalar| scalar,
+                            &|_| panic!("virtual selectors are removed during optimization"),
+                            &|_, column_index, rotation| {
+                                fixed[column_index]
+                                    [get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                            },
+                            &|_, column_index, rotation| {
+                                advice[column_index]
+                                    [get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                            },
+                            &|_, column_index, rotation| {
+                                instance[column_index]
+                                    [get_rotation_idx(idx, rotation.0, rot_scale, isize)]
+                            },
+                            &|a| -a,
+                            &|a, b| a + &b,
+                            &|a, b| {
+                                let a = a();
+
+                                if a == F::zero() {
+                                    a
+                                } else {
+                                    a * b()
+                                }
+                            },
+                            &|a, scalar| a * scalar,
+                        );
+                    }
+                }
+            });
+            return values;
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            return evaluate_gpu(expressions, size, rot_scale, fixed, advice, instance, theta);
+        }
     }
 }
