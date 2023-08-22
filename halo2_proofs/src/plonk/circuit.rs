@@ -1080,6 +1080,7 @@ pub struct ConstraintSystem<F: Field> {
     pub(crate) selector_map: Vec<Column<Fixed>>,
     pub gates: Vec<Gate<F>>,
     pub advice_queries: Vec<(Column<Advice>, Rotation)>,
+    pub named_advices: Vec<(String, u32)>,
     // Contains an integer for each advice column
     // identifying how many distinct queries it has
     // so far; should be same length as num_advice_columns.
@@ -1141,6 +1142,7 @@ impl<F: Field> Default for ConstraintSystem<F> {
             gates: vec![],
             fixed_queries: Vec::new(),
             advice_queries: Vec::new(),
+            named_advices: Vec::new(),
             num_advice_queries: Vec::new(),
             instance_queries: Vec::new(),
             permutation: permutation::Argument::new(),
@@ -1557,6 +1559,18 @@ impl<F: Field> ConstraintSystem<F> {
         self.num_advice_columns += 1;
         self.num_advice_queries.push(0);
         tmp
+    }
+
+    /// Allocate a new advice column
+    pub fn named_advice_column(&mut self, name: String) -> Column<Advice> {
+        let res = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+        self.named_advices.push((name, self.num_advice_columns as u32));
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+        res
     }
 
     /// Allocate a new instance column

@@ -1032,7 +1032,7 @@ impl<F: FieldExt> MockProver<F> {
                     // value is preserved by the mapping.
                     values.iter().enumerate().filter_map(move |(row, cell)| {
                         let original_cell = original(column, row);
-                        let permuted_cell = original(cell.0, cell.1);
+                        let permuted_cell = original(cell.0 as usize, cell.1 as usize);
                         if original_cell == permuted_cell {
                             None
                         } else {
