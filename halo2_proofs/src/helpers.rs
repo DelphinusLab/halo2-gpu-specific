@@ -19,6 +19,7 @@ use memmap::{MmapMut, MmapOptions};
 use num;
 use num_derive::FromPrimitive;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
+use std::io::Seek;
 use std::marker::PhantomData;
 use std::{
     fs::{File, OpenOptions},
@@ -46,6 +47,15 @@ pub trait Serializable: Clone {
     /// Reads a compressed element from the buffer and attempts to parse it
     /// using `from_bytes`.
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
+}
+
+pub trait ParaSerializable: Clone {
+    /// Reads a compressed element from the buffer and attempts to parse it
+    /// using `from_bytes`.
+    fn vec_fetch(fd: &mut File) -> io::Result<Self>;
+    /// Reads a compressed element from the buffer and attempts to parse it
+    /// using `from_bytes`.
+    fn vec_store(&self, fd: &mut File) -> io::Result<()>;
 }
 
 fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
@@ -93,23 +103,69 @@ impl Serializable for (String, u32) {
 }
 
 
-impl Serializable for Vec<(u32, u32)> {
-    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        let u = read_u32(reader)?;
-        let mut buf = vec![0u8; u as usize * 8];
-        reader.read_exact(&mut buf)?;
-        let s: &[(u32,u32)] = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr() as *const (u32, u32), u as usize)
-        };
-        Ok(s.to_vec())
+impl ParaSerializable for Vec<Vec<(u32, u32)>> {
+    fn vec_fetch(fd: &mut File) -> io::Result<Self> {
+        let columns = read_u32(fd)?;
+        let mut offset = 0;
+        let mut offsets = vec![];
+        for _ in 0..columns {
+            let l = read_u32(fd)?;
+            offsets.push((offset, l));
+            offset = offset + l;
+        }
+        let position = fd.stream_position()?;
+        let res:Vec<Vec<(u32,u32)>> = (0..columns)
+            //.into_par_iter()
+            .into_iter()
+            .map(|i| {
+                let mmap = unsafe {
+                    MmapOptions::new()
+                        .offset(position + (offsets[i as usize].0 as u64 * 8))
+                        .len(offsets[i as usize].1 as usize * 8)
+                        .map(&fd)
+                        .unwrap()
+                };
+                let s: &[(u32, u32)] = unsafe {
+                    std::slice::from_raw_parts(mmap.as_ptr() as *const (u32, u32), offsets[i as usize].1 as usize)
+                };
+                let mut s2 = vec![];
+                s2.extend_from_slice(s);
+                s2
+            })
+            .collect();
+        Ok(res)
     }
-    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+
+    fn vec_store(&self, fd: &mut File) -> io::Result<()> {
         let u = self.len() as u32;
-        u.store(writer)?;
-        let s: &[u8] = unsafe {
-            std::slice::from_raw_parts(self.as_ptr() as *const u8, u as usize * 8)
-        };
-        writer.write(s)?;
+        u.store(fd)?;
+        let mut offset = 0;
+        let mut offsets = vec![];
+        for i in 0..u {
+            let l = self[i as usize].len();
+            offsets.push((offset, l));
+            offset = offset + l;
+            (l as u32).store(fd)?;
+        }
+        let position = fd.stream_position()?;
+        fd.set_len(position + (offset as u64 * 8)).unwrap();
+        //self.into_par_iter().enumerate().for_each(|(i, s2)| {
+        self.into_iter().enumerate().for_each(|(i, s2)| {
+           let mut mmap = unsafe {
+               MmapOptions::new()
+                   .offset(position + (offsets[i as usize].0 as u64 * 8))
+                   .len(offsets[i as usize].1 as usize * 8)
+                   .map_mut(&fd)
+                   .unwrap()
+           };
+           let s: &[u8] = unsafe {
+               std::slice::from_raw_parts(
+                   s2.as_ptr() as *const u8,
+                   offsets[i as usize].1 as usize * 8,
+               )
+           };
+           (&mut mmap).copy_from_slice(s);
+        });
         Ok(())
     }
 }
@@ -733,11 +789,11 @@ impl<B: Clone, F: FieldExt> Serializable for Polynomial<Assigned<F>, B> {
     }
 }
 
-impl Serializable for Assembly {
-    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+impl ParaSerializable for Assembly {
+    fn vec_fetch(fd: &mut File) -> io::Result<Self> {
         let assembly = Assembly {
             columns: vec![], //Vec::fetch(reader)?,
-            mapping: Vec::fetch(reader)?,
+            mapping: Vec::<Vec::<(u32, u32)>>::vec_fetch(fd)?,
             aux: vec![],   //Vec::fetch(reader)?,
             sizes: vec![], //Vec::fetch(reader)?,
         };
@@ -745,9 +801,9 @@ impl Serializable for Assembly {
     }
     /// Reads a compressed element from the buffer and attempts to parse it
     /// using `from_bytes`.
-    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+    fn vec_store(&self, fd: &mut File) -> io::Result<()> {
         //self.columns.store(writer)?;
-        self.mapping.store(writer)?;
+        self.mapping.vec_store(fd)?;
         //self.aux.store(writer)?;
         //self.sizes.store(writer)?;
         Ok(())
@@ -896,11 +952,12 @@ impl<F: FieldExt> Serializable for Assigned<F> {
     }
 }
 
-pub fn store_pk_info<C: CurveAffine, ConcreteCircuit, W: io::Write>(
+pub fn store_pk_info<C: CurveAffine, ConcreteCircuit>(
     params: &Params<C>,
     vk: &VerifyingKey<C>,
     circuit: &ConcreteCircuit,
-    writer: &mut W,
+    //writer: &mut W,
+    fd: &mut File,
 ) -> io::Result<()>
 where
     ConcreteCircuit: Circuit<C::Scalar>,
@@ -910,21 +967,21 @@ where
     let (fixed, permutation) = generate_pk_info(params, vk, circuit).unwrap();
     end_timer!(timer);
     let timer = start_timer!(|| "test store fixed ...");
-    fixed.store(writer)?;
+    fixed.store(fd)?;
     end_timer!(timer);
     let timer = start_timer!(|| "test store permutation ...");
-    permutation.store(writer)?;
+    permutation.vec_store(fd)?;
     end_timer!(timer);
     Ok(())
 }
 
-pub fn fetch_pk_info<C: CurveAffine, R: io::Read>(
+pub fn fetch_pk_info<C: CurveAffine>(
     params: &Params<C>,
     vk: &VerifyingKey<C>,
-    reader: &mut R,
+    reader: &mut File,
 ) -> io::Result<ProvingKey<C>> {
     let fixed = Vec::fetch(reader)?;
-    let permutation = Assembly::fetch(reader)?;
+    let permutation = Assembly::vec_fetch(reader)?;
     let pkey = keygen_pk_from_info(params, vk, fixed, permutation).unwrap();
     Ok(pkey)
 }
