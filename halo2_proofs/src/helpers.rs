@@ -115,8 +115,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         }
         let position = fd.stream_position()?;
         let res:Vec<Vec<(u32,u32)>> = (0..columns)
-            //.into_par_iter()
-            .into_iter()
+            .into_par_iter()
             .map(|i| {
                 let mmap = unsafe {
                     MmapOptions::new()
@@ -149,8 +148,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         }
         let position = fd.stream_position()?;
         fd.set_len(position + (offset as u64 * 8)).unwrap();
-        //self.into_par_iter().enumerate().for_each(|(i, s2)| {
-        self.into_iter().enumerate().for_each(|(i, s2)| {
+        self.into_par_iter().enumerate().for_each(|(i, s2)| {
            let mut mmap = unsafe {
                MmapOptions::new()
                    .offset(position + (offsets[i as usize].0 as u64 * 8))
@@ -210,7 +208,6 @@ impl<C: CurveAffine> Serializable for VerifyingKey<C> {
         let domain: EvaluationDomain<C::Scalar> = EvaluationDomain::new(j, k);
         let cs = read_cs::<C, R>(reader)?;
 
-        //println!("read cs {:?}", cs);
         let fixed_commitments: Vec<_> = (0..cs.num_fixed_columns)
             .map(|_| C::read(reader))
             .collect::<Result<_, _>>()?;
@@ -259,7 +256,7 @@ impl Serializable for Column<Any> {
         } else if typ == Any::Instance as u32 {
             Any::Instance
         } else if typ == Any::Fixed as u32 {
-            Any::Instance
+            Any::Fixed
         } else {
             unreachable!()
         };
@@ -980,8 +977,13 @@ pub fn fetch_pk_info<C: CurveAffine>(
     vk: &VerifyingKey<C>,
     reader: &mut File,
 ) -> io::Result<ProvingKey<C>> {
+    use ark_std::{start_timer, end_timer};
+    let timer = start_timer!(|| "test fetch fixed...");
     let fixed = Vec::fetch(reader)?;
+    end_timer!(timer);
+    let timer = start_timer!(|| "test fetch permutation ...");
     let permutation = Assembly::vec_fetch(reader)?;
+    end_timer!(timer);
     let pkey = keygen_pk_from_info(params, vk, fixed, permutation).unwrap();
     Ok(pkey)
 }

@@ -407,11 +407,17 @@ where
     //We do not support the case when selectors exists
     //let selectors = vec![vec![false; params.n as usize]; cs.num_selectors];
     let selectors = vec![];
+    use ark_std::{start_timer, end_timer};
+
+    let timer = start_timer!(|| "compress selectors ...");
     let (cs, _) = cs.compress_selectors(selectors);
+    end_timer!(timer);
+    let timer = start_timer!(|| "fixed polys ...");
     let fixed_polys: Vec<_> = fixed
         .iter()
         .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
         .collect();
+    end_timer!(timer);
 
     /*
     let fixed_cosets = fixed_polys
@@ -420,15 +426,21 @@ where
         .collect();
     */
 
+    let timer = start_timer!(|| "build pk time...");
     let permutation_pk = permutation.build_pk(params, &vk.domain, &cs.permutation);
+    end_timer!(timer);
 
     // Compute l_0(X)
     // TODO: this can be done more efficiently
+    let timer = start_timer!(|| "check gen pk time...");
     let mut l0 = vk.domain.empty_lagrange();
     l0[0] = C::Scalar::one();
     let l0 = vk.domain.lagrange_to_coeff(l0);
     //let l0 = vk.domain.coeff_to_extended(l0);
 
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "check gen pk 2 time...");
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
     // and 0 otherwise over the domain.
     let mut l_blind = vk.domain.empty_lagrange();
@@ -454,9 +466,12 @@ where
             *value = one - (l_last[idx] + l_blind[idx]);
         }
     });
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "check gen pk 3 time...");
     // Compute the optimized evaluation data structure
     let ev = Evaluator::new(&vk.cs);
+    end_timer!(timer);
 
     Ok(ProvingKey {
         vk: vk.clone(),
