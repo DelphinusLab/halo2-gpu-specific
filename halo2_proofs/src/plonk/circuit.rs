@@ -1039,7 +1039,10 @@ pub struct Gate<F: Field> {
 }
 
 impl<F: Field> Gate<F> {
-    pub(crate) fn new_with_polys_and_queries(polys: Vec<Expression<F>>, queried_cells: Vec<VirtualCell>) -> Self {
+    pub(crate) fn new_with_polys_and_queries(
+        polys: Vec<Expression<F>>,
+        queried_cells: Vec<VirtualCell>,
+    ) -> Self {
         Gate {
             name: "",
             constraint_names: vec![],
@@ -1116,9 +1119,25 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     instance_queries: &'a Vec<(Column<Instance>, Rotation)>,
     fixed_queries: &'a Vec<(Column<Fixed>, Rotation)>,
     permutation: &'a permutation::Argument,
-    lookups: &'a Vec<lookup::Argument<F>>,
+    lookups: PinnedLookups<'a, F>,
     constants: &'a Vec<Column<Fixed>>,
     minimum_degree: &'a Option<usize>,
+}
+
+struct PinnedLookups<'a, F: Field>(&'a Vec<lookup::Argument<F>>);
+
+impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_list()
+            .entries(self.0.iter().enumerate().map(|(i, arg)| {
+                (
+                    format!("lookup{}", i),
+                    &arg.input_expressions,
+                    &arg.table_expressions,
+                )
+            }))
+            .finish()
+    }
 }
 
 struct PinnedGates<'a, F: Field>(&'a Vec<Gate<F>>);
@@ -1169,7 +1188,7 @@ impl<F: Field> ConstraintSystem<F> {
             advice_queries: &self.advice_queries,
             instance_queries: &self.instance_queries,
             permutation: &self.permutation,
-            lookups: &self.lookups,
+            lookups: PinnedLookups(&self.lookups),
             constants: &self.constants,
             minimum_degree: &self.minimum_degree,
         }
@@ -1567,7 +1586,8 @@ impl<F: Field> ConstraintSystem<F> {
             index: self.num_advice_columns,
             column_type: Advice,
         };
-        self.named_advices.push((name, self.num_advice_columns as u32));
+        self.named_advices
+            .push((name, self.num_advice_columns as u32));
         self.num_advice_columns += 1;
         self.num_advice_queries.push(0);
         res

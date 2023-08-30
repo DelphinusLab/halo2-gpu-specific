@@ -866,6 +866,7 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
                 (&mut mmap).copy_from_slice(s);
             });
         }
+        println!("witness stored!");
 
         //witness.advice.store(writer)?;
         Ok(())

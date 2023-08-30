@@ -413,34 +413,32 @@ where
     let (cs, _) = cs.compress_selectors(selectors);
     end_timer!(timer);
     let timer = start_timer!(|| "fixed polys ...");
+
     let fixed_polys: Vec<_> = fixed
         .iter()
-        .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
+        .map(|poly| vk.domain.lagrange_to_coeff_st(poly.clone()))
         .collect();
     end_timer!(timer);
 
-    /*
+    #[cfg(not(feature = "cuda"))]
     let fixed_cosets = fixed_polys
         .iter()
         .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
         .collect();
-    */
 
     let timer = start_timer!(|| "build pk time...");
     let permutation_pk = permutation.build_pk(params, &vk.domain, &cs.permutation);
     end_timer!(timer);
 
+    let timer = start_timer!(|| "l poly");
     // Compute l_0(X)
     // TODO: this can be done more efficiently
-    let timer = start_timer!(|| "check gen pk time...");
     let mut l0 = vk.domain.empty_lagrange();
     l0[0] = C::Scalar::one();
     let l0 = vk.domain.lagrange_to_coeff(l0);
-    //let l0 = vk.domain.coeff_to_extended(l0);
+    #[cfg(not(feature = "cuda"))]
+    let l0 = vk.domain.coeff_to_extended(l0);
 
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "check gen pk 2 time...");
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
     // and 0 otherwise over the domain.
     let mut l_blind = vk.domain.empty_lagrange();
@@ -448,27 +446,28 @@ where
         *evaluation = C::Scalar::one();
     }
     let l_blind = vk.domain.lagrange_to_coeff(l_blind);
-    let l_blind = vk.domain.coeff_to_extended(l_blind);
+    let l_blind_extended = vk.domain.coeff_to_extended(l_blind);
 
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
     l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::one();
     let l_last = vk.domain.lagrange_to_coeff(l_last);
-    //let l_last = vk.domain.coeff_to_extended(l_last);
+    let l_last_extended = vk.domain.coeff_to_extended(l_last.clone());
 
     // Compute l_active_row(X)
     let one = C::Scalar::one();
+
     let mut l_active_row = vk.domain.empty_extended();
     parallelize(&mut l_active_row, |values, start| {
         for (i, value) in values.iter_mut().enumerate() {
             let idx = i + start;
-            *value = one - (l_last[idx] + l_blind[idx]);
+            *value = one - (l_last_extended[idx] + l_blind_extended[idx]);
         }
     });
     end_timer!(timer);
 
-    let timer = start_timer!(|| "check gen pk 3 time...");
+    let timer = start_timer!(|| "prepare ev");
     // Compute the optimized evaluation data structure
     let ev = Evaluator::new(&vk.cs);
     end_timer!(timer);
@@ -480,7 +479,9 @@ where
         l_active_row,
         fixed_values: fixed,
         fixed_polys,
-        //fixed_cosets,
+
+        #[cfg(not(feature = "cuda"))]
+        fixed_cosets,
         permutation: permutation_pk,
         ev,
     })
