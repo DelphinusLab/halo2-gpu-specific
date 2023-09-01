@@ -1572,7 +1572,7 @@ pub fn evaluate_with_theta<F: FieldExt, B: Basis>(
                 for (i, value) in values.iter_mut().enumerate() {
                     let idx = start + i;
                     for expression in expressions {
-                        *value = value * theta;
+                        *value = *value * theta;
                         *value += expression.evaluate(
                             &|scalar| scalar,
                             &|_| panic!("virtual selectors are removed during optimization"),

@@ -4,7 +4,6 @@
 //! [halo]: https://eprint.iacr.org/2019/1021
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
-use crate::arithmetic::gpu_multiexp_bound_and_fft;
 use crate::arithmetic::{
     best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine, CurveExt, Engine,
     FieldExt, Group,
@@ -142,6 +141,7 @@ impl<C: CurveAffine> Params<C> {
         best_multiexp_gpu_cond(&poly.values[..], &self.g_lagrange[0..size])
     }
 
+    #[cfg(feature = "cuda")]
     /// This commits to a polynomial using its evaluations over the $2^k$ size
     /// evaluation domain. The commitment will be blinded by the blinding factor
     /// `r`.
@@ -152,7 +152,7 @@ impl<C: CurveAffine> Params<C> {
         ifft_divisor: &C::Scalar,
     ) -> (Polynomial<C::Scalar, Coeff>, C::Curve) {
         let mut values = poly.values;
-        let c = gpu_multiexp_bound_and_fft(
+        let c = crate::arithmetic::gpu_multiexp_bound_and_fft(
             &mut values,
             &self.g_lagrange[..],
             C::Scalar::NUM_BITS as usize,
@@ -163,6 +163,33 @@ impl<C: CurveAffine> Params<C> {
         (
             Polynomial {
                 values,
+                _marker: PhantomData,
+            },
+            c,
+        )
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    /// This commits to a polynomial using its evaluations over the $2^k$ size
+    /// evaluation domain. The commitment will be blinded by the blinding factor
+    /// `r`.
+    pub fn commit_lagrange_and_ifft(
+        &self,
+        mut poly: Polynomial<C::Scalar, LagrangeCoeff>,
+        omega: &C::Scalar,
+        ifft_divisor: &C::Scalar,
+    ) -> (Polynomial<C::Scalar, Coeff>, C::Curve) {
+        let c = self.commit_lagrange(&poly);
+        best_fft(&mut poly.values[..], *omega, self.k);
+        parallelize(&mut poly.values[..], |a, _| {
+            for a in a {
+                // Finish iFFT
+                a.group_scale(&ifft_divisor);
+            }
+        });
+        (
+            Polynomial {
+                values: poly.values,
                 _marker: PhantomData,
             },
             c,

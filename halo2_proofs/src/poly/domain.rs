@@ -2,7 +2,7 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{batch_invert, best_fft, gpu_ifft, parallelize, FieldExt, Group},
+    arithmetic::{batch_invert, best_fft, parallelize, FieldExt, Group},
     plonk::Assigned,
 };
 
@@ -253,7 +253,7 @@ impl<G: Group> EvaluationDomain<G> {
 
         #[cfg(feature = "cuda")]
         // Perform inverse FFT to obtain the polynomial in coefficient form
-        gpu_ifft(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
+        crate::arithmetic::gpu_ifft(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
 
         #[cfg(not(feature = "cuda"))]
         Self::ifft_st(&mut a.values, self.omega_inv, self.k, self.ifft_divisor);
@@ -409,7 +409,7 @@ impl<G: Group> EvaluationDomain<G> {
         }
 
         #[cfg(feature = "cuda")]
-        gpu_ifft(a, omega_inv, log_n, divisor)
+        crate::arithmetic::gpu_ifft(a, omega_inv, log_n, divisor)
     }
 
     #[cfg(not(feature = "cuda"))]

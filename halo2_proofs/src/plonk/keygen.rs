@@ -374,6 +374,9 @@ where
     let ev = Evaluator::new(&vk.cs);
     end_timer!(timer);
 
+    #[cfg(not(feature = "cuda"))]
+    let l_last = l_last_extended;
+
     Ok(ProvingKey {
         vk,
         l0,
