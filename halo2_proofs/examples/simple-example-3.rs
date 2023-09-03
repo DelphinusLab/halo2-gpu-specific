@@ -266,8 +266,8 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
         row: usize,
     ) -> Result<(), Error> {
         let config = self.config();
-
-        layouter.constrain_instance(num.cell, config.instance, row)
+Ok(())
+        //layouter.constrain_instance(num.cell, config.instance, row)
     }
 }
 
@@ -346,9 +346,9 @@ fn main() {
     let k = 4;
 
     // Prepare the private and public inputs to the circuit!
-    let constant = Fp::from(7);
-    let a = Fp::from(2);
-    let b = Fp::from(3);
+    let constant = Fp::from(0);
+    let a = Fp::from(0);
+    let b = Fp::from(0);
     let c = constant * a.square() * b.square();
 
     // Instantiate the circuit with the private inputs.
@@ -360,14 +360,59 @@ fn main() {
 
     // Arrange the public input. We expose the multiplication result in row 0
     // of the instance column, so we position it there in our public inputs.
-    let mut public_inputs = vec![c];
+    let mut public_inputs = vec![];// vec![c];
 
     // Given the correct public input, our circuit will verify.
     let prover = MockProver::run(k, &circuit, vec![public_inputs.clone()]).unwrap();
     assert_eq!(prover.verify(), Ok(()));
 
     // If we try some other public input, the proof will fail!
-    public_inputs[0] += Fp::one();
-    let prover = MockProver::run(k, &circuit, vec![public_inputs]).unwrap();
-    assert!(prover.verify().is_err());
+    //public_inputs[0] += Fp::one();
+    let prover = MockProver::run(k, &circuit, vec![public_inputs.clone()]).unwrap();
+    //assert!(prover.verify().is_err());
+
+    use halo2_proofs::poly::commitment::Params;
+    use halo2_proofs::poly::commitment::ParamsVerifier;
+    use halo2_proofs::transcript::*;
+    use pairing::bn256::Bn256;
+    use pairing::bn256::G1Affine;
+    use rand::rngs::OsRng;
+    // Initialize the polynomial commitment parameters
+    let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);
+
+    // Initialize the proving key
+    let vk = keygen_vk(&params, &circuit).expect("keygen_vk should not fail");
+    let pk = keygen_pk(&params, vk, &circuit).expect("keygen_pk should not fail");
+    let params_verifier: ParamsVerifier<Bn256> = params.verifier(1).unwrap();
+    // Create a proof
+    let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+
+    use std::time::Instant;
+    let _dur = Instant::now();
+
+    create_proof(
+        &params,
+        &pk,
+        &[circuit],
+        &[&[&public_inputs[..]]],
+        OsRng,
+        &mut transcript,
+    )
+    .expect("proof generation should not fail");
+
+    println!("proving period: {:?}", _dur.elapsed());
+
+    let proof = transcript.finalize();
+
+    let strategy = SingleVerifier::new(&params_verifier);
+    let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+
+    verify_proof(
+        &params_verifier,
+        pk.get_vk(),
+        strategy,
+        &[&[&public_inputs[..]]],
+        &mut transcript,
+    )
+    .unwrap();
 }

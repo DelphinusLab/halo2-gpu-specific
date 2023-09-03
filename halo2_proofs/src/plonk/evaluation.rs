@@ -1054,149 +1054,160 @@ impl<C: CurveAffine> Evaluator<C> {
         }
         end_timer!(timer);
 
-        let timer = ark_std::start_timer!(|| "eval_h_lookups");
-        let lookups = &lookups[0];
+        if lookups[0].len() > 0 {
+            let timer = ark_std::start_timer!(|| "eval_h_lookups");
+            let lookups = &lookups[0];
 
-        let n_gpu = *crate::plonk::N_GPU;
-        let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
+            let n_gpu = *crate::plonk::N_GPU;
+            let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
 
-        values = lookups
-            .par_chunks(group_expr_len)
-            .enumerate()
-            .map(|(group_idx, lookups)| {
-                // combine fft with eval_h_lookups:
-                // fft code: from ec-gpu lib.
-                let mut buffer = vec![];
-                buffer.resize(domain.extended_len(), C::Scalar::zero());
-                let devices = Device::all();
-                let programs = devices
-                    .iter()
-                    .map(|device| ec_gpu_gen::program!(device))
-                    .collect::<Result<_, _>>()
-                    .expect("Cannot create programs!");
-                let kern = FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
-                let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(
-                    |program,
-                     args: (&mut [Fr], usize, &[Committed<C>])|
-                     -> ec_gpu_gen::EcResult<()> {
-                        let (input, group_idx, lookups) = args;
-                        macro_rules! create_buffer_from {
-                            ($x:ident, $y:expr) => {
-                                let $x = program.create_buffer_from_slice($y)?;
-                            };
-                        }
+            println!("lookups size {} {} {}", lookups.len(), *crate::plonk::N_GPU, (lookups.len() + n_gpu - 1) / n_gpu);
 
-                        let y_beta_gamma = vec![y, beta, gamma];
+            values = lookups
+                .par_chunks(group_expr_len)
+                .enumerate()
+                .map(|(group_idx, lookups)| {
+                    // combine fft with eval_h_lookups:
+                    // fft code: from ec-gpu lib.
+                    let mut buffer = vec![];
+                    buffer.resize(domain.extended_len(), C::Scalar::zero());
+                    let devices = Device::all();
+                    let programs = devices
+                        .iter()
+                        .map(|device| ec_gpu_gen::program!(device))
+                        .collect::<Result<_, _>>()
+                        .expect("Cannot create programs!");
+                    let kern =
+                        FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+                    let closures =
+                        ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
+                                                                       args: (
+                            &mut [Fr],
+                            usize,
+                            &[Committed<C>]
+                        )|
+                         -> ec_gpu_gen::EcResult<
+                            (),
+                        > {
+                            let (input, group_idx, lookups) = args;
+                            macro_rules! create_buffer_from {
+                                ($x:ident, $y:expr) => {
+                                    let $x = program.create_buffer_from_slice($y)?;
+                                };
+                            }
 
-                        let values_buf = unsafe { program.create_buffer(domain.extended_len())? };
-                        create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
+                            let y_beta_gamma = vec![y, beta, gamma];
 
-                        let mut helper = gen_do_extended_fft(pk, program)?;
-                        let mut allocator = LinkedList::new();
+                            let values_buf =
+                                unsafe { program.create_buffer(domain.extended_len())? };
+                            create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
-                        let l0_buf =
-                            do_extended_fft(pk, program, &l0, &mut allocator, &mut helper)?;
-                        let l_last_buf =
-                            do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
-                        create_buffer_from!(l_active_row_buf, &l_active_row[..]);
+                            let mut helper = gen_do_extended_fft(pk, program)?;
+                            let mut allocator = LinkedList::new();
 
-                        let cache_size =
-                            std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
-                        let cache_size = usize::from_str_radix(&cache_size, 10)
-                            .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
-                        let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
-                        for (lookup_idx, lookup) in lookups.iter().enumerate() {
-                            let mut ys = vec![C::ScalarExt::one(), y];
-                            let table_buf = pk.ev.gpu_lookup_expr
-                                [lookup_idx + group_idx * group_expr_len]
-                                ._eval_gpu(
+                            let l0_buf =
+                                do_extended_fft(pk, program, &l0, &mut allocator, &mut helper)?;
+                            let l_last_buf =
+                                do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
+                            create_buffer_from!(l_active_row_buf, &l_active_row[..]);
+
+                            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
+                                .unwrap_or("5".to_owned());
+                            let cache_size = usize::from_str_radix(&cache_size, 10)
+                                .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+                            let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+                            for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                                let mut ys = vec![C::ScalarExt::one(), y];
+                                let table_buf = pk.ev.gpu_lookup_expr
+                                    [lookup_idx + group_idx * group_expr_len]
+                                    ._eval_gpu(
+                                        pk,
+                                        program,
+                                        &advice_poly[0],
+                                        &instance_poly[0],
+                                        &mut ys,
+                                        beta,
+                                        theta,
+                                        gamma,
+                                        &mut unit_cache,
+                                        &mut allocator,
+                                        &mut helper,
+                                    )
+                                    .unwrap()
+                                    .0;
+
+                                let permuted_input_coset_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &advice_poly[0],
-                                    &instance_poly[0],
-                                    &mut ys,
-                                    beta,
-                                    theta,
-                                    gamma,
-                                    &mut unit_cache,
+                                    &lookup.permuted_input_poly,
                                     &mut allocator,
                                     &mut helper,
-                                )
-                                .unwrap()
-                                .0;
+                                )?;
+                                let permuted_table_coset_buf = do_extended_fft(
+                                    pk,
+                                    program,
+                                    &lookup.permuted_table_poly,
+                                    &mut allocator,
+                                    &mut helper,
+                                )?;
+                                let product_coset_buf = do_extended_fft(
+                                    pk,
+                                    program,
+                                    &lookup.product_poly,
+                                    &mut allocator,
+                                    &mut helper,
+                                )?;
 
-                            let permuted_input_coset_buf = do_extended_fft(
-                                pk,
-                                program,
-                                &lookup.permuted_input_poly,
-                                &mut allocator,
-                                &mut helper,
-                            )?;
-                            let permuted_table_coset_buf = do_extended_fft(
-                                pk,
-                                program,
-                                &lookup.permuted_table_poly,
-                                &mut allocator,
-                                &mut helper,
-                            )?;
-                            let product_coset_buf = do_extended_fft(
-                                pk,
-                                program,
-                                &lookup.product_poly,
-                                &mut allocator,
-                                &mut helper,
-                            )?;
+                                let local_work_size = 128;
+                                let global_work_size = size / local_work_size;
+                                let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                                let kernel = program.create_kernel(
+                                    &kernel_name,
+                                    global_work_size as usize,
+                                    local_work_size as usize,
+                                )?;
+                                kernel
+                                    .arg(&values_buf)
+                                    .arg(table_buf.as_ref())
+                                    .arg(&permuted_input_coset_buf)
+                                    .arg(&permuted_table_coset_buf)
+                                    .arg(&product_coset_buf)
+                                    .arg(&l0_buf)
+                                    .arg(&l_last_buf)
+                                    .arg(&l_active_row_buf)
+                                    .arg(&y_beta_gamma_buf)
+                                    .arg(&(rot_scale as u32))
+                                    .arg(&(size as u32))
+                                    .run()?;
+                            }
 
-                            let local_work_size = 128;
-                            let global_work_size = size / local_work_size;
-                            let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
-                            let kernel = program.create_kernel(
-                                &kernel_name,
-                                global_work_size as usize,
-                                local_work_size as usize,
-                            )?;
-                            kernel
-                                .arg(&values_buf)
-                                .arg(table_buf.as_ref())
-                                .arg(&permuted_input_coset_buf)
-                                .arg(&permuted_table_coset_buf)
-                                .arg(&product_coset_buf)
-                                .arg(&l0_buf)
-                                .arg(&l_last_buf)
-                                .arg(&l_active_row_buf)
-                                .arg(&y_beta_gamma_buf)
-                                .arg(&(rot_scale as u32))
-                                .arg(&(size as u32))
-                                .run()?;
-                        }
+                            program.read_into_buffer(&values_buf, input)?;
+                            Ok(())
+                        });
 
-                        program.read_into_buffer(&values_buf, input)?;
-                        Ok(())
-                    }
-                );
+                    let mut tmp_value = pk.vk.domain.empty_extended();
 
-                let mut tmp_value = pk.vk.domain.empty_extended();
+                    let gpu_idx = group_idx % kern.kernels.len();
+                    kern.kernels[gpu_idx]
+                        .program
+                        .run(closures, unsafe {
+                            (
+                                std::mem::transmute::<_, &mut [Fr]>(&mut tmp_value.values[..]),
+                                group_idx,
+                                lookups,
+                            )
+                        })
+                        .unwrap();
+                    (tmp_value, lookups.len())
+                })
+                .collect::<Vec<_>>()
+                .iter()
+                .fold(values, |acc, (x, len)| {
+                    acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
+                });
 
-                let gpu_idx = group_idx % kern.kernels.len();
-                kern.kernels[gpu_idx]
-                    .program
-                    .run(closures, unsafe {
-                        (
-                            std::mem::transmute::<_, &mut [Fr]>(&mut tmp_value.values[..]),
-                            group_idx,
-                            lookups,
-                        )
-                    })
-                    .unwrap();
-                (tmp_value, lookups.len())
-            })
-            .collect::<Vec<_>>()
-            .iter()
-            .fold(values, |acc, (x, len)| {
-                acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
-            });
-
-        end_timer!(timer);
+            end_timer!(timer);
+        }
 
         values
     }

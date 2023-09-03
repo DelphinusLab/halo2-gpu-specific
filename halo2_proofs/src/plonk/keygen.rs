@@ -282,7 +282,7 @@ where
     )?;
 
     let timer = start_timer!(|| "unnecessary part");
-    let (cs, fixed) = if false {
+    let (cs, fixed) = if true {
         let mut fixed = batch_invert_assigned(assembly.fixed);
         let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
         fixed.extend(
