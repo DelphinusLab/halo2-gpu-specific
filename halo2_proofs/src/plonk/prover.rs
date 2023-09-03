@@ -122,11 +122,6 @@ fn create_single_instances<
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            //for (i, value) in instance_values[0].iter().enumerate() {
-            //    if *value != C::Scalar::zero() {
-            //        println!("value: {} {:?}", i, value);
-            //    } else {()}
-            //}
             let instance_commitments_projective: Vec<_> = instance_values
                 .iter()
                 .map(|poly| params.commit_lagrange(poly))
@@ -134,7 +129,6 @@ fn create_single_instances<
             let mut instance_commitments =
                 vec![C::identity(); instance_commitments_projective.len()];
             C::Curve::batch_normalize(&instance_commitments_projective, &mut instance_commitments);
-            //println!("instance commitments: {:?}", instance_commitments);
             let instance_commitments = instance_commitments;
             drop(instance_commitments_projective);
 
@@ -401,10 +395,14 @@ pub fn create_proof<
 
             let mut advice = witness.advice;
 
+            let named = &pk.vk.cs.named_advices;
+
             let timer = start_timer!(|| "rng");
-            advice.par_iter_mut().for_each(|advice| {
-                for cell in &mut advice[unusable_rows_start..] {
-                    *cell = C::Scalar::from(u16::rand(&mut OsRng) as u64);
+            advice.par_iter_mut().enumerate().for_each(|(i, advice)| {
+                if named.iter().find(|n| n.1 as usize == i).is_none() {
+                    for cell in &mut advice[unusable_rows_start..] {
+                        *cell = C::Scalar::from(u16::rand(&mut OsRng) as u64);
+                    }
                 }
             });
             end_timer!(timer);
