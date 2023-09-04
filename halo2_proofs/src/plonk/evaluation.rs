@@ -928,7 +928,7 @@ impl<C: CurveAffine> Evaluator<C> {
                         prev_set_buf = curr_set_buf;
                     }
 
-                    {
+                    if sets_len > 1 {
                         let curr_set_buf = last_set_buf;
                         let kernel_name = format!("{}_eval_h_permutation_part2", "Bn256_Fr");
                         let kernel = program.create_kernel(
