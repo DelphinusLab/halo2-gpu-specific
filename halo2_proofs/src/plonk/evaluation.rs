@@ -1487,7 +1487,7 @@ pub fn evaluate<F: FieldExt, B: Basis>(
     fixed: &[Polynomial<F, B>],
     advice: &[Polynomial<F, B>],
     instance: &[Polynomial<F, B>],
-    theta: F,
+    _theta: F,
 ) -> Vec<F> {
     if let Some(idx) = expression.is_pure_fixed() {
         return fixed[idx].to_vec();
@@ -1547,7 +1547,7 @@ pub fn evaluate<F: FieldExt, B: Basis>(
             fixed,
             advice,
             instance,
-            theta,
+            _theta,
         );
     }
 }
