@@ -44,8 +44,12 @@ subtle = "2.3"
 cfg-if = "0.1"
 num-integer = "0.1"
 num-bigint = { version = "0.4", features = ["rand"] }
+num-traits = "0.2.15"
+num-derive = "0.3"
+num = "0.4"
 cuda-driver-sys = "0.3.0"
 lazy_static = "1.4.0"
+memmap = "0.7"
 
 # Developer tooling dependencies
 plotters = { version = "0.3.0", optional = true }
@@ -73,7 +77,7 @@ rand_core = { version = "0.6", default-features = false, features = ["getrandom"
 getrandom = { version = "0.2", features = ["js"] }
 
 [features]
-default = ["gwc", "cuda"]
+default = ["gwc"]
 dev-graph = ["plotters", "tabbycat"]
 gadget-traces = ["backtrace"]
 sanity-checks = []

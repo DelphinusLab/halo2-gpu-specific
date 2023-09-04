@@ -391,3 +391,144 @@ where
         ev,
     })
 }
+
+/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+pub(crate) fn keygen_pk_from_info<C>(
+    params: &Params<C>,
+    vk: &VerifyingKey<C>,
+    fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    permutation: permutation::keygen::Assembly,
+) -> Result<ProvingKey<C>, Error>
+where
+    C: CurveAffine,
+{
+    let cs = vk.cs.clone();
+    assert!(cs.num_selectors == 0);
+    //We do not support the case when selectors exists
+    //let selectors = vec![vec![false; params.n as usize]; cs.num_selectors];
+    let selectors = vec![];
+    use ark_std::{start_timer, end_timer};
+
+    let timer = start_timer!(|| "compress selectors ...");
+    let (cs, _) = cs.compress_selectors(selectors);
+    end_timer!(timer);
+    let timer = start_timer!(|| "fixed polys ...");
+
+    let fixed_polys: Vec<_> = fixed
+        .iter()
+        .map(|poly| vk.domain.lagrange_to_coeff_st(poly.clone()))
+        .collect();
+    end_timer!(timer);
+
+    #[cfg(not(feature = "cuda"))]
+    let fixed_cosets = fixed_polys
+        .iter()
+        .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
+        .collect();
+
+    let timer = start_timer!(|| "build pk time...");
+    let permutation_pk = permutation.build_pk(params, &vk.domain, &cs.permutation);
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "l poly");
+    // Compute l_0(X)
+    // TODO: this can be done more efficiently
+    let mut l0 = vk.domain.empty_lagrange();
+    l0[0] = C::Scalar::one();
+    let l0 = vk.domain.lagrange_to_coeff(l0);
+    #[cfg(not(feature = "cuda"))]
+    let l0 = vk.domain.coeff_to_extended(l0);
+
+    // Compute l_blind(X) which evaluates to 1 for each blinding factor row
+    // and 0 otherwise over the domain.
+    let mut l_blind = vk.domain.empty_lagrange();
+    for evaluation in l_blind[..].iter_mut().rev().take(cs.blinding_factors()) {
+        *evaluation = C::Scalar::one();
+    }
+    let l_blind = vk.domain.lagrange_to_coeff(l_blind);
+    let l_blind_extended = vk.domain.coeff_to_extended(l_blind);
+
+    // Compute l_last(X) which evaluates to 1 on the first inactive row (just
+    // before the blinding factors) and 0 otherwise over the domain
+    let mut l_last = vk.domain.empty_lagrange();
+    l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::one();
+    let l_last = vk.domain.lagrange_to_coeff(l_last);
+    let l_last_extended = vk.domain.coeff_to_extended(l_last.clone());
+
+    // Compute l_active_row(X)
+    let one = C::Scalar::one();
+
+    let mut l_active_row = vk.domain.empty_extended();
+    parallelize(&mut l_active_row, |values, start| {
+        for (i, value) in values.iter_mut().enumerate() {
+            let idx = i + start;
+            *value = one - (l_last_extended[idx] + l_blind_extended[idx]);
+        }
+    });
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "prepare ev");
+    // Compute the optimized evaluation data structure
+    let ev = Evaluator::new(&vk.cs);
+    end_timer!(timer);
+
+    #[cfg(not(feature = "cuda"))]
+    let l_last = l_last_extended;
+
+    Ok(ProvingKey {
+        vk: vk.clone(),
+        l0,
+        l_last,
+        l_active_row,
+        fixed_values: fixed,
+        fixed_polys,
+
+        #[cfg(not(feature = "cuda"))]
+        fixed_cosets,
+        permutation: permutation_pk,
+        ev,
+    })
+}
+
+/// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
+pub(crate) fn generate_pk_info<C, ConcreteCircuit>(
+    params: &Params<C>,
+    vk: &VerifyingKey<C>,
+    circuit: &ConcreteCircuit,
+) -> Result<
+    (
+        Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+        permutation::keygen::Assembly,
+    ),
+    Error,
+>
+where
+    C: CurveAffine,
+    ConcreteCircuit: Circuit<C::Scalar>,
+{
+    let mut cs = ConstraintSystem::default();
+    let config = ConcreteCircuit::configure(&mut cs);
+
+    if (params.n as usize) < cs.minimum_rows() {
+        return Err(Error::not_enough_rows_available(params.k));
+    }
+
+    let mut assembly: Assembly<C::Scalar> = Assembly {
+        k: params.k,
+        fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
+        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
+        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+        usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
+        _marker: std::marker::PhantomData,
+    };
+
+    // Synthesize the circuit to obtain URS
+    ConcreteCircuit::FloorPlanner::synthesize(
+        &mut assembly,
+        circuit,
+        config,
+        cs.constants.clone(),
+    )?;
+    let fixed = batch_invert_assigned(assembly.fixed);
+    Ok((fixed, assembly.permutation))
+}

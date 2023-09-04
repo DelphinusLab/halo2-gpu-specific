@@ -22,12 +22,11 @@ pub trait ColumnType:
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct Column<C: ColumnType> {
     pub index: usize,
-    column_type: C,
+    pub column_type: C,
 }
 
 impl<C: ColumnType> Column<C> {
-    #[cfg(test)]
-    pub(crate) fn new(index: usize, column_type: C) -> Self {
+    pub fn new(index: usize, column_type: C) -> Self {
         Column { index, column_type }
     }
 
@@ -987,9 +986,9 @@ pub(crate) struct PointIndex(pub usize);
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
 #[derive(Clone, Debug)]
-pub(crate) struct VirtualCell {
-    pub(crate) column: Column<Any>,
-    pub(crate) rotation: Rotation,
+pub struct VirtualCell {
+    pub column: Column<Any>,
+    pub rotation: Rotation,
 }
 
 impl<Col: Into<Column<Any>>> From<(Col, Rotation)> for VirtualCell {
@@ -1036,10 +1035,22 @@ pub struct Gate<F: Field> {
     /// We track queried selectors separately from other cells, so that we can use them to
     /// trigger debug checks on gates.
     queried_selectors: Vec<Selector>,
-    queried_cells: Vec<VirtualCell>,
+    pub queried_cells: Vec<VirtualCell>,
 }
 
 impl<F: Field> Gate<F> {
+    pub(crate) fn new_with_polys_and_queries(
+        polys: Vec<Expression<F>>,
+        queried_cells: Vec<VirtualCell>,
+    ) -> Self {
+        Gate {
+            name: "",
+            constraint_names: vec![],
+            polys,
+            queried_cells,
+            queried_selectors: vec![],
+        }
+    }
     pub(crate) fn name(&self) -> &'static str {
         self.name
     }
@@ -1072,10 +1083,11 @@ pub struct ConstraintSystem<F: Field> {
     pub(crate) selector_map: Vec<Column<Fixed>>,
     pub gates: Vec<Gate<F>>,
     pub advice_queries: Vec<(Column<Advice>, Rotation)>,
+    pub named_advices: Vec<(String, u32)>,
     // Contains an integer for each advice column
     // identifying how many distinct queries it has
     // so far; should be same length as num_advice_columns.
-    num_advice_queries: Vec<usize>,
+    pub(crate) num_advice_queries: Vec<usize>,
     pub instance_queries: Vec<(Column<Instance>, Rotation)>,
     pub fixed_queries: Vec<(Column<Fixed>, Rotation)>,
 
@@ -1107,9 +1119,25 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     instance_queries: &'a Vec<(Column<Instance>, Rotation)>,
     fixed_queries: &'a Vec<(Column<Fixed>, Rotation)>,
     permutation: &'a permutation::Argument,
-    lookups: &'a Vec<lookup::Argument<F>>,
+    lookups: PinnedLookups<'a, F>,
     constants: &'a Vec<Column<Fixed>>,
     minimum_degree: &'a Option<usize>,
+}
+
+struct PinnedLookups<'a, F: Field>(&'a Vec<lookup::Argument<F>>);
+
+impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_list()
+            .entries(self.0.iter().enumerate().map(|(i, arg)| {
+                (
+                    format!("lookup{}", i),
+                    &arg.input_expressions,
+                    &arg.table_expressions,
+                )
+            }))
+            .finish()
+    }
 }
 
 struct PinnedGates<'a, F: Field>(&'a Vec<Gate<F>>);
@@ -1133,6 +1161,7 @@ impl<F: Field> Default for ConstraintSystem<F> {
             gates: vec![],
             fixed_queries: Vec::new(),
             advice_queries: Vec::new(),
+            named_advices: Vec::new(),
             num_advice_queries: Vec::new(),
             instance_queries: Vec::new(),
             permutation: permutation::Argument::new(),
@@ -1159,7 +1188,7 @@ impl<F: Field> ConstraintSystem<F> {
             advice_queries: &self.advice_queries,
             instance_queries: &self.instance_queries,
             permutation: &self.permutation,
-            lookups: &self.lookups,
+            lookups: PinnedLookups(&self.lookups),
             constants: &self.constants,
             minimum_degree: &self.minimum_degree,
         }
@@ -1549,6 +1578,19 @@ impl<F: Field> ConstraintSystem<F> {
         self.num_advice_columns += 1;
         self.num_advice_queries.push(0);
         tmp
+    }
+
+    /// Allocate a new advice column
+    pub fn named_advice_column(&mut self, name: String) -> Column<Advice> {
+        let res = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+        self.named_advices
+            .push((name, self.num_advice_columns as u32));
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+        res
     }
 
     /// Allocate a new instance column

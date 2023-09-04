@@ -250,12 +250,14 @@ use ec_gpu_gen::{
     rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer, EcResult,
 };
 
+#[cfg(feature = "cuda")]
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum CacheAction {
     Cache,
     Drop,
 }
 
+#[cfg(feature = "cuda")]
 pub(crate) struct Cache<T> {
     data: BTreeMap<usize, (Rc<T>, usize)>,
     ts: usize,
@@ -265,6 +267,7 @@ pub(crate) struct Cache<T> {
     access: Vec<(usize, CacheAction)>,
 }
 
+#[cfg(feature = "cuda")]
 impl<T> Cache<T> {
     pub fn access(&mut self, k: usize) {
         self.access.push((k, CacheAction::Cache));
@@ -333,6 +336,7 @@ impl<T> Cache<T> {
     }
 }
 
+#[cfg(feature = "cuda")]
 impl<T: std::fmt::Debug> Cache<T> {
     pub fn new(bound: usize) -> Cache<T> {
         Self {

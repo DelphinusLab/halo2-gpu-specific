@@ -111,6 +111,20 @@ impl<'a, C: MultiMillerLoop, R: RngCore> VerificationStrategy<C::G1Affine>
 }
 
 /// Returns a boolean indicating whether or not the proof is valid
+pub fn get_advice_commitments_from_transcript<
+    'params,
+    C: MultiMillerLoop,
+    E: EncodedChallenge<C::G1Affine>,
+    T: TranscriptRead<C::G1Affine, E>,
+>(
+    vk: &VerifyingKey<C::G1Affine>,
+    transcript: &mut T,
+) -> Result<Vec<C::G1Affine>, Error> {
+    let res = read_n_points(transcript, vk.cs.num_advice_columns)?;
+    Ok(res)
+}
+
+/// Returns a boolean indicating whether or not the proof is valid
 pub fn verify_proof<
     'params,
     C: MultiMillerLoop,

@@ -121,6 +121,12 @@ impl<F, B> DerefMut for Polynomial<F, B> {
 }
 
 impl<F, B> Polynomial<F, B> {
+    pub fn new(values: Vec<F>) -> Self {
+        Polynomial {
+            values,
+            _marker: PhantomData,
+        }
+    }
     /// Iterate over the values, which are either in coefficient or evaluation
     /// form depending on the basis `B`.
     pub fn iter(&self) -> impl Iterator<Item = &F> {

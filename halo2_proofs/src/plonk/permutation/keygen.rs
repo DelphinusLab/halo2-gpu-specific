@@ -13,12 +13,12 @@ use crate::{
     },
 };
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Assembly {
-    columns: Vec<Column<Any>>,
-    pub(crate) mapping: Vec<Vec<(usize, usize)>>,
-    aux: Vec<Vec<(usize, usize)>>,
-    sizes: Vec<Vec<usize>>,
+    pub(crate) columns: Vec<Column<Any>>,
+    pub(crate) mapping: Vec<Vec<(u32, u32)>>,
+    pub(crate) aux: Vec<Vec<(u32, u32)>>,
+    pub(crate) sizes: Vec<Vec<usize>>,
 }
 
 impl Assembly {
@@ -28,7 +28,7 @@ impl Assembly {
         let mut columns = vec![];
         for i in 0..p.columns.len() {
             // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
-            columns.push((0..n).map(|j| (i, j)).collect());
+            columns.push((0..n).map(|j| (i as u32, j as u32)).collect());
         }
 
         // Before any equality constraints are applied, every cell in the permutation is
@@ -77,16 +77,16 @@ impl Assembly {
             return Ok(());
         }
 
-        if self.sizes[left_cycle.0][left_cycle.1] < self.sizes[right_cycle.0][right_cycle.1] {
+        if self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] < self.sizes[right_cycle.0 as usize][right_cycle.1 as usize] {
             std::mem::swap(&mut left_cycle, &mut right_cycle);
         }
 
         // Merge the right cycle into the left one.
-        self.sizes[left_cycle.0][left_cycle.1] += self.sizes[right_cycle.0][right_cycle.1];
+        self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] += self.sizes[right_cycle.0 as usize][right_cycle.1 as usize];
         let mut i = right_cycle;
         loop {
-            self.aux[i.0][i.1] = left_cycle;
-            i = self.mapping[i.0][i.1];
+            self.aux[i.0 as usize][i.1 as usize] = left_cycle;
+            i = self.mapping[i.0 as usize][i.1 as usize];
             if i == right_cycle {
                 break;
             }
@@ -139,7 +139,7 @@ impl Assembly {
             let mut permutation_poly = domain.empty_lagrange();
             for (j, p) in permutation_poly.iter_mut().enumerate() {
                 let (permuted_i, permuted_j) = self.mapping[i][j];
-                *p = delta_omegas[permuted_i][permuted_j];
+                *p = delta_omegas[permuted_i as usize][permuted_j as usize];
             }
 
             // Compute commitment to permutation polynomial
@@ -183,7 +183,7 @@ impl Assembly {
                 permutation_poly.iter_mut().enumerate().for_each(|(j, p)| {
                     let j = start + j;
                     let (permuted_i, permuted_j) = self.mapping[i][j];
-                    *p = delta_omegas[permuted_i][permuted_j];
+                    *p = delta_omegas[permuted_i as usize][permuted_j as usize];
                 });
             });
 
