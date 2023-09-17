@@ -1398,6 +1398,11 @@ impl<F: Field> ConstraintSystem<F> {
             "Gates must contain at least one constraint."
         );
 
+        println!("add constraints {}:", name);
+        for (i, e) in polys.iter().enumerate() {
+            println!("constraints {} degree {}:", i, e.degree());
+        }
+
         self.gates.push(Gate {
             name,
             constraint_names,
@@ -1609,6 +1614,20 @@ impl<F: Field> ConstraintSystem<F> {
         // The permutation argument will serve alongside the gates, so must be
         // accounted for.
         let mut degree = self.permutation.required_degree();
+
+        println!("permutation degree {}", degree);
+
+        let lookups_degree = self
+            .lookups
+            .iter()
+            .map(|l| {
+                println!("lookup  {} degree {}", l.name, l.required_degree());
+                l.required_degree()
+            })
+            .max()
+            .unwrap_or(1);
+
+        println!("lookup degree {}", lookups_degree);
 
         // The lookup argument also serves alongside the gates and must be accounted
         // for.
