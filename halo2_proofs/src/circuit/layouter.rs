@@ -104,6 +104,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
     fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error>;
 }
 
+
 /// Helper trait for implementing a custom [`Layouter`].
 ///
 /// This trait is used for implementing table assignments.

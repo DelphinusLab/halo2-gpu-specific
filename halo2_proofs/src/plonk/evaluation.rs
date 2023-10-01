@@ -807,12 +807,28 @@ impl<C: CurveAffine> Evaluator<C> {
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
 
+
+        let mut memory_unit_cache: BTreeMap<usize, Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = BTreeMap::new();
+        let mut units = BTreeMap::new();
+
+        for gate_expr in &pk.ev.gpu_gates_expr {
+            gate_expr.prefetch_units(&mut units);
+        }
+
+        let cache_timer = start_timer!(|| "cache units in memory");
+
+        for (index, expr) in units.iter() {
+            let values = expr.eval_gpu(0, pk, &memory_unit_cache, &advice_poly[0], &instance_poly[0], y);
+            memory_unit_cache.insert(*index, values);
+        };
+        end_timer!(cache_timer);
+
         let mut values = pk
             .ev
             .gpu_gates_expr
             .par_iter()
             .enumerate()
-            .map(|(group_idx, x)| x.eval_gpu(group_idx, pk, &advice_poly[0], &instance_poly[0], y))
+            .map(|(group_idx, x)| x.eval_gpu(group_idx, pk, &memory_unit_cache, &advice_poly[0], &instance_poly[0], y))
             .collect::<Vec<_>>()
             .into_iter()
             .reduce(|acc, x| acc + &x)
@@ -1121,6 +1137,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     ._eval_gpu(
                                         pk,
                                         program,
+                                        &memory_unit_cache,
                                         &advice_poly[0],
                                         &instance_poly[0],
                                         &mut ys,

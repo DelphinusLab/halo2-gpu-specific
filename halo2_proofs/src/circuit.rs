@@ -166,6 +166,13 @@ pub struct Region<'r, F: Field> {
     region: &'r mut dyn layouter::RegionLayouter<F>,
 }
 
+
+unsafe impl<'r, F: Field> Send for Region<'r, F> {
+}
+
+unsafe impl<'r, F: Field> Sync for Region<'r, F> {
+}
+
 impl<'r, F: Field> From<&'r mut dyn layouter::RegionLayouter<F>> for Region<'r, F> {
     fn from(region: &'r mut dyn layouter::RegionLayouter<F>) -> Self {
         Region { region }

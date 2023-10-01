@@ -64,6 +64,25 @@ impl ProveExpressionUnit {
             ProveExpressionUnit::Instance { column_index, .. } => (column_index << 2) + 2,
         }
     }
+
+    fn to_string(&self) -> String {
+        match self {
+            ProveExpressionUnit::Fixed { column_index, .. } => format!("f{}", column_index),
+            ProveExpressionUnit::Advice { column_index, .. } => format!("a{}", column_index),
+            ProveExpressionUnit::Instance { column_index, .. } => format!("i{}", column_index),
+        }
+    }
+
+    fn key_to_string(key: usize) -> String {
+        let typ = key & 0x3;
+        let column_index = key >> 2;
+        match typ {
+            0 => format!("f{}", column_index),
+            1 => format!("a{}", column_index),
+            2 => format!("i{}", column_index),
+            _ => unreachable!("invalid typ")
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -76,8 +95,42 @@ pub enum Bop {
 pub enum ProveExpression<F> {
     Unit(ProveExpressionUnit),
     Op(Box<ProveExpression<F>>, Box<ProveExpression<F>>, Bop),
-    Y(BTreeMap<u32, F>),
+    Y(BTreeMap<u32, F>), // gate:a=0, gate:2a=0 --> a + y*2a + y^2*3a = a*(f(y))
     Scale(Box<ProveExpression<F>>, BTreeMap<u32, F>),
+}
+
+impl<F> ProveExpression<F> {
+    pub fn to_string(&self) -> String {
+        match &self {
+            ProveExpression::Unit(a) => {
+                format!("u({})", a.to_string())
+            },
+            ProveExpression::Op(a, b, bop) => {
+                match bop {
+                    Bop::Sum => format!("({} + {})", a.to_string(), b.to_string()),
+                    Bop::Product => format!("({} * {})", a.to_string(), b.to_string()),
+                }
+            },
+            ProveExpression::Y(_) => format!("Y"),
+            ProveExpression::Scale(a, _b) => format!("S({})", a.to_string()),
+        }
+    }
+    pub fn prefetch_units(&self, cache: &mut BTreeMap<usize, ProveExpression<F>>) {
+        match &self {
+            ProveExpression::Unit(a) => {
+                if let None = cache.get(&a.get_group()) {
+                    cache.insert(a.get_group(), ProveExpression::Unit(a.clone()));
+                }
+            },
+            ProveExpression::Op(a, b, _) => {
+                a.prefetch_units(cache);
+                b.prefetch_units(cache);
+            },
+            ProveExpression::Y(_) => (),
+            ProveExpression::Scale(a, _b) => a.prefetch_units(cache)
+        }
+    }
+
 }
 
 #[derive(Clone, Debug)]
@@ -88,12 +141,32 @@ pub enum LookupProveExpression<F> {
     AddGamma(Box<LookupProveExpression<F>>),
 }
 
+impl<F> LookupProveExpression<F> {
+    pub fn to_string(&self) -> String {
+        match &self {
+            LookupProveExpression::Expression(a) => {
+                format!("(lookupexpr: {})", a.to_string())
+            },
+            LookupProveExpression::LcTheta(a, b) => {
+                format!("(lookuptheta: {}; {})", a.to_string(), b.to_string())
+            },
+            LookupProveExpression::LcBeta(a, b) => {
+                format!("(lookupbeta: {}; {})", a.to_string(), b.to_string())
+            },
+            LookupProveExpression::AddGamma(g) => {
+                format!("(lookupgamma: {})", g.to_string())
+            },
+        }
+    }
+}
+
 #[cfg(feature = "cuda")]
 impl<F: FieldExt> LookupProveExpression<F> {
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
+        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -108,17 +181,23 @@ impl<F: FieldExt> LookupProveExpression<F> {
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
 
-        match self {
+        println!("_eval gpu lookup_expr: {}", self.to_string());
+        let timer = start_timer!(|| "eval lookup expr");
+
+        let c = match self {
             LookupProveExpression::Expression(e) => e._eval_gpu_buffer(
-                pk, program, advice, instance, y, unit_cache, allocator, helper,
+                pk, program, memory_cache,
+                advice, instance, y, unit_cache, allocator, helper,
             ),
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    pk, program, memory_cache,
+                    advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    pk, program, memory_cache,
+                    advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
@@ -161,11 +240,13 @@ impl<F: FieldExt> LookupProveExpression<F> {
             }
             LookupProveExpression::LcBeta(l, r) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    pk, program, memory_cache,
+                    advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    pk, program, memory_cache,
+                    advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
@@ -207,7 +288,8 @@ impl<F: FieldExt> LookupProveExpression<F> {
             }
             LookupProveExpression::AddGamma(l) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    pk, program, memory_cache, advice, instance, y,
+                    beta, theta, gamma, unit_cache, allocator,
                     helper,
                 )?;
                 let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
@@ -240,7 +322,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 //end_timer!(timer);
                 Ok((res, 0))
             }
-        }
+        };
+        end_timer!(timer);
+        c
     }
 }
 
@@ -282,6 +366,7 @@ impl<T> Cache<T> {
             to_update = false;
             let mut _hit = 0;
             let mut _miss = 0;
+            // e -> (latest_time_stamp, order_in_queue)
             let mut sim: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
             let mut new_access = self.access.clone();
             for (ts, (k, action)) in self.access.iter().enumerate() {
@@ -303,8 +388,10 @@ impl<T> Cache<T> {
                                 }
                             }
 
+                            // select a better non visited element in the future
                             let (_, last_ts) =
                                 sim.iter().fold((0, 0), |(max_latest_access, ts), e| {
+                                    // order_inqueue
                                     if e.1 .1 > max_latest_access {
                                         (e.1 .1, e.1 .0)
                                     } else {
@@ -413,10 +500,12 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         group_idx: usize,
         pk: &ProvingKey<C>,
+        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
+        let timer = start_timer!(|| format!("evalu_gpu {}", self.to_string()));
         let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
                                                                       input: &mut [F]|
          -> ec_gpu_gen::EcResult<
@@ -435,6 +524,7 @@ impl<F: FieldExt> ProveExpression<F> {
             let values_buf = self._eval_gpu(
                 pk,
                 program,
+                memory_cache,
                 advice,
                 instance,
                 &mut ys,
@@ -443,6 +533,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 &mut helper,
             )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
+            println!("cache: {:?}", unit_cache.data.keys().collect::<Vec<_>>().into_iter().map(|x| ProveExpressionUnit::key_to_string(*x)).collect::<Vec<_>>());
 
             Ok(())
         });
@@ -462,6 +553,7 @@ impl<F: FieldExt> ProveExpression<F> {
             .program
             .run(closures, &mut values.values[..])
             .unwrap();
+        end_timer!(timer);
         values
     }
 
@@ -469,6 +561,7 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
+        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -481,12 +574,14 @@ impl<F: FieldExt> ProveExpression<F> {
         let global_work_size = size / local_work_size;
 
         let v = self._eval_gpu(
-            pk, program, advice, instance, y, unit_cache, allocator, helper,
+            pk, program, memory_cache,
+            advice, instance, y, unit_cache, allocator, helper,
         )?;
         match v {
             (Some((l, rot_l)), Some(r)) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let c = program.create_buffer_from_slice(&vec![r])?;
+                let timer = start_timer!(|| "sum eval");
                 let kernel_name = format!("{}_eval_sum_c", "Bn256_Fr");
                 let kernel = program.create_kernel(
                     &kernel_name,
@@ -500,6 +595,7 @@ impl<F: FieldExt> ProveExpression<F> {
                     .arg(&c)
                     .arg(&size)
                     .run()?;
+                end_timer!(timer);
                 Ok((Rc::new(res), 0))
             }
             (Some((l, rot_l)), None) => Ok((l, rot_l)),
@@ -525,6 +621,7 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
+        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -540,10 +637,12 @@ impl<F: FieldExt> ProveExpression<F> {
         match self {
             ProveExpression::Op(l, r, op) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, unit_cache, allocator, helper,
+                    pk, program, memory_cache,
+                    advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, unit_cache, allocator, helper,
+                    pk, program, memory_cache,
+                    advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                 let res = match (l.0, r.0) {
@@ -648,14 +747,18 @@ impl<F: FieldExt> ProveExpression<F> {
                 let group = u.get_group();
                 let (cache, cache_action) = unit_cache.get(group);
                 let (values, rotation) = if let Some(cached_values) = cache {
-                    match u {
+                    let timer = start_timer!(|| format!("processing unit {} hit", u.to_string()));
+                    let v = match u {
                         ProveExpressionUnit::Fixed { rotation, .. }
                         | ProveExpressionUnit::Advice { rotation, .. }
                         | ProveExpressionUnit::Instance { rotation, .. } => {
                             (cached_values, *rotation)
                         }
-                    }
+                    };
+                    end_timer!(timer);
+                    v
                 } else {
+                    let timer = start_timer!(|| format!("processing unit {} miss", u.to_string()));
                     let (origin_values, rotation) = match u {
                         ProveExpressionUnit::Fixed {
                             column_index,
@@ -671,23 +774,28 @@ impl<F: FieldExt> ProveExpression<F> {
                         } => (&instance[*column_index], rotation),
                     };
 
-                    let buffer = do_extended_fft(pk, program, origin_values, allocator, helper)?;
-
+                    let buffer = if let Some(poly) = memory_cache.get(&group) {
+                        println!("hit in memory cache:");
+                        load_unit_from_mem_cache(pk, program, allocator, poly)?
+                    } else {
+                        println!("not hit in memory cache:");
+                        do_extended_fft(pk, program, origin_values, allocator, helper)?
+                    };
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
                     } else {
                         Rc::new(buffer)
                     };
-
                     let res = (value, *rotation);
-                    //end_timer!(timer);
+                    end_timer!(timer);
                     res
                 };
                 Ok((Some((values, rotation.0 * rot_scale)), None))
             }
             ProveExpression::Scale(l, ys) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, unit_cache, allocator, helper,
+                    pk, program, memory_cache,
+                    advice, instance, y, unit_cache, allocator, helper,
                 )?;
                 let l = l.0.unwrap();
                 let max_y_order = ys.keys().max().unwrap();
@@ -790,6 +898,25 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
 }
 
 #[cfg(feature = "cuda")]
+pub(crate) fn load_unit_from_mem_cache<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    allocator: &mut LinkedList<Buffer<F>>,
+    poly: &Polynomial<F, ExtendedLagrangeCoeff>
+) -> EcResult<Buffer<F>> {
+    let domain = &pk.vk.domain;
+    let extended_size = 1u32 << pk.vk.domain.extended_k();
+
+    let mut values = allocator
+        .pop_front()
+        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
+
+    program.write_from_buffer(&mut values, &poly.values)?;
+    Ok(values)
+}
+
+
+#[cfg(feature = "cuda")]
 pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
@@ -802,21 +929,26 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     let local_work_size = 128;
     let global_work_size = extended_size / local_work_size;
 
-    //let timer = start_timer!(|| "gpu eval unit");
+    let timerall = start_timer!(|| "gpu eval unit");
     let values = allocator
         .pop_front()
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
     let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
+    let timer = start_timer!(|| "write from buffer");
     program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "distribute powers zeta");
     do_distribute_powers_zeta(
         pk,
         program,
         origin_values_buffer,
         &helper.coset_powers_buffer,
     )?;
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "eval fft prepare");
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
         &kernel_name,
@@ -828,16 +960,21 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .arg(&values)
         .arg(&origin_size)
         .run()?;
+    end_timer!(timer);
 
+    let timer = start_timer!(|| "do fft pure");
     let domain = &pk.vk.domain;
-    do_fft_pure(
+    let a = do_fft_pure(
         program,
         values,
         domain.extended_k(),
         allocator,
         &helper.pq_buffer,
         &helper.omegas_buffer,
-    )
+    );
+    end_timer!(timer);
+    end_timer!(timerall);
+    a
 }
 
 #[cfg(feature = "cuda")]
