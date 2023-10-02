@@ -19,7 +19,7 @@ use group::{
     Curve,
 };
 use std::any::TypeId;
-use std::collections::{BTreeSet, HashMap, LinkedList};
+use std::collections::{BTreeSet, HashMap, LinkedList, HashSet};
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
@@ -99,7 +99,7 @@ pub enum ProveExpression<F> {
     Scale(Box<ProveExpression<F>>, BTreeMap<u32, F>),
 }
 
-impl<F> ProveExpression<F> {
+impl<F:Clone> ProveExpression<F> {
     pub fn to_string(&self) -> String {
         match &self {
             ProveExpression::Unit(a) => {
@@ -114,6 +114,13 @@ impl<F> ProveExpression<F> {
             ProveExpression::Y(_) => format!("Y"),
             ProveExpression::Scale(a, _b) => format!("S({})", a.to_string()),
         }
+    }
+    pub fn string_of_bundle(v: &Vec<ProveExpressionUnit>) -> String {
+        let mut full = "".to_string();
+        for e in v.iter() {
+            full = format!("{}{}", e.to_string(), full);
+        }
+        format!("<{}>", full)
     }
     pub fn prefetch_units(&self, cache: &mut BTreeMap<usize, ProveExpression<F>>) {
         match &self {
@@ -130,6 +137,86 @@ impl<F> ProveExpression<F> {
             ProveExpression::Scale(a, _b) => a.prefetch_units(cache)
         }
     }
+    pub fn calculate_units(&self, cache: &mut BTreeMap<usize, usize>) {
+        match &self {
+            ProveExpression::Unit(a) => {
+                match cache.get(&a.get_group()) {
+                    None => cache.insert(a.get_group(), 1),
+                    Some(k) => cache.insert(a.get_group(), k+1),
+                };
+            },
+            ProveExpression::Op(a, b, _) => {
+                a.calculate_units(cache);
+                b.calculate_units(cache);
+            },
+            ProveExpression::Y(_) => (),
+            ProveExpression::Scale(a, _b) => a.calculate_units(cache)
+        }
+    }
+
+    pub fn calculate_balances(&self) -> HashSet<usize> {
+        match &self {
+            ProveExpression::Unit(a) => {
+                let mut s = HashSet::new();
+                s.insert(a.get_group());
+                s
+            },
+            ProveExpression::Op(a, b, _) => {
+                let sa = a.calculate_balances();
+                let sb = b.calculate_balances();
+                let si = sa.intersection(&sb).count();
+                sa.union(&sb).collect::<HashSet<_>>()
+                    .into_iter()
+                    .map(|x| *x)
+                    .collect()
+            },
+            ProveExpression::Y(_) => HashSet::new(),
+            ProveExpression::Scale(a, _b) => a.calculate_balances()
+        }
+    }
+
+    pub fn calculate_depth(&self) -> usize {
+        match &self {
+            ProveExpression::Unit(a) => {
+                1
+            },
+            ProveExpression::Op(a, b, _) => {
+                let sa = a.calculate_depth();
+                let sb = b.calculate_depth();
+                if sa >= sb {
+                    //println!("left is heavier {} {}", sa, sb);
+                    sa + 1
+                }
+                else {
+                    //println!("right is heavier {} {}", sa, sb);
+                    sb + 1
+                }
+            },
+            ProveExpression::Y(_) => 0,
+            ProveExpression::Scale(a, _b) => a.calculate_depth()
+        }
+    }
+    pub fn organize(self) -> Self {
+        match self {
+            ProveExpression::Unit(a) => {
+                ProveExpression::Unit(a.clone())
+            },
+            ProveExpression::Op(a, b, k) => {
+                let a = a.organize();
+                let b = b.organize();
+                let sa = a.calculate_depth();
+                let sb = b.calculate_depth();
+                if sa >= sb {
+                    ProveExpression::Op(Box::new(a), Box::new(b), k)
+                }
+                else {
+                    ProveExpression::Op(Box::new(b), Box::new(a), k)
+                }
+            },
+            ProveExpression::Y(_) => self,
+            ProveExpression::Scale(_, _) => self
+        }
+    }
 
 }
 
@@ -141,7 +228,7 @@ pub enum LookupProveExpression<F> {
     AddGamma(Box<LookupProveExpression<F>>),
 }
 
-impl<F> LookupProveExpression<F> {
+impl<F:Clone> LookupProveExpression<F> {
     pub fn to_string(&self) -> String {
         match &self {
             LookupProveExpression::Expression(a) => {
@@ -166,7 +253,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
-        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
+        memory_cache: &BTreeMap<usize, usize>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -182,7 +269,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         let global_work_size = size / local_work_size;
 
         println!("_eval gpu lookup_expr: {}", self.to_string());
-        let timer = start_timer!(|| "eval lookup expr");
+        //let timer = start_timer!(|| "eval lookup expr");
 
         let c = match self {
             LookupProveExpression::Expression(e) => e._eval_gpu_buffer(
@@ -323,7 +410,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 Ok((res, 0))
             }
         };
-        end_timer!(timer);
+        //end_timer!(timer);
         c
     }
 }
@@ -361,11 +448,12 @@ impl<T> Cache<T> {
         let mut to_update = true;
         let mut try_count = 100000;
         let timer = start_timer!(|| "cache policy analysis");
+        let mut miss = 0;
         while try_count > 0 && to_update {
             try_count -= 1;
             to_update = false;
             let mut _hit = 0;
-            let mut _miss = 0;
+            miss = 0;
             // e -> (latest_time_stamp, order_in_queue)
             let mut sim: BTreeMap<usize, (usize, usize)> = BTreeMap::new();
             let mut new_access = self.access.clone();
@@ -377,7 +465,7 @@ impl<T> Cache<T> {
                         sim.remove(&k);
                     }
                 } else {
-                    _miss += 1;
+                    miss += 1;
                     if *action == CacheAction::Cache {
                         if sim.len() == self.bound {
                             for (ts, (k, _)) in self.access.iter().enumerate().skip(ts) {
@@ -419,6 +507,7 @@ impl<T> Cache<T> {
 
             self.access = new_access;
         }
+        println!("simulated miss is {}", miss);
         end_timer!(timer);
     }
 }
@@ -500,7 +589,7 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         group_idx: usize,
         pk: &ProvingKey<C>,
-        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
+        memory_cache: &BTreeMap<usize, usize>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
@@ -561,7 +650,7 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
-        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
+        memory_cache: &BTreeMap<usize, usize>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -621,7 +710,7 @@ impl<F: FieldExt> ProveExpression<F> {
         &self,
         pk: &ProvingKey<C>,
         program: &Program,
-        memory_cache: &BTreeMap<usize, Polynomial<F, ExtendedLagrangeCoeff>>,
+        memory_cache: &BTreeMap<usize, usize>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
         y: &mut Vec<F>,
@@ -774,13 +863,10 @@ impl<F: FieldExt> ProveExpression<F> {
                         } => (&instance[*column_index], rotation),
                     };
 
-                    let buffer = if let Some(poly) = memory_cache.get(&group) {
-                        println!("hit in memory cache:");
-                        load_unit_from_mem_cache(pk, program, allocator, poly)?
-                    } else {
-                        println!("not hit in memory cache:");
-                        do_extended_fft(pk, program, origin_values, allocator, helper)?
-                    };
+                    if let Some(count) = memory_cache.get(&group) {
+                        println!("cache miss at {} total {}", group, count);
+                    }
+                    let buffer =  do_extended_fft(pk, program, origin_values, allocator, helper)?;
                     let value = if cache_action == CacheAction::Cache {
                         unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
                     } else {
@@ -1349,9 +1435,49 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("6".to_owned());
         let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
-        Self::reconstruct_tree(tree, r_deep)
+        Self::reconstruct_tree(tree, r_deep).organize()
     }
 
+    pub(crate) fn disjoint(es: &Vec<ProveExpressionUnit>, src: &Vec<ProveExpressionUnit>) -> bool {
+       let mut disjoint = true;
+       for e in src {
+           if es.iter().find(|x| x.get_group() == e.get_group()).is_some() {
+               disjoint = false;
+               break
+           }
+       }
+       disjoint
+    }
+
+    pub(crate) fn disjoint_group(gs: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>, src: &Vec<ProveExpressionUnit>) -> bool {
+        let mut disjoint = true;
+        for g in gs {
+            if Self::disjoint(&g.0, src) {
+                disjoint = false;
+                break;
+            }
+        }
+        disjoint
+    }
+
+    pub(crate) fn mk_group(tree: &[(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)]) -> Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> {
+        let mut vs: Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> = vec![];
+        for (es, m) in tree {
+            let mut ns = vec![];
+            let mut c = vec![(es.clone(), m.clone())];
+            for s in vs.clone().into_iter() {
+                if Self::disjoint_group(&s, es) {
+                    c.append(&mut s.clone());
+                } else {
+                    ns.push(s.clone());
+                }
+            }
+            ns.push(c);
+            vs = ns
+        }
+        println!("total vs group is {}", vs.len());
+        vs
+    }
     pub(crate) fn get_complexity(&self) -> ComplexityProfiler {
         match self {
             ProveExpression::Unit(u) => ComplexityProfiler {

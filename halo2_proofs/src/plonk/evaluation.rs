@@ -297,7 +297,18 @@ impl<C: CurveAffine> Evaluator<C> {
         println!("gpus number is {}", n_gpu);
         let es = e_exprs
             .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
-            .map(|e| ProveExpression::reconstruct(e))
+            .map(|e| {
+                for es in e {
+                    println!("total cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&es.0))
+                }
+                let es = ProveExpression::mk_group(e);
+                let es = es.into_iter().map(|e| {
+                    ProveExpression::reconstruct(e.as_slice())
+                }).collect::<Vec<_>>();
+                es.iter().skip(1).fold(es[0].clone(), |acc, es| {
+                    ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
+                })
+            })
             .collect::<Vec<_>>();
 
         for (i, e) in es.iter().enumerate() {
@@ -808,19 +819,30 @@ impl<C: CurveAffine> Evaluator<C> {
         let timer = start_timer!(|| "expressions gpu eval");
 
 
-        let mut memory_unit_cache: BTreeMap<usize, Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> = BTreeMap::new();
         let mut units = BTreeMap::new();
+        let mut unit_stat = BTreeMap::new();
 
         for gate_expr in &pk.ev.gpu_gates_expr {
             gate_expr.prefetch_units(&mut units);
+            gate_expr.calculate_units(&mut unit_stat);
+        }
+
+        for gate_expr in &pk.ev.gpu_gates_expr {
+            println!("expr depth is {}", gate_expr.calculate_depth());
+        }
+
+        for (k, v) in unit_stat.iter() {
+            println!("key {} with {}", k, v);
         }
 
         let cache_timer = start_timer!(|| "cache units in memory");
 
+        /*
         for (index, expr) in units.iter() {
             let values = expr.eval_gpu(0, pk, &memory_unit_cache, &advice_poly[0], &instance_poly[0], y);
             memory_unit_cache.insert(*index, values);
         };
+        */
         end_timer!(cache_timer);
 
         let mut values = pk
@@ -828,7 +850,7 @@ impl<C: CurveAffine> Evaluator<C> {
             .gpu_gates_expr
             .par_iter()
             .enumerate()
-            .map(|(group_idx, x)| x.eval_gpu(group_idx, pk, &memory_unit_cache, &advice_poly[0], &instance_poly[0], y))
+            .map(|(group_idx, x)| x.eval_gpu(group_idx, pk, &unit_stat, &advice_poly[0], &instance_poly[0], y))
             .collect::<Vec<_>>()
             .into_iter()
             .reduce(|acc, x| acc + &x)
@@ -1137,7 +1159,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     ._eval_gpu(
                                         pk,
                                         program,
-                                        &memory_unit_cache,
+                                        &unit_stat,
                                         &advice_poly[0],
                                         &instance_poly[0],
                                         &mut ys,
