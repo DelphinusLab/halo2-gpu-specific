@@ -301,10 +301,12 @@ impl<C: CurveAffine> Evaluator<C> {
                 for es in e {
                     println!("total cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&es.0))
                 }
+                let timer = start_timer!(|| "group exprs");
                 let es = ProveExpression::mk_group(e);
                 let es = es.into_iter().map(|e| {
                     ProveExpression::reconstruct(e.as_slice())
                 }).collect::<Vec<_>>();
+                end_timer!(timer);
                 es.iter().skip(1).fold(es[0].clone(), |acc, es| {
                     ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
                 })

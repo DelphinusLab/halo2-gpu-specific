@@ -196,28 +196,6 @@ impl<F:Clone> ProveExpression<F> {
             ProveExpression::Scale(a, _b) => a.calculate_depth()
         }
     }
-    pub fn organize(self) -> Self {
-        match self {
-            ProveExpression::Unit(a) => {
-                ProveExpression::Unit(a.clone())
-            },
-            ProveExpression::Op(a, b, k) => {
-                let a = a.organize();
-                let b = b.organize();
-                let sa = a.calculate_depth();
-                let sb = b.calculate_depth();
-                if sa >= sb {
-                    ProveExpression::Op(Box::new(a), Box::new(b), k)
-                }
-                else {
-                    ProveExpression::Op(Box::new(b), Box::new(a), k)
-                }
-            },
-            ProveExpression::Y(_) => self,
-            ProveExpression::Scale(_, _) => self
-        }
-    }
-
 }
 
 #[derive(Clone, Debug)]
@@ -1435,7 +1413,7 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("6".to_owned());
         let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
-        Self::reconstruct_tree(tree, r_deep).organize()
+        Self::reconstruct_tree(tree, r_deep)
     }
 
     pub(crate) fn disjoint(es: &Vec<ProveExpressionUnit>, src: &Vec<ProveExpressionUnit>) -> bool {
