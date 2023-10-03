@@ -298,19 +298,30 @@ impl<C: CurveAffine> Evaluator<C> {
         let es = e_exprs
             .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
             .map(|e| {
-                for es in e {
-                    println!("total cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&es.0))
-                }
                 let timer = start_timer!(|| "group exprs");
                 let es = ProveExpression::mk_group(e);
-                let es = es.into_iter().map(|e| {
-                    ProveExpression::reconstruct(e.as_slice())
+                let mut es = es.into_iter().map(|e| {
+                    println!("elements:");
+                    for s in &e {
+                        println!("cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&s.0))
+                    }
+
+                    let a = ProveExpression::reconstruct(e.as_slice());
+                    a
                 }).collect::<Vec<_>>();
+                es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
                 end_timer!(timer);
+                for e in &es {
+                    println!("depth is {}", e.depth());
+                }
                 es.iter().skip(1).fold(es[0].clone(), |acc, es| {
                     ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
                 })
             })
+
+
+
+
             .collect::<Vec<_>>();
 
         for (i, e) in es.iter().enumerate() {
@@ -827,10 +838,6 @@ impl<C: CurveAffine> Evaluator<C> {
         for gate_expr in &pk.ev.gpu_gates_expr {
             gate_expr.prefetch_units(&mut units);
             gate_expr.calculate_units(&mut unit_stat);
-        }
-
-        for gate_expr in &pk.ev.gpu_gates_expr {
-            println!("expr depth is {}", gate_expr.calculate_depth());
         }
 
         for (k, v) in unit_stat.iter() {

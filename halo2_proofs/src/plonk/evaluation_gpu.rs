@@ -65,6 +65,14 @@ impl ProveExpressionUnit {
         }
     }
 
+    fn is_fix(&self) -> bool {
+        match self {
+            ProveExpressionUnit::Fixed { column_index, .. } => true,
+            _ => false
+        }
+
+    }
+
     fn to_string(&self) -> String {
         match self {
             ProveExpressionUnit::Fixed { column_index, .. } => format!("f{}", column_index),
@@ -175,14 +183,14 @@ impl<F:Clone> ProveExpression<F> {
         }
     }
 
-    pub fn calculate_depth(&self) -> usize {
+    pub fn depth(&self) -> usize {
         match &self {
             ProveExpression::Unit(a) => {
                 1
             },
             ProveExpression::Op(a, b, _) => {
-                let sa = a.calculate_depth();
-                let sb = b.calculate_depth();
+                let sa = a.depth();
+                let sb = b.depth();
                 if sa >= sb {
                     //println!("left is heavier {} {}", sa, sb);
                     sa + 1
@@ -193,10 +201,22 @@ impl<F:Clone> ProveExpression<F> {
                 }
             },
             ProveExpression::Y(_) => 0,
-            ProveExpression::Scale(a, _b) => a.calculate_depth()
+            ProveExpression::Scale(a, _b) => a.depth()
         }
     }
+
+
 }
+
+/*
+pub fn est_cache<F>(e: &ProveExpression<F>) -> usize where F: FieldExt {
+    let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE").unwrap_or("5".to_owned());
+    let cache_size = usize::from_str_radix(&cache_size, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+    let mut unit_cache = Cache::new(cache_size);
+    e.gen_cache_policy(&mut unit_cache);
+    unit_cache.analyze()
+}
+*/
 
 #[derive(Clone, Debug)]
 pub enum LookupProveExpression<F> {
@@ -246,7 +266,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
 
-        println!("_eval gpu lookup_expr: {}", self.to_string());
+        //println!("_eval gpu lookup_expr: {}", self.to_string());
         //let timer = start_timer!(|| "eval lookup expr");
 
         let c = match self {
@@ -422,7 +442,7 @@ impl<T> Cache<T> {
         self.access.push((k, CacheAction::Cache));
     }
 
-    pub fn analyze(&mut self) {
+    pub fn analyze(&mut self) -> usize {
         let mut to_update = true;
         let mut try_count = 100000;
         let timer = start_timer!(|| "cache policy analysis");
@@ -487,6 +507,7 @@ impl<T> Cache<T> {
         }
         println!("simulated miss is {}", miss);
         end_timer!(timer);
+        miss
     }
 }
 
@@ -572,7 +593,7 @@ impl<F: FieldExt> ProveExpression<F> {
         instance: &Vec<Polynomial<F, Coeff>>,
         y: F,
     ) -> Polynomial<F, ExtendedLagrangeCoeff> {
-        let timer = start_timer!(|| format!("evalu_gpu {}", self.to_string()));
+        //let timer = start_timer!(|| format!("evalu_gpu {}", self.to_string()));
         let closures = ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
                                                                       input: &mut [F]|
          -> ec_gpu_gen::EcResult<
@@ -620,7 +641,7 @@ impl<F: FieldExt> ProveExpression<F> {
             .program
             .run(closures, &mut values.values[..])
             .unwrap();
-        end_timer!(timer);
+        //end_timer!(timer);
         values
     }
 
@@ -648,7 +669,7 @@ impl<F: FieldExt> ProveExpression<F> {
             (Some((l, rot_l)), Some(r)) => {
                 let res = unsafe { program.create_buffer::<F>(size as usize)? };
                 let c = program.create_buffer_from_slice(&vec![r])?;
-                let timer = start_timer!(|| "sum eval");
+                //let timer = start_timer!(|| "sum eval");
                 let kernel_name = format!("{}_eval_sum_c", "Bn256_Fr");
                 let kernel = program.create_kernel(
                     &kernel_name,
@@ -662,7 +683,7 @@ impl<F: FieldExt> ProveExpression<F> {
                     .arg(&c)
                     .arg(&size)
                     .run()?;
-                end_timer!(timer);
+                //end_timer!(timer);
                 Ok((Rc::new(res), 0))
             }
             (Some((l, rot_l)), None) => Ok((l, rot_l)),
@@ -814,7 +835,7 @@ impl<F: FieldExt> ProveExpression<F> {
                 let group = u.get_group();
                 let (cache, cache_action) = unit_cache.get(group);
                 let (values, rotation) = if let Some(cached_values) = cache {
-                    let timer = start_timer!(|| format!("processing unit {} hit", u.to_string()));
+                    //let timer = start_timer!(|| format!("processing unit {} hit", u.to_string()));
                     let v = match u {
                         ProveExpressionUnit::Fixed { rotation, .. }
                         | ProveExpressionUnit::Advice { rotation, .. }
@@ -822,10 +843,10 @@ impl<F: FieldExt> ProveExpression<F> {
                             (cached_values, *rotation)
                         }
                     };
-                    end_timer!(timer);
+                    //end_timer!(timer);
                     v
                 } else {
-                    let timer = start_timer!(|| format!("processing unit {} miss", u.to_string()));
+                    //let timer = start_timer!(|| format!("processing unit {} miss", u.to_string()));
                     let (origin_values, rotation) = match u {
                         ProveExpressionUnit::Fixed {
                             column_index,
@@ -851,7 +872,7 @@ impl<F: FieldExt> ProveExpression<F> {
                         Rc::new(buffer)
                     };
                     let res = (value, *rotation);
-                    end_timer!(timer);
+                    //end_timer!(timer);
                     res
                 };
                 Ok((Some((values, rotation.0 * rot_scale)), None))
@@ -993,26 +1014,26 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     let local_work_size = 128;
     let global_work_size = extended_size / local_work_size;
 
-    let timerall = start_timer!(|| "gpu eval unit");
+    //let timerall = start_timer!(|| "gpu eval unit");
     let values = allocator
         .pop_front()
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
     let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
-    let timer = start_timer!(|| "write from buffer");
+    //let timer = start_timer!(|| "write from buffer");
     program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "distribute powers zeta");
+    //let timer = start_timer!(|| "distribute powers zeta");
     do_distribute_powers_zeta(
         pk,
         program,
         origin_values_buffer,
         &helper.coset_powers_buffer,
     )?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "eval fft prepare");
+    //let timer = start_timer!(|| "eval fft prepare");
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
         &kernel_name,
@@ -1024,9 +1045,9 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .arg(&values)
         .arg(&origin_size)
         .run()?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "do fft pure");
+    //let timer = start_timer!(|| "do fft pure");
     let domain = &pk.vk.domain;
     let a = do_fft_pure(
         program,
@@ -1036,8 +1057,8 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         &helper.pq_buffer,
         &helper.omegas_buffer,
     );
-    end_timer!(timer);
-    end_timer!(timerall);
+    //end_timer!(timer);
+    //end_timer!(timerall);
     a
 }
 
@@ -1419,7 +1440,7 @@ impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn disjoint(es: &Vec<ProveExpressionUnit>, src: &Vec<ProveExpressionUnit>) -> bool {
        let mut disjoint = true;
        for e in src {
-           if es.iter().find(|x| x.get_group() == e.get_group()).is_some() {
+           if es.iter().find(|x| x.get_group() == e.get_group() && !e.is_fix()).is_some() {
                disjoint = false;
                break
            }
