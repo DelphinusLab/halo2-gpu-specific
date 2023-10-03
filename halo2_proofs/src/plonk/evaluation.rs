@@ -295,11 +295,12 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let n_gpu = *crate::plonk::N_GPU;
         println!("gpus number is {}", n_gpu);
-        let es = e_exprs
-            .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
-            .map(|e| {
+        let es = ProveExpression::mk_group(&e_exprs).into_iter().flatten().collect::<Vec<_>>();
+        let es = es
+            .chunks((es.len() + n_gpu - 1) / n_gpu)
+            .map(|es| {
                 let timer = start_timer!(|| "group exprs");
-                let es = ProveExpression::mk_group(e);
+                let es = ProveExpression::mk_group(&es.to_vec());
                 let mut es = es.into_iter().map(|e| {
                     println!("elements:");
                     for s in &e {
@@ -313,15 +314,12 @@ impl<C: CurveAffine> Evaluator<C> {
                 end_timer!(timer);
                 for e in &es {
                     println!("depth is {}", e.depth());
+                    println!("notation is {}", e.to_string());
                 }
                 es.iter().skip(1).fold(es[0].clone(), |acc, es| {
                     ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
                 })
             })
-
-
-
-
             .collect::<Vec<_>>();
 
         for (i, e) in es.iter().enumerate() {

@@ -75,9 +75,9 @@ impl ProveExpressionUnit {
 
     fn to_string(&self) -> String {
         match self {
-            ProveExpressionUnit::Fixed { column_index, .. } => format!("f{}", column_index),
-            ProveExpressionUnit::Advice { column_index, .. } => format!("a{}", column_index),
-            ProveExpressionUnit::Instance { column_index, .. } => format!("i{}", column_index),
+            ProveExpressionUnit::Fixed { column_index, rotation } => format!("f{}-{}", column_index, rotation.0),
+            ProveExpressionUnit::Advice { column_index, rotation } => format!("a{}-{}", column_index, rotation.0),
+            ProveExpressionUnit::Instance { column_index, rotation } => format!("i{}-{}", column_index, rotation.0),
         }
     }
 
@@ -1409,10 +1409,37 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
 
+        let c = tree.clone()
+            .into_iter()
+            .map(|(k, ys)| Self::reconstruct_units_coeff(k, ys))
+            .collect::<Vec<_>>();
+
+        c.iter().skip(1).fold(c[0].clone(), |acc, x| {
+            match acc {
+                Self::Scale(a, _) => {
+                    match (a.as_ref().clone(), x.clone()) {
+                        (Self::Unit(a), Self::Scale(ub, _)) => {
+                            match ub.as_ref().clone() {
+                                Self::Unit(b) => if a.get_group() == b.get_group() {
+                                    println!("find merge {} {}", a.to_string(), b.to_string())
+                                },
+                                _ => ()
+                            }
+                        },
+                        _ => ()
+                    }
+                },
+                _ => ()
+            };
+            x.clone()
+        });
+
         return tree
             .into_iter()
             .map(|(k, ys)| Self::reconstruct_units_coeff(k, ys))
-            .reduce(|acc, x| Self::Op(Box::new(acc), Box::new(x), Bop::Sum))
+            .reduce(|acc, x| {
+                Self::Op(Box::new(acc), Box::new(x), Bop::Sum)
+            })
             .unwrap();
     }
 
@@ -1459,7 +1486,7 @@ impl<F: FieldExt> ProveExpression<F> {
         disjoint
     }
 
-    pub(crate) fn mk_group(tree: &[(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)]) -> Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> {
+    pub(crate) fn mk_group(tree: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>) -> Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> {
         let mut vs: Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> = vec![];
         for (es, m) in tree {
             let mut ns = vec![];
