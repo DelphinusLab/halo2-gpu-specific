@@ -411,7 +411,7 @@ impl<F: FieldExt> ProveExpression<F> {
 
     pub(crate) fn eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
-        group_idx: usize,
+        gpu_idx: usize,
         pk: &ProvingKey<C>,
         advice: &Vec<Polynomial<F, Coeff>>,
         instance: &Vec<Polynomial<F, Coeff>>,
@@ -449,16 +449,14 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let mut values = pk.vk.domain.empty_extended();
         let devices = Device::all();
-        let programs = devices
-            .iter()
-            .map(|device| ec_gpu_gen::program!(device))
-            .collect::<Result<_, _>>()
-            .expect("Cannot create programs!");
+
+
+
+        let device = devices[gpu_idx % devices.len()];
+        let programs = vec![ec_gpu_gen::program!(device).unwrap()];
         let kern =
             FftKernel::<pairing::bn256::Fr>::create(programs).expect("Cannot initialize kernel!");
-
-        let gpu_idx = group_idx % kern.kernels.len();
-        kern.kernels[gpu_idx]
+        kern.kernels[0]
             .program
             .run(closures, &mut values.values[..])
             .unwrap();
