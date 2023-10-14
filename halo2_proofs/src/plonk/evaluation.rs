@@ -302,20 +302,24 @@ impl<C: CurveAffine> Evaluator<C> {
                 let timer = start_timer!(|| "group exprs");
                 let es = ProveExpression::mk_group(&es.to_vec());
                 let mut es = es.into_iter().map(|e| {
+                    /*
                     println!("elements:");
                     for s in &e {
                         println!("cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&s.0))
                     }
+                    */
 
                     let a = ProveExpression::reconstruct(e.as_slice());
                     a
                 }).collect::<Vec<_>>();
                 es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
                 end_timer!(timer);
+                /*
                 for e in &es {
                     println!("depth is {}", e.depth());
                     println!("notation is {}", e.to_string());
                 }
+                */
                 es.iter().skip(1).fold(es[0].clone(), |acc, es| {
                     ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
                 })
@@ -838,9 +842,11 @@ impl<C: CurveAffine> Evaluator<C> {
             gate_expr.calculate_units(&mut unit_stat);
         }
 
+        /* XXX
         for (k, v) in unit_stat.iter() {
-            println!("key {} with {}", k, v);
+            println!("key {} showed {} times", k, v);
         }
+        */
 
         let cache_timer = start_timer!(|| "cache units in memory");
 

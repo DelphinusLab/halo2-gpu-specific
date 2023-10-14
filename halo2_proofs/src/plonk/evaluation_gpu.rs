@@ -598,9 +598,6 @@ impl<T: std::fmt::Debug> Cache<T> {
     }
 
     pub fn get(&mut self, key: usize) -> (Option<Rc<T>>, CacheAction) {
-        (None, CacheAction::Drop)
-            /*
-        println!("key is {}", key);
         let action = self
             .access
             .get(self.ts)
@@ -623,7 +620,6 @@ impl<T: std::fmt::Debug> Cache<T> {
         };
 
         (res, action)
-        */
     }
 
     pub fn update(&mut self, key: usize, value: T, on_drop: impl FnOnce(T) -> ()) -> Rc<T> {
@@ -813,11 +809,12 @@ impl<F: FieldExt> ProveExpression<F> {
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
+        let rot_scale = 1 << (pk.vk.domain.extended_k() - pk.vk.domain.k());
 
         if let Some ((uid, exprs)) = self.flat_unique_unit_scale() {
             if exprs.len() > 1 {
                 let cs = exprs.iter().map(|x| x.get_scale_coeff(y).unwrap()).collect::<Vec<F>>();
-                let rot = exprs.iter().map(|x| x.get_unit_rotation().unwrap()).collect::<Vec<i32>>();
+                let rot = exprs.iter().map(|x| x.get_unit_rotation().unwrap() * rot_scale).collect::<Vec<i32>>();
                 let c = program.create_buffer_from_slice(&cs)?;
                 let r = program.create_buffer_from_slice(&rot)?;
                 let clen = cs.len() as u32;
@@ -827,13 +824,6 @@ impl<F: FieldExt> ProveExpression<F> {
                 )?.0.unwrap();
 
                 let kernel_name = format!("{}_eval_batch_scale", "Bn256_Fr");
-                println!(
-                    "eval with {} {}, rot {:?} s: {:?}",
-                    kernel_name,
-                    self.to_string(),
-                    rot,
-                    cs
-                );
                 let kernel = program.create_kernel(
                     &kernel_name,
                     global_work_size as usize,
@@ -1039,9 +1029,6 @@ impl<F: FieldExt> ProveExpression<F> {
                             } => (&instance[*column_index], rotation),
                         };
 
-                        if let Some(count) = memory_cache.get(&group) {
-                            println!("cache miss at {} total {}", group, count);
-                        }
                         let buffer =  do_extended_fft(pk, program, origin_values, allocator, helper)?;
                         let value = if cache_action == CacheAction::Cache {
                             unit_cache.update(group, buffer, |buffer| allocator.push_back(buffer))
