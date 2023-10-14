@@ -3,3 +3,6 @@ members = [
     "halo2",
     "halo2_proofs",
 ]
+
+[patch.'https://github.com/lanbones/ec-gpu']
+ec-gpu-gen = { path = '../ec-gpu/ec-gpu-gen' }
