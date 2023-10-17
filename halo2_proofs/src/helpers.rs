@@ -21,11 +21,7 @@ use num_derive::FromPrimitive;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::io::Seek;
 use std::marker::PhantomData;
-use std::{
-    fs::{File, OpenOptions},
-    io,
-    ops::RangeTo,
-};
+use std::{fs::{File, OpenOptions}, io, mem, ops::RangeTo};
 
 pub(crate) trait CurveRead: CurveAffine {
     /// Reads a compressed element from the buffer and attempts to parse it
@@ -105,9 +101,9 @@ impl Serializable for (String, u32) {
 
 impl ParaSerializable for Vec<Vec<(u32, u32)>> {
     fn vec_fetch(fd: &mut File) -> io::Result<Self> {
-        let columns = read_u32(fd)?;
+        let columns = read_u32(fd)? as usize;
         let mut offset = 0;
-        let mut offsets = vec![];
+        let mut offsets = Vec::with_capacity(columns);
         for _ in 0..columns {
             let l = read_u32(fd)?;
             offsets.push((offset, l));
@@ -124,6 +120,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
                         .map(&fd)
                         .unwrap()
                 };
+                //TODO: to be optimized
                 let s: &[(u32, u32)] = unsafe {
                     std::slice::from_raw_parts(mmap.as_ptr() as *const (u32, u32), offsets[i as usize].1 as usize)
                 };
@@ -139,7 +136,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         let u = self.len() as u32;
         u.store(fd)?;
         let mut offset = 0;
-        let mut offsets = vec![];
+        let mut offsets = Vec::with_capacity(u as usize);
         for i in 0..u {
             let l = self[i as usize].len();
             offsets.push((offset, l));
@@ -151,15 +148,15 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         self.into_par_iter().enumerate().for_each(|(i, s2)| {
            let mut mmap = unsafe {
                MmapOptions::new()
-                   .offset(position + (offsets[i as usize].0 as u64 * 8))
-                   .len(offsets[i as usize].1 as usize * 8)
+                   .offset(position + (offsets[i].0 as u64 * 8))
+                   .len(offsets[i].1 * 8)
                    .map_mut(&fd)
                    .unwrap()
            };
            let s: &[u8] = unsafe {
                std::slice::from_raw_parts(
                    s2.as_ptr() as *const u8,
-                   offsets[i as usize].1 as usize * 8,
+                   offsets[i].1 * 8,
                )
            };
            (&mut mmap).copy_from_slice(s);
@@ -173,10 +170,13 @@ impl<B:Clone, F: FieldExt> Serializable for Polynomial<F, B> {
         let u = read_u32(reader)?;
         let mut buf = vec![0u8; u as usize * 32];
         reader.read_exact(&mut buf)?;
-        let s: &[F] = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr() as *const F, u as usize)
+        let ptr = buf.as_ptr() as *mut F;
+        // Don't run the destructor for buf, because it used by `values`
+        mem::forget(buf);
+        let values: Vec<F> = unsafe {
+            Vec::from_raw_parts(ptr, u as usize, u as usize)
         };
-        Ok(Polynomial::new(s.to_vec()))
+        Ok(Polynomial::new(values))
     }
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let u = self.values.len() as u32;
@@ -208,9 +208,10 @@ impl<C: CurveAffine> Serializable for VerifyingKey<C> {
         let domain: EvaluationDomain<C::Scalar> = EvaluationDomain::new(j, k);
         let cs = read_cs::<C, R>(reader)?;
 
-        let fixed_commitments: Vec<_> = (0..cs.num_fixed_columns)
-            .map(|_| C::read(reader))
-            .collect::<Result<_, _>>()?;
+        let mut fixed_commitments = Vec::with_capacity(cs.num_fixed_columns);
+        for _ in 0..cs.num_fixed_columns {
+            fixed_commitments.push(C::read(reader)?);
+        }
 
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
 
@@ -233,7 +234,7 @@ impl<T: Serializable> Serializable for Vec<T> {
     }
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Vec<T>> {
         let len = read_u32(reader)?;
-        let mut v = vec![];
+        let mut v = Vec::with_capacity(len as usize);
         for _ in 0..len {
             v.push(T::fetch(reader)?);
         }
@@ -281,8 +282,8 @@ fn write_arguments<W: std::io::Write>(
 fn read_arguments<R: std::io::Read>(
     reader: &mut R,
 ) -> std::io::Result<plonk::permutation::Argument> {
-    let len = read_u32(reader)?;
-    let mut cols = vec![];
+    let len = read_u32(reader)? as usize;
+    let mut cols = Vec::with_capacity(len);
     for _ in 0..len {
         cols.push(Column::<Any>::fetch(reader)?);
     }
@@ -336,8 +337,8 @@ fn read_queries<T: ColumnType, R: std::io::Read>(
     reader: &mut R,
     t: T,
 ) -> std::io::Result<Vec<(Column<T>, Rotation)>> {
-    let mut queries = vec![];
-    let len = read_u32(reader)?;
+    let len = read_u32(reader)? as usize;
+    let mut queries = Vec::with_capacity(len);
     for _ in 0..len {
         let column = read_column(reader, t)?;
         let rotation = read_u32(reader)?;
@@ -348,8 +349,8 @@ fn read_queries<T: ColumnType, R: std::io::Read>(
 }
 
 fn read_virtual_cells<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<VirtualCell>> {
-    let mut vcells = vec![];
-    let len = read_u32(reader)?;
+    let len = read_u32(reader)? as usize;
+    let mut vcells = Vec::with_capacity(len);
     for _ in 0..len {
         let column = Column::<Any>::fetch(reader)?;
         let rotation = read_u32(reader)?;
@@ -384,8 +385,8 @@ fn write_fixed_columns<W: std::io::Write>(
 }
 
 fn read_fixed_columns<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<Column<Fixed>>> {
-    let len = read_u32(reader)?;
-    let mut columns = vec![];
+    let len = read_u32(reader)? as usize;
+    let mut columns = Vec::with_capacity(len);
     for _ in 0..len {
         columns.push(read_fixed_column(reader)?);
     }
@@ -426,8 +427,8 @@ fn read_cs<C: CurveAffine, R: io::Read>(reader: &mut R) -> io::Result<Constraint
     let num_selectors = read_u32(reader)? as usize;
     let num_fixed_columns = read_u32(reader)? as usize;
 
-    let num_advice_queries_len = read_u32(reader)?;
-    let mut num_advice_queries = vec![];
+    let num_advice_queries_len = read_u32(reader)? as usize;
+    let mut num_advice_queries = Vec::with_capacity(num_advice_queries_len);
     for _ in 0..num_advice_queries_len {
         num_advice_queries.push(read_u32(reader)? as usize);
     }
@@ -440,8 +441,8 @@ fn read_cs<C: CurveAffine, R: io::Read>(reader: &mut R) -> io::Result<Constraint
     let fixed_queries = read_queries::<Fixed, R>(reader, Fixed)?;
     let permutation = read_arguments(reader)?;
 
-    let mut lookups = vec![];
-    let nb_lookup = read_u32(reader)?;
+    let nb_lookup = read_u32(reader)? as usize;
+    let mut lookups = Vec::with_capacity(nb_lookup);
     for _ in 0..nb_lookup {
         let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
         let table_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
@@ -487,8 +488,8 @@ fn write_gates<C: CurveAffine, W: std::io::Write>(
 fn read_gates<C: CurveAffine, R: std::io::Read>(
     reader: &mut R,
 ) -> std::io::Result<Vec<Gate<C::Scalar>>> {
-    let nb_gates = read_u32(reader)?;
-    let mut gates = vec![];
+    let nb_gates = read_u32(reader)? as usize;
+    let mut gates = Vec::with_capacity(nb_gates);
     for _ in 0..nb_gates {
         gates.push(Gate::new_with_polys_and_queries(
             Vec::<Expression<C::Scalar>>::fetch(reader)?,
@@ -888,6 +889,7 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
                         .map(&fd)
                         .unwrap()
                 };
+                //TODO: to be optimized
                 let s: &[C::Scalar] = unsafe {
                     std::slice::from_raw_parts(mmap.as_ptr() as *const C::Scalar, 1 << params.k)
                 };
