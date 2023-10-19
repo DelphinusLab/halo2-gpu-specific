@@ -991,6 +991,23 @@ pub(crate) struct ComplexityProfiler {
     pub(crate) ref_cnt: HashMap<usize, u32>,
 }
 
+#[derive(Debug, Default)]
+struct ConstructHint {
+    weights: HashMap<usize, usize>,
+    max_weight: usize,
+}
+
+impl ConstructHint {
+    fn touch(&mut self, k: usize) {
+        self.max_weight += 1;
+        self.weights.insert(k, self.max_weight);
+    }
+
+    fn get(&self, k: &usize) -> usize {
+        self.weights.get(k).map_or(0, |x| x.clone())
+    }
+}
+
 impl<F: FieldExt> ProveExpression<F> {
     pub(crate) fn new() -> Self {
         ProveExpression::Y(BTreeMap::from_iter(vec![(0, F::zero())].into_iter()))
@@ -1073,29 +1090,33 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 
     // max r deep: 1
-    fn reconstruct_unit(u: ProveExpressionUnit, c: u32) -> Self {
+    fn reconstruct_unit(u: ProveExpressionUnit, c: u32, hint: &mut ConstructHint) -> Self {
         if c >= 3 {
             println!("find large c {}", c);
         }
 
         if c == 1 {
+            hint.touch(u.get_group());
             Self::Unit(u)
         } else {
-            Self::Op(
-                Box::new(Self::reconstruct_unit(u.clone(), c - 1)),
-                Box::new(Self::Unit(u)),
-                Bop::Product,
-            )
+            let l = Box::new(Self::reconstruct_unit(u.clone(), c - 1, hint));
+            let r = Box::new(Self::Unit(u));
+            Self::Op(l, r, Bop::Product)
         }
     }
 
     // max r deep: 1
-    fn reconstruct_units(mut us: BTreeMap<ProveExpressionUnit, u32>) -> Self {
-        let u = us.pop_first().unwrap();
+    fn reconstruct_units(us: BTreeMap<ProveExpressionUnit, u32>, hint: &mut ConstructHint) -> Self {
+        let mut us: Vec<_> = us.into_iter().collect();
+        us.sort_by_key(|(k, _)| hint.get(&k.get_group()));
 
-        let mut l = Self::reconstruct_unit(u.0, u.1);
+        let mut ui = us.into_iter();
 
-        for (u, c) in us {
+        let u = ui.next().unwrap();
+        let mut l = Self::reconstruct_unit(u.0, u.1, hint);
+
+        for (u, c) in ui {
+            hint.touch(u.get_group());
             for _ in 0..c {
                 l = Self::Op(Box::new(l), Box::new(Self::Unit(u.clone())), Bop::Product);
             }
@@ -1108,11 +1129,12 @@ impl<F: FieldExt> ProveExpression<F> {
     fn reconstruct_units_coeff(
         us: BTreeMap<ProveExpressionUnit, u32>,
         coeff: BTreeMap<u32, F>,
+        hint: &mut ConstructHint,
     ) -> Self {
         let res = if us.len() == 0 {
             Self::reconstruct_coeff(coeff)
         } else {
-            Self::Scale(Box::new(Self::reconstruct_units(us)), coeff)
+            Self::Scale(Box::new(Self::reconstruct_units(us, hint)), coeff)
         };
 
         assert!(res.get_r_deep() <= 1);
@@ -1122,10 +1144,11 @@ impl<F: FieldExt> ProveExpression<F> {
     fn reconstruct_tree(
         mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,
         r_deep_limit: u32,
+        hint: &mut ConstructHint,
     ) -> Self {
         if tree.len() == 1 {
             let u = tree.pop().unwrap();
-            return Self::reconstruct_units_coeff(u.0, u.1);
+            return Self::reconstruct_units_coeff(u.0, u.1, hint);
         }
 
         if r_deep_limit > 2 {
@@ -1172,12 +1195,13 @@ impl<F: FieldExt> ProveExpression<F> {
                     }
                 }
 
-                let picked = Self::reconstruct_tree(picked, r_deep_limit - 1);
+                let picked = Self::reconstruct_tree(picked, r_deep_limit - 1, hint);
+                hint.touch(max_u.get_group());
                 let mut r = Self::Op(Box::new(picked), Box::new(Self::Unit(max_u)), Bop::Product);
 
                 if other.len() > 0 {
                     r = Self::Op(
-                        Box::new(Self::reconstruct_tree(other, r_deep_limit)),
+                        Box::new(Self::reconstruct_tree(other, r_deep_limit, hint)),
                         Box::new(r),
                         Bop::Sum,
                     );
@@ -1187,14 +1211,18 @@ impl<F: FieldExt> ProveExpression<F> {
             }
         }
 
+        let mut tree: Vec<_> = tree.into_iter().collect();
+        tree.sort_by_key(|(k, _)| -> usize { k.keys().map(|x| hint.get(&x.get_group())).sum() });
+
         return tree
             .into_iter()
-            .map(|(k, ys)| Self::reconstruct_units_coeff(k, ys))
+            .map(|(k, ys)| Self::reconstruct_units_coeff(k, ys, hint))
             .reduce(|acc, x| Self::Op(Box::new(acc), Box::new(x), Bop::Sum))
             .unwrap();
     }
 
     pub(crate) fn reconstruct(tree: &[(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)]) -> Self {
+        let mut hint = ConstructHint::default();
         let tree = tree
             .into_iter()
             .map(|(us, v)| {
@@ -1212,7 +1240,7 @@ impl<F: FieldExt> ProveExpression<F> {
 
         let r_deep = std::env::var("HALO2_PROOF_GPU_EVAL_R_DEEP").unwrap_or("6".to_owned());
         let r_deep = u32::from_str_radix(&r_deep, 10).expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
-        Self::reconstruct_tree(tree, r_deep)
+        Self::reconstruct_tree(tree, r_deep, &mut hint)
     }
 
     pub(crate) fn get_complexity(&self) -> ComplexityProfiler {
