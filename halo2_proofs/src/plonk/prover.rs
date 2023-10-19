@@ -147,7 +147,7 @@ fn create_single_instances<
             #[cfg(not(feature = "cuda"))]
             let instance_cosets: Vec<_> = instance_polys
                 .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
+                .map(|poly| domain.coeff_to_extended(poly))
                 .collect();
 
             Ok(InstanceSingle {
@@ -578,7 +578,7 @@ pub fn create_proof<
 
                         #[cfg(not(feature = "cuda"))]
                         let permutation_product_coset =
-                            domain.coeff_to_extended(permutation_product_poly.clone());
+                            domain.coeff_to_extended(&permutation_product_poly);
 
                         let permutation_product_commitment =
                             permutation_product_commitment_projective.to_affine();
@@ -643,7 +643,7 @@ pub fn create_proof<
             #[cfg(not(feature = "cuda"))]
             let advice_cosets: Vec<_> = advice_polys
                 .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
+                .map(|poly| domain.coeff_to_extended(poly))
                 .collect();
 
             AdviceSingle::<C> {
@@ -1068,7 +1068,7 @@ pub fn create_proof_from_witness<
 
                         #[cfg(not(feature = "cuda"))]
                         let permutation_product_coset =
-                            domain.coeff_to_extended(permutation_product_poly.clone());
+                            domain.coeff_to_extended(&permutation_product_poly);
 
                         let permutation_product_commitment =
                             permutation_product_commitment_projective.to_affine();
@@ -1133,7 +1133,7 @@ pub fn create_proof_from_witness<
             #[cfg(not(feature = "cuda"))]
             let advice_cosets: Vec<_> = advice_polys
                 .iter()
-                .map(|poly| domain.coeff_to_extended(poly.clone()))
+                .map(|poly| domain.coeff_to_extended(poly))
                 .collect();
 
             AdviceSingle::<C> {

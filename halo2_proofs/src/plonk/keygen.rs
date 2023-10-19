@@ -323,7 +323,7 @@ where
     #[cfg(not(feature = "cuda"))]
     let fixed_cosets = fixed_polys
         .iter()
-        .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
+        .map(|poly| vk.domain.coeff_to_extended(poly))
         .collect();
 
     let timer = start_timer!(|| "assembly build pkey");
@@ -339,7 +339,12 @@ where
     l0[0] = C::Scalar::one();
     let l0 = vk.domain.lagrange_to_coeff(l0);
     #[cfg(not(feature = "cuda"))]
-    let l0 = vk.domain.coeff_to_extended(l0);
+    let l0 = {
+        let l0_ext = vk.domain.coeff_to_extended(&l0);
+        drop(l0);
+        l0_ext
+    };
+
 
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
     // and 0 otherwise over the domain.
@@ -348,14 +353,15 @@ where
         *evaluation = C::Scalar::one();
     }
     let l_blind = vk.domain.lagrange_to_coeff(l_blind);
-    let l_blind_extended = vk.domain.coeff_to_extended(l_blind);
+    let l_blind_extended = vk.domain.coeff_to_extended(&l_blind);
+    drop(l_blind);
 
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
     l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::one();
     let l_last = vk.domain.lagrange_to_coeff(l_last);
-    let l_last_extended = vk.domain.coeff_to_extended(l_last.clone());
+    let l_last_extended = vk.domain.coeff_to_extended(&l_last);
 
     // Compute l_active_row(X)
     let one = C::Scalar::one();
@@ -423,7 +429,7 @@ where
     #[cfg(not(feature = "cuda"))]
     let fixed_cosets = fixed_polys
         .iter()
-        .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
+        .map(|poly| vk.domain.coeff_to_extended(poly))
         .collect();
 
     let timer = start_timer!(|| "build pk time...");
@@ -437,7 +443,11 @@ where
     l0[0] = C::Scalar::one();
     let l0 = vk.domain.lagrange_to_coeff(l0);
     #[cfg(not(feature = "cuda"))]
-    let l0 = vk.domain.coeff_to_extended(l0);
+    let l0 = {
+        let l0_ext = vk.domain.coeff_to_extended(&l0);
+        drop(l0);
+        l0_ext
+    };
 
     // Compute l_blind(X) which evaluates to 1 for each blinding factor row
     // and 0 otherwise over the domain.
@@ -446,14 +456,15 @@ where
         *evaluation = C::Scalar::one();
     }
     let l_blind = vk.domain.lagrange_to_coeff(l_blind);
-    let l_blind_extended = vk.domain.coeff_to_extended(l_blind);
+    let l_blind_extended = vk.domain.coeff_to_extended(&l_blind);
+    drop(l_blind);
 
     // Compute l_last(X) which evaluates to 1 on the first inactive row (just
     // before the blinding factors) and 0 otherwise over the domain
     let mut l_last = vk.domain.empty_lagrange();
     l_last[params.n as usize - cs.blinding_factors() - 1] = C::Scalar::one();
     let l_last = vk.domain.lagrange_to_coeff(l_last);
-    let l_last_extended = vk.domain.coeff_to_extended(l_last.clone());
+    let l_last_extended = vk.domain.coeff_to_extended(&l_last);
 
     // Compute l_active_row(X)
     let one = C::Scalar::one();

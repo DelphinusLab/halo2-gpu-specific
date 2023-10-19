@@ -206,7 +206,7 @@ impl Assembly {
         #[cfg(not(feature = "cuda"))]
         let cosets = polys
             .par_iter()
-            .map(|poly| domain.coeff_to_extended(poly.clone()))
+            .map(|poly| domain.coeff_to_extended(poly))
             .collect();
 
         ProvingKey {
