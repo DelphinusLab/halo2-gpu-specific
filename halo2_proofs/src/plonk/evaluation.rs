@@ -1177,6 +1177,10 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(&(rot_scale as u32))
                                     .arg(&(size as u32))
                                     .run()?;
+
+                                allocator.push_back(permuted_input_coset_buf);
+                                allocator.push_back(permuted_table_coset_buf);
+                                allocator.push_back(product_coset_buf);
                             }
 
                             program.read_into_buffer(&values_buf, input)?;
