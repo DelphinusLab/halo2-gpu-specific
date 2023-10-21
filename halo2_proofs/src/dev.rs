@@ -286,7 +286,7 @@ impl Region {
 
 /// The value of a particular cell within the circuit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum CellValue<F: Group + Field> {
+pub enum CellValue<F: Group + Field> {
     // An unassigned cell.
     Unassigned,
     // A cell that has been assigned a value.
@@ -495,18 +495,18 @@ pub struct MockProver<F: Group + Field> {
     current_region: Option<Region>,
 
     // The fixed cells in the circuit, arranged as [column][row].
-    fixed: Vec<Vec<CellValue<F>>>,
+    pub fixed: Vec<Vec<CellValue<F>>>,
     // The advice cells in the circuit, arranged as [column][row].
     advice: Vec<Vec<CellValue<F>>>,
     // The instance cells in the circuit, arranged as [column][row].
     instance: Vec<Vec<F>>,
 
-    selectors: Vec<Vec<bool>>,
+    pub selectors: Vec<Vec<bool>>,
 
-    permutation: permutation::keygen::Assembly,
+    pub permutation: permutation::keygen::Assembly,
 
     // A range of available rows for assignment and copies.
-    usable_rows: Range<usize>,
+    pub usable_rows: Range<usize>,
 }
 
 impl<F: Field + Group> Assignment<F> for MockProver<F> {
