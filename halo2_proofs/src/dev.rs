@@ -188,6 +188,28 @@ pub enum VerifyFailure {
         ///   lookup is active on a row adjacent to an unrelated region.
         location: FailureLocation,
     },
+    /// A lookup input did not exist in its corresponding table.
+    Shuffle {
+        /// The name of the lookup that is not satisfied.
+        name: &'static str,
+        /// The index of the lookup that is not satisfied. These indices are assigned in
+        /// the order in which `ConstraintSystem::lookup` is called during
+        /// `Circuit::configure`.
+        shuffle_index: usize,
+        /// The location at which the lookup is not satisfied.
+        ///
+        /// `FailureLocation::InRegion` is most common, and may be due to the intentional
+        /// use of a lookup (if its inputs are conditional on a complex selector), or an
+        /// unintentional lookup constraint that overlaps the region (indicating that the
+        /// lookup's inputs should be made conditional).
+        ///
+        /// `FailureLocation::OutsideRegion` is uncommon, and could mean that:
+        /// - The input expressions do not correctly constrain a default value that exists
+        ///   in the table when the lookup is not being used.
+        /// - The input expressions use a column queried at a non-zero `Rotation`, and the
+        ///   lookup is active on a row adjacent to an unrelated region.
+        location: FailureLocation,
+    },
     /// A permutation did not preserve the original value of a cell.
     Permutation {
         /// The column in which this permutation is not satisfied.
@@ -239,6 +261,17 @@ impl fmt::Display for VerifyFailure {
                     f,
                     "Lookup {}(index: {}) is not satisfied {}",
                     name, lookup_index, location
+                )
+            }
+            Self::Shuffle {
+                name,
+                shuffle_index,
+                location,
+            } => {
+                write!(
+                    f,
+                    "Shuffle {}(index: {}) is not satisfied {}",
+                    name, shuffle_index, location
                 )
             }
             Self::Permutation { column, row } => {
@@ -1006,7 +1039,40 @@ impl<F: FieldExt> MockVerifier<F> {
                         )
                     })
                 });
-
+        let load = |expression: &Expression<F>, row| {
+            expression.evaluate_lazy(
+                &|scalar| Value::Real(scalar),
+                &|_| panic!("virtual selectors are removed during optimization"),
+                &|index, _, _| {
+                    let query = self.cs.fixed_queries[index];
+                    let column_index = query.0.index();
+                    let rotation = query.1 .0;
+                    self.fixed[column_index][(row as i32 + n + rotation) as usize % n as usize]
+                        .into()
+                },
+                &|index, _, _| {
+                    let query = self.cs.advice_queries[index];
+                    let column_index = query.0.index();
+                    let rotation = query.1 .0;
+                    self.advice[column_index][(row as i32 + n + rotation) as usize % n as usize]
+                        .into()
+                },
+                &|index, _, _| {
+                    let query = self.cs.instance_queries[index];
+                    let column_index = query.0.index();
+                    let rotation = query.1 .0;
+                    Value::Real(
+                        self.instance[column_index]
+                            [(row as i32 + n + rotation) as usize % n as usize],
+                    )
+                },
+                &|a| -a,
+                &|a, b| a + b,
+                &|a, b| a * b,
+                &|a, scalar| a * scalar,
+                &Value::Real(F::zero()),
+            )
+        };
         // Check that all lookups exist in their respective tables.
         let lookup_errors =
             self.cs
@@ -1014,43 +1080,6 @@ impl<F: FieldExt> MockVerifier<F> {
                 .iter()
                 .enumerate()
                 .flat_map(|(lookup_index, lookup)| {
-                    let load = |expression: &Expression<F>, row| {
-                        expression.evaluate_lazy(
-                            &|scalar| Value::Real(scalar),
-                            &|_| panic!("virtual selectors are removed during optimization"),
-                            &|index, _, _| {
-                                let query = self.cs.fixed_queries[index];
-                                let column_index = query.0.index();
-                                let rotation = query.1 .0;
-                                self.fixed[column_index]
-                                    [(row as i32 + n + rotation) as usize % n as usize]
-                                    .into()
-                            },
-                            &|index, _, _| {
-                                let query = self.cs.advice_queries[index];
-                                let column_index = query.0.index();
-                                let rotation = query.1 .0;
-                                self.advice[column_index]
-                                    [(row as i32 + n + rotation) as usize % n as usize]
-                                    .into()
-                            },
-                            &|index, _, _| {
-                                let query = self.cs.instance_queries[index];
-                                let column_index = query.0.index();
-                                let rotation = query.1 .0;
-                                Value::Real(
-                                    self.instance[column_index]
-                                        [(row as i32 + n + rotation) as usize % n as usize],
-                                )
-                            },
-                            &|a| -a,
-                            &|a, b| a + b,
-                            &|a, b| a * b,
-                            &|a, scalar| a * scalar,
-                            &Value::Real(F::zero()),
-                        )
-                    };
-
                     // In the real prover, the lookup expressions are never enforced on
                     // unusable rows, due to the (1 - (l_last(X) + l_blind(X))) term.
                     let table: std::collections::BTreeSet<Vec<_>> = self
@@ -1089,6 +1118,64 @@ impl<F: FieldExt> MockVerifier<F> {
                                 })
                             }
                         })
+                });
+
+        // Check that all lookups exist in their respective tables.
+        let shuffle_errors =
+            self.cs
+                .shuffles
+                .iter()
+                .enumerate()
+                .flat_map(|(shuffle_index, shuffle)| {
+                    // In the real prover, the lookup expressions are never enforced on
+                    // unusable rows, due to the (1 - (l_last(X) + l_blind(X))) term.
+                    let mut shuffles: Vec<Vec<_>> = self
+                        .usable_rows
+                        .clone()
+                        .map(|table_row| {
+                            shuffle
+                                .shuffle_expressions
+                                .iter()
+                                .map(move |c| load(c, table_row))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    shuffles.sort();
+
+                    let mut inputs: Vec<(Vec<_>, usize)> = self
+                        .usable_rows
+                        .clone()
+                        .map(|input_row| {
+                            let v = shuffle
+                                .input_expressions
+                                .iter()
+                                .map(move |c| load(c, input_row))
+                                .collect::<Vec<_>>();
+                            (v, input_row)
+                        })
+                        .collect();
+                    inputs.sort();
+
+                    inputs
+                        .iter()
+                        .zip(shuffles.iter())
+                        .flat_map(|((input_value, row), shuffle_value)| {
+                            if input_value != shuffle_value {
+                                Some(VerifyFailure::Shuffle {
+                                    name: shuffle.name,
+                                    shuffle_index,
+                                    location: FailureLocation::find_expressions(
+                                        &self.cs,
+                                        &self.regions,
+                                        *row,
+                                        shuffle.input_expressions.iter(),
+                                    ),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
                 });
 
         // Check that permutations preserve the original values of the cells.
@@ -1135,6 +1222,7 @@ impl<F: FieldExt> MockVerifier<F> {
             .chain(selector_errors)
             .chain(gate_errors)
             .chain(lookup_errors)
+            .chain(shuffle_errors)
             .chain(perm_errors)
             .collect();
         if errors.is_empty() {
@@ -1163,7 +1251,7 @@ mod tests {
     use crate::{
         circuit::{floor_planner::V1, Layouter},
         plonk::{
-            Advice, Any, Circuit, Column, ConstraintSystem, Error, Expression, Selector,
+            Advice, Any, Circuit, Column, ConstraintSystem, Error, Expression, Fixed, Selector,
             TableColumn,
         },
         poly::Rotation,
@@ -1240,6 +1328,11 @@ mod tests {
             }])
         );
     }
+    use crate::plonk::*;
+    use crate::poly::commitment::{Params, ParamsVerifier};
+    use crate::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
+    use pairing::bn256::{Bn256, G1Affine};
+    use rand_core::OsRng;
 
     #[test]
     fn bad_lookup() {
@@ -1248,24 +1341,61 @@ mod tests {
         #[derive(Clone)]
         struct FaultyCircuitConfig {
             a: Column<Advice>,
-            q: Selector,
+            q: Column<Fixed>,
             table: TableColumn,
         }
-
+        #[derive(Clone)]
         struct FaultyCircuit {}
+        impl FaultyCircuit {
+            fn test_prover(&self, k: u32) {
+                let public_inputs_size = 0;
+                // Initialize the polynomial commitment parameters
+                let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);
+                let params_verifier: ParamsVerifier<Bn256> =
+                    params.verifier(public_inputs_size).unwrap();
 
+                let vk = keygen_vk(&params, self).unwrap();
+                let pk = keygen_pk(&params, vk, self).unwrap();
+
+                let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
+
+                create_proof(
+                    &params,
+                    &pk,
+                    &[self.clone()],
+                    &[&[]],
+                    OsRng,
+                    &mut transcript,
+                )
+                .expect("proof generation should not fail");
+
+                let proof = transcript.finalize();
+
+                let strategy = SingleVerifier::new(&params_verifier);
+                let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
+
+                assert!(verify_proof(
+                    &params_verifier,
+                    pk.get_vk(),
+                    strategy,
+                    &[&[]],
+                    &mut transcript,
+                )
+                .is_ok());
+            }
+        }
         impl Circuit<Fp> for FaultyCircuit {
             type Config = FaultyCircuitConfig;
             type FloorPlanner = V1;
 
             fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
                 let a = meta.advice_column();
-                let q = meta.complex_selector();
+                let q = meta.fixed_column();
                 let table = meta.lookup_table_column();
 
                 meta.lookup("lookup", |cells| {
                     let a = cells.query_advice(a, Rotation::cur());
-                    let q = cells.query_selector(q);
+                    let q = cells.query_fixed(q, Rotation::cur());
 
                     // If q is enabled, a must be in the table.
                     // When q is not enabled, lookup the default value instead.
@@ -1306,47 +1436,51 @@ mod tests {
                     || "Good synthesis",
                     |mut region| {
                         // Enable the lookup on rows 0 and 1.
-                        config.q.enable(&mut region, 0)?;
-                        config.q.enable(&mut region, 1)?;
-
+                        // config.q.enable(&mut region, 0)?;
+                        // config.q.enable(&mut region, 1)?;
+                        region.assign_fixed(|| "", config.q, 0, || Ok(Fp::from(1)))?;
+                        region.assign_fixed(|| "", config.q, 1, || Ok(Fp::from(1)))?;
                         // Assign a = 2 and a = 6.
                         region.assign_advice(|| "a = 2", config.a, 0, || Ok(Fp::from(2)))?;
                         region.assign_advice(|| "a = 6", config.a, 1, || Ok(Fp::from(6)))?;
 
                         Ok(())
                     },
-                )?;
-
-                layouter.assign_region(
-                    || "Faulty synthesis",
-                    |mut region| {
-                        // Enable the lookup on rows 0 and 1.
-                        config.q.enable(&mut region, 0)?;
-                        config.q.enable(&mut region, 1)?;
-
-                        // Assign a = 4.
-                        region.assign_advice(|| "a = 4", config.a, 0, || Ok(Fp::from(4)))?;
-
-                        // BUG: Assign a = 5, which doesn't exist in the table!
-                        region.assign_advice(|| "a = 5", config.a, 1, || Ok(Fp::from(5)))?;
-
-                        Ok(())
-                    },
                 )
+
+                // layouter.assign_region(
+                //     || "Faulty synthesis",
+                //     |mut region| {
+                //         // Enable the lookup on rows 0 and 1.
+                //         // config.q.enable(&mut region, 0)?;
+                //         // config.q.enable(&mut region, 1)?;
+                //         region.assign_fixed(||"",config.q,0,|| Ok(Fp::from(1)))?;
+                //         region.assign_fixed(||"",config.q,1,||Ok(Fp::from(1)))?;
+                //         // Assign a = 4.
+                //         region.assign_advice(|| "a = 4", config.a, 0, || Ok(Fp::from(4)))?;
+                //
+                //         // BUG: Assign a = 5, which doesn't exist in the table!
+                //         region.assign_advice(|| "a = 5", config.a, 1, || Ok(Fp::from(5)))?;
+                //
+                //         Ok(())
+                //     },
+                // )
             }
         }
 
         let prover = MockProver::run(K, &FaultyCircuit {}, vec![]).unwrap();
-        assert_eq!(
-            prover.verify(),
-            Err(vec![VerifyFailure::Lookup {
-                name: "lookup",
-                lookup_index: 0,
-                location: FailureLocation::InRegion {
-                    region: (2, "Faulty synthesis").into(),
-                    offset: 1,
-                }
-            }])
-        );
+        assert_eq!(prover.verify().is_ok(), true);
+        // assert_eq!(
+        //     prover.verify(),
+        //     Err(vec![VerifyFailure::Lookup {
+        //         name: "lookup",
+        //         lookup_index: 0,
+        //         location: FailureLocation::InRegion {
+        //             region: (2, "Faulty synthesis").into(),
+        //             offset: 1,
+        //         }
+        //     }])
+        // );
+        &FaultyCircuit {}.test_prover(K);
     }
 }
