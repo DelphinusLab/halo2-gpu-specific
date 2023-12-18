@@ -3,7 +3,8 @@ use crate::multicore;
 use crate::plonk::evaluation_gpu::{LookupProveExpression, ProveExpression};
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
-use crate::plonk::{lookup, permutation, Any, ProvingKey};
+use crate::plonk::shuffle::prover::Committed as ShuffleCommitted;
+use crate::plonk::{lookup, permutation, shuffle, Any, ProvingKey};
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -258,9 +259,16 @@ pub struct Evaluator<C: CurveAffine> {
     pub value_parts: Vec<ValueSource>,
     /// Lookup results
     pub lookup_results: Vec<Calculation>,
+    /// Shuffle results
+    pub shuffle_results: Vec<Calculation>,
     /// GPU
     pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
     pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
+    //[(input,shuffle)]
+    pub gpu_shuffle_expr: Vec<(
+        LookupProveExpression<C::ScalarExt>,
+        LookupProveExpression<C::ScalarExt>,
+    )>,
     pub unit_ref_count: Vec<(usize, u32)>,
 }
 
@@ -312,6 +320,7 @@ impl<C: CurveAffine> Evaluator<C> {
             debug!("sorted ref cnt is {:?}", ev.unit_ref_count);
             debug!("r deep is {}", e.get_r_deep());
         }
+        ev.gpu_gates_expr = es;
 
         // Lookups
         for lookup in cs.lookups.iter() {
@@ -360,8 +369,56 @@ impl<C: CurveAffine> Evaluator<C> {
                 Box::new(right_gamma),
             ));
         }
+        // let mut ev = Evaluator::default();
+        // println!("shufl.len={}",cs.shuffles.len());
+        // Shuffles
+        for shuffle in cs.shuffles.iter() {
+            let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>| {
+                let parts = expressions
+                    .iter()
+                    .map(|expr| ev.add_expression(expr))
+                    .collect::<Vec<_>>();
+                let mut lc = parts[0];
+                for part in parts.iter().skip(1) {
+                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part));
+                }
+                lc
+            };
+            // Input coset
+            let input_coset = evaluate_lc(&mut ev, &shuffle.input_expressions);
+            // shuffle coset
+            let shuffle_coset = evaluate_lc(&mut ev, &shuffle.shuffle_expressions);
+            // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
+            ev.shuffle_results.push(Calculation::AddGamma(input_coset));
+            ev.shuffle_results
+                .push(Calculation::AddGamma(shuffle_coset));
+        }
 
-        ev.gpu_gates_expr = es;
+        // Lookups in GPU
+        for shuffle in cs.shuffles.iter() {
+            let evaluate_lc = |expressions: &Vec<Expression<_>>| {
+                let parts = expressions
+                    .iter()
+                    .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
+                    .collect::<Vec<_>>();
+                let mut lc = parts[0].clone();
+                for part in parts.into_iter().skip(1) {
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
+                }
+                lc
+            };
+            // Input coset
+            let compressed_input_coset = evaluate_lc(&shuffle.input_expressions);
+            // shuffle coset
+            let compressed_shuffle_coset = evaluate_lc(&shuffle.shuffle_expressions);
+            // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
+
+            ev.gpu_shuffle_expr.push((
+                LookupProveExpression::AddGamma(Box::new(compressed_input_coset)),
+                LookupProveExpression::AddGamma(Box::new(compressed_shuffle_coset)),
+            ));
+        }
+
         ev
     }
 
@@ -520,7 +577,8 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Evaluate h poly
-    #[cfg(not(feature = "cuda"))]
+    // #[cfg(not(feature = "cuda"))]
+    #[cfg(feature = "gwc")]
     pub(in crate::plonk) fn evaluate_h(
         &self,
         pk: &ProvingKey<C>,
@@ -531,6 +589,7 @@ impl<C: CurveAffine> Evaluator<C> {
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
         lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
         let domain = &pk.vk.domain;
@@ -539,6 +598,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let fixed = &pk.fixed_cosets[..];
         let extended_omega = domain.get_extended_omega();
         let num_lookups = pk.vk.cs.lookups.len();
+        let num_shuffles = pk.vk.cs.shuffles.len();
         let isize = size as i32;
         let one = C::ScalarExt::one();
         let l0 = &pk.l0;
@@ -548,15 +608,19 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let mut values = domain.empty_extended();
         let mut lookup_values = vec![C::Scalar::zero(); size * num_lookups];
-
+        let mut shuffle_input_values = vec![C::Scalar::zero(); size * num_shuffles];
+        let mut shuffle_shuffle_values = vec![C::Scalar::zero(); size * num_shuffles];
         // Core expression evaluations
         let num_threads = multicore::current_num_threads();
         let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
+        let mut shuffle_input_box = ThreadBox::wrap(&mut shuffle_input_values);
+        let mut shuffle_box = ThreadBox::wrap(&mut shuffle_shuffle_values);
 
-        for (((advice, instance), lookups), permutation) in advice
+        for ((((advice, instance), lookups), shuffles), permutation) in advice
             .iter()
             .zip(instance.iter())
             .zip(lookups.iter())
+            .zip(shuffles.iter())
             .zip(permutations.iter())
         {
             let timer = ark_std::start_timer!(|| "expressions");
@@ -566,6 +630,9 @@ impl<C: CurveAffine> Evaluator<C> {
                     let start = thread_idx * chunk_size;
                     scope.spawn(move |_| {
                         let table_values = table_values_box.unwrap();
+                        let shuffle_input_values = shuffle_input_box.unwrap();
+                        let shuffle_shuffle_values = shuffle_box.unwrap();
+
                         let mut rotations = vec![0usize; self.rotations.len()];
                         let mut intermediates: Vec<C::ScalarExt> =
                             vec![C::ScalarExt::zero(); self.calculations.len()];
@@ -618,6 +685,38 @@ impl<C: CurveAffine> Evaluator<C> {
                                     &gamma,
                                     &theta,
                                 );
+                            }
+
+                            // Values required for the shuffles
+                            for (t, shuffle_result) in self.shuffle_results.iter().enumerate() {
+                                // println!("shuffle_results={:?},t={},idx={}", shuffle_result,t,idx);
+                                if t % 2 == 0 {
+                                    shuffle_input_values[t / 2 * size + idx] = shuffle_result
+                                        .evaluate(
+                                            &rotations,
+                                            &self.constants,
+                                            &intermediates,
+                                            fixed,
+                                            advice,
+                                            instance,
+                                            &beta,
+                                            &gamma,
+                                            &theta,
+                                        );
+                                } else {
+                                    shuffle_shuffle_values[t / 2 * size + idx] = shuffle_result
+                                        .evaluate(
+                                            &rotations,
+                                            &self.constants,
+                                            &intermediates,
+                                            fixed,
+                                            advice,
+                                            instance,
+                                            &beta,
+                                            &gamma,
+                                            &theta,
+                                        );
+                                }
                             }
                         }
                     });
@@ -772,6 +871,47 @@ impl<C: CurveAffine> Evaluator<C> {
             }
 
             end_timer!(timer);
+
+            let timer = ark_std::start_timer!(|| "eval_h_shuffles");
+            if true {
+                for (shuffle_idx, shuffle) in shuffles.iter().enumerate() {
+                    // Lookup constraints
+                    let input_coset =
+                        &shuffle_input_values[shuffle_idx * size..(shuffle_idx + 1) * size];
+                    let shuffle_coset =
+                        &shuffle_shuffle_values[shuffle_idx * size..(shuffle_idx + 1) * size];
+                    // Polynomials required for this lookup.
+                    // Calculated here so these only have to be kept in memory for the short time
+                    // they are actually needed.
+                    let product_coset =
+                        pk.vk.domain.coeff_to_extended(shuffle.product_poly.clone());
+                    parallelize(&mut values, |values, start| {
+                        for (i, value) in values.iter_mut().enumerate() {
+                            let idx = start + i;
+
+                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+
+                            // l_0(X) * (1 - z(X)) = 0
+                            *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
+                            // l_last(X) * (z(X)^2 - z(X)) = 0
+                            *value = *value * y
+                                + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
+                                    * l_last[idx]);
+                            // (1 - (l_last(X) + l_blind(X))) * (
+                            //   z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+                            //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
+                            // ) = 0
+
+                            *value = *value * y
+                                + ((product_coset[r_next] * (shuffle_coset[idx])
+                                    - product_coset[idx] * input_coset[idx])
+                                    * l_active_row[idx]);
+                        }
+                    });
+                }
+            }
+
+            end_timer!(timer);
         }
 
         values
@@ -788,6 +928,7 @@ impl<C: CurveAffine> Evaluator<C> {
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
         lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
         use crate::arithmetic::acquire_gpu;
@@ -1207,6 +1348,169 @@ impl<C: CurveAffine> Evaluator<C> {
                 .iter()
                 .fold(values, |acc, (x, len)| {
                     acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
+                });
+        }
+
+        end_timer!(timer);
+
+        let timer = ark_std::start_timer!(|| "eval_h_shuffles");
+        let shuffles = &shuffles[0];
+
+        let n_gpu = *crate::plonk::N_GPU;
+        let group_expr_len = (shuffles.len() + n_gpu - 1) / n_gpu;
+
+        if group_expr_len > 0 {
+            values = shuffles
+                .par_chunks(group_expr_len)
+                .enumerate()
+                .map(|(group_idx, shuffles)| {
+                    // combine fft with eval_h_lookups:
+                    // fft code: from ec-gpu lib.
+                    let mut buffer = vec![];
+                    buffer.resize(domain.extended_len(), C::Scalar::zero());
+
+                    let gpu_idx = acquire_gpu();
+                    let devices = Device::all();
+                    let device = devices[gpu_idx % devices.len()];
+
+                    let programs = vec![ec_gpu_gen::program!(device).unwrap()];
+                    let kern =
+                        FftKernel::<Fr>::create(programs).expect("Cannot initialize kernel!");
+
+                    let closures =
+                        ec_gpu_gen::rust_gpu_tools::program_closures!(|program,
+                                                                       args: (
+                            &mut [Fr],
+                            usize,
+                            &[ShuffleCommitted<C>]
+                        )|
+                         -> ec_gpu_gen::EcResult<
+                            (),
+                        > {
+                            let (input, group_idx, shuffles) = args;
+                            macro_rules! create_buffer_from {
+                                ($x:ident, $y:expr) => {
+                                    let $x = program.create_buffer_from_slice($y)?;
+                                };
+                            }
+
+                            let y_beta_gamma = vec![y, beta, gamma];
+
+                            let values_buf =
+                                unsafe { program.create_buffer(domain.extended_len())? };
+                            create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
+
+                            let mut helper = gen_do_extended_fft(pk, program)?;
+                            let mut allocator = LinkedList::new();
+
+                            //todo reuse with lookups?
+                            let l0_buf =
+                                do_extended_fft(pk, program, &l0, &mut allocator, &mut helper)?;
+                            let l_last_buf =
+                                do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
+                            create_buffer_from!(l_active_row_buf, &l_active_row[..]);
+
+                            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
+                                .unwrap_or("5".to_owned());
+                            let cache_size = usize::from_str_radix(&cache_size, 10)
+                                .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+                            let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+                            for (shuffle_idx, shuffle) in shuffles.iter().enumerate() {
+                                let mut ys = vec![C::ScalarExt::one(), y];
+                                let input_coset_buf = pk.ev.gpu_shuffle_expr
+                                    [shuffles_idx + group_idx * group_expr_len]
+                                    .0
+                                    ._eval_gpu(
+                                        pk,
+                                        program,
+                                        //todo: for multi circuit, if  need index advice_poly?
+                                        &advice_poly[0],
+                                        &instance_poly[0],
+                                        &mut ys,
+                                        beta,
+                                        theta,
+                                        gamma,
+                                        &mut unit_cache,
+                                        &mut allocator,
+                                        &mut helper,
+                                    )
+                                    .unwrap()
+                                    .0;
+                                //todo check ys more
+                                let mut ys = vec![C::ScalarExt::one(), y];
+                                let shuffle_coset_buf = pk.ev.gpu_shuffle_expr
+                                    [shuffles_idx + group_idx * group_expr_len]
+                                    .1
+                                    ._eval_gpu(
+                                        pk,
+                                        program,
+                                        &advice_poly[0],
+                                        &instance_poly[0],
+                                        &mut ys,
+                                        beta,
+                                        theta,
+                                        gamma,
+                                        &mut unit_cache,
+                                        &mut allocator,
+                                        &mut helper,
+                                    )
+                                    .unwrap()
+                                    .0;
+
+                                let product_coset_buf = do_extended_fft(
+                                    pk,
+                                    program,
+                                    &shuffle.product_poly,
+                                    &mut allocator,
+                                    &mut helper,
+                                )?;
+
+                                let local_work_size = 128;
+                                let global_work_size = size / local_work_size;
+                                let kernel_name = format!("{}_eval_h_shuffles", "Bn256_Fr");
+                                let kernel = program.create_kernel(
+                                    &kernel_name,
+                                    global_work_size as usize,
+                                    local_work_size as usize,
+                                )?;
+                                kernel
+                                    .arg(&values_buf)
+                                    .arg(&input_coset_buf)
+                                    .arg(&shuffle_coset_buf)
+                                    .arg(&product_coset_buf)
+                                    .arg(&l0_buf)
+                                    .arg(&l_last_buf)
+                                    .arg(&l_active_row_buf)
+                                    .arg(&y_beta_gamma_buf)
+                                    .arg(&(rot_scale as u32))
+                                    .arg(&(size as u32))
+                                    .run()?;
+                            }
+
+                            program.read_into_buffer(&values_buf, input)?;
+                            Ok(())
+                        });
+
+                    let mut tmp_value = pk.vk.domain.empty_extended();
+
+                    kern.kernels[0]
+                        .program
+                        .run(closures, unsafe {
+                            (
+                                std::mem::transmute::<_, &mut [Fr]>(&mut tmp_value.values[..]),
+                                group_idx,
+                                shuffles,
+                            )
+                        })
+                        .unwrap();
+                    release_gpu(gpu_idx);
+                    (tmp_value, shuffles.len())
+                })
+                .collect::<Vec<_>>()
+                .iter()
+                .fold(values, |acc, (x, len)| {
+                    //3 means 3 times multiple y
+                    acc * y.pow_vartime([*len as u64 * 3, 0, 0, 0]) + x
                 });
         }
 
