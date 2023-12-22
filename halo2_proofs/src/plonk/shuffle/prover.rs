@@ -81,23 +81,12 @@ impl<F: FieldExt> Argument<F> {
                 *theta,
             ))
         };
-        println!(
-            "input_expressions: {:?},len={}",
-            self.input_expressions,
-            self.input_expressions.len()
-        );
-        println!(
-            "shuffle_expressions={:?},len={}",
-            self.shuffle_expressions,
-            self.shuffle_expressions.len()
-        );
+
         // Get values of input expressions involved in the lookup and compress them
         let input_expression = compress_expressions(&self.input_expressions);
 
         // Get values of table expressions involved in the lookup and compress them
         let shuffle_expression = compress_expressions(&self.shuffle_expressions);
-        println!("input_expression.val: {:?}", input_expression);
-        println!("shuffle_expression.val={:?}", shuffle_expression);
         Ok(Compressed {
             input_expression,
             shuffle_expression,
@@ -128,8 +117,7 @@ impl<C: CurveAffine> Compressed<C> {
         // s_j(X) is the jth table expression in this lookup,
         // and i is the ith row of the expression.
         let mut shuffle_product = vec![C::Scalar::zero(); params.n as usize];
-        // println!("gamma: {:?}",gamma);
-        #[cfg(not(feature = "cuda"))]
+         // #[cfg(not(feature = "cuda"))]
         {
             // Denominator uses the permuted input expression and permuted table expression
             // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
@@ -180,7 +168,6 @@ impl<C: CurveAffine> Compressed<C> {
             // be a boolean (and ideally 1, else soundness is broken)
             .take(params.n as usize - blinding_factors)
             .collect::<Vec<_>>();
-        println!("z.len={}", z.len());
 
         #[cfg(feature = "sanity-checks")]
         // This test works only with intermediate representations in this method.
@@ -188,10 +175,8 @@ impl<C: CurveAffine> Compressed<C> {
         {
             // While in Lagrange basis, check that product is correctly constructed
             let u = (params.n as usize) - (blinding_factors + 1);
-            println!("n={},blinding={},z={:?}", params.n, blinding_factors, z);
             // l_0(X) * (1 - z(X)) = 0
             assert_eq!(z[0], C::Scalar::one());
-
             // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
             // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             for i in 0..u {

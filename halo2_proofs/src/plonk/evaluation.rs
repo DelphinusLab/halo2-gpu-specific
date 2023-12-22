@@ -390,8 +390,7 @@ impl<C: CurveAffine> Evaluator<C> {
             let shuffle_coset = evaluate_lc(&mut ev, &shuffle.shuffle_expressions);
             // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
             ev.shuffle_results.push(Calculation::AddGamma(input_coset));
-            ev.shuffle_results
-                .push(Calculation::AddGamma(shuffle_coset));
+            ev.shuffle_results.push(Calculation::AddGamma(shuffle_coset));
         }
 
         // Lookups in GPU
@@ -577,8 +576,7 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Evaluate h poly
-    // #[cfg(not(feature = "cuda"))]
-    #[cfg(feature = "gwc")]
+    #[cfg(not(feature = "cuda"))]
     pub(in crate::plonk) fn evaluate_h(
         &self,
         pk: &ProvingKey<C>,
@@ -897,11 +895,11 @@ impl<C: CurveAffine> Evaluator<C> {
                             *value = *value * y
                                 + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
                                     * l_last[idx]);
+
                             // (1 - (l_last(X) + l_blind(X))) * (
                             //   z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
                             //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
                             // ) = 0
-
                             *value = *value * y
                                 + ((product_coset[r_next] * (shuffle_coset[idx])
                                     - product_coset[idx] * input_coset[idx])
@@ -1395,7 +1393,6 @@ impl<C: CurveAffine> Evaluator<C> {
                             }
 
                             let y_beta_gamma = vec![y, beta, gamma];
-
                             let values_buf =
                                 unsafe { program.create_buffer(domain.extended_len())? };
                             create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
@@ -1418,7 +1415,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             for (shuffle_idx, shuffle) in shuffles.iter().enumerate() {
                                 let mut ys = vec![C::ScalarExt::one(), y];
                                 let input_coset_buf = pk.ev.gpu_shuffle_expr
-                                    [shuffles_idx + group_idx * group_expr_len]
+                                    [shuffle_idx + group_idx * group_expr_len]
                                     .0
                                     ._eval_gpu(
                                         pk,
@@ -1436,10 +1433,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )
                                     .unwrap()
                                     .0;
-                                //todo check ys more
-                                let mut ys = vec![C::ScalarExt::one(), y];
                                 let shuffle_coset_buf = pk.ev.gpu_shuffle_expr
-                                    [shuffles_idx + group_idx * group_expr_len]
+                                    [shuffle_idx + group_idx * group_expr_len]
                                     .1
                                     ._eval_gpu(
                                         pk,
@@ -1456,7 +1451,6 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )
                                     .unwrap()
                                     .0;
-
                                 let product_coset_buf = do_extended_fft(
                                     pk,
                                     program,
@@ -1475,8 +1469,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                 )?;
                                 kernel
                                     .arg(&values_buf)
-                                    .arg(&input_coset_buf)
-                                    .arg(&shuffle_coset_buf)
+                                    .arg(input_coset_buf.as_ref())
+                                    .arg(shuffle_coset_buf.as_ref())
                                     .arg(&product_coset_buf)
                                     .arg(&l0_buf)
                                     .arg(&l_last_buf)

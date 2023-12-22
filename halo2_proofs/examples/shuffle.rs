@@ -20,6 +20,7 @@ struct MyConfig {
     shuffle: Column<Advice>,
     input_q: Column<Advice>,
     s: Column<Fixed>,
+    s2: Column<Fixed>,
 }
 
 /// The full circuit implementation.
@@ -55,6 +56,25 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
             meta.advice_column(),
         ];
         let select = meta.fixed_column();
+        let select0 = meta.fixed_column();
+        let select2 = meta.fixed_column();
+
+        meta.create_gate("sum equals to instance", |meta| {
+            let sel = meta.query_fixed(select0, Rotation::cur());
+            let a = meta.query_advice(advice[0], Rotation(0));
+            let b = meta.query_advice(advice[1], Rotation(0));
+            vec![sel * (a - b)]
+        });
+
+        // meta.lookup_any("a to b lookup", |meta| {
+        //     let a = meta.query_advice(advice[0], Rotation(0));
+        //     let b = meta.query_advice(advice[1], Rotation(0));
+        //     vec![(a, b)]
+        // });
+        //
+        //
+        // meta.enable_equality(advice[0]);
+        // meta.enable_equality(advice[1]);
 
         meta.shuffle("shuffle1", |cell| {
             let exp_a = cell.query_advice(advice[0], Rotation::cur());
@@ -62,7 +82,19 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
             let q = cell.query_fixed(select, Rotation::cur());
             let exp_c = cell.query_advice(advice[2], Rotation::cur());
             // vec![(exp_a, exp_b),(exp_c,q)]
-            vec![(q * exp_a, exp_b)]
+            vec![(q* exp_a, exp_b)]
+            // vec![(exp_a, exp_b)]
+            // vec![(exp_a, exp_b)]
+        });
+
+        meta.shuffle("shuffle2", |cell| {
+            let exp_a = cell.query_advice(advice[0], Rotation::cur());
+            // let exp_b = cell.query_advice(advice[1], Rotation::cur());
+            let q = cell.query_fixed(select2, Rotation::cur());
+            let exp_c = cell.query_advice(advice[2], Rotation::cur());
+            // vec![(exp_a, exp_b),(exp_c,q)]
+            vec![(q* exp_a, exp_c)]
+            // vec![(exp_a, exp_b)]
             // vec![(exp_a, exp_b)]
         });
 
@@ -71,6 +103,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
             shuffle: advice[1],
             input_q: advice[2],
             s: select,
+            s2:select2,
         }
     }
 
@@ -83,7 +116,8 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         layouter.assign_region(
             || "sys",
             |mut region: Region<'_, F>| {
-                for i in 0..2 {
+                let end = 10;
+                for i in 0..end {
                     // region.enable_selector(||"sel",&config.s,i);
                     // config.s.enable(&mut region, i);
                     // region.assign_fixed(||"",config.s,i,||Ok(F::from(1).into()))?;
@@ -104,11 +138,27 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
                         || "shuffle",
                         config.shuffle,
                         i,
-                        || Ok(F::from(2 - i as u64).into()),
+                        || Ok(F::from((end - i) as u64).into()),
                     )?;
+                    region.assign_fixed(|| "", config.s, i, || Ok(F::from(1).into()))?;
                 }
-                region.assign_fixed(|| "", config.s, 0, || Ok(F::from(1).into()))?;
-                region.assign_fixed(|| "", config.s, 1, || Ok(F::from(1).into()))?;
+                // region.assign_fixed(|| "", config.s, 0, || Ok(F::from(1).into()))?;
+                // region.assign_fixed(|| "", config.s, 1, || Ok(F::from(1).into()))?;
+                for i in end..end+10{
+                    region.assign_advice(
+                        || "input",
+                        config.input,
+                        i,
+                        || Ok(F::from((i as u64 + 1)).into()),
+                    )?;
+                    region.assign_advice(
+                        || "shuffle",
+                        config.input_q,
+                        i,
+                        || Ok(F::from( i as u64 +1).into()),
+                    )?;
+                    region.assign_fixed(|| "", config.s2, i, || Ok(F::from(1).into()))?;
+                }
                 Ok(())
             },
         )
@@ -154,7 +204,7 @@ fn test_prover(K: u32, circuit: MyCircuit<Fp>) {
 fn main() {
     // The number of rows in our circuit cannot exceed 2^k. Since our example
     // circuit is very small, we can pick a very small value here.
-    let k = 3;
+    let k = 10;
 
     // Instantiate the circuit with the private inputs.
 
