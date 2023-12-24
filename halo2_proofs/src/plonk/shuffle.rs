@@ -26,19 +26,8 @@ impl<F: Field> Argument<F> {
 
     pub(crate) fn required_degree(&self) -> usize {
         assert_eq!(self.input_expressions.len(), self.shuffle_expressions.len());
-
-        //
-        // The "last" value in the permutation poly should be a boolean, for
-        // completeness and soundness.
-        // degree 3:
-        // l_last(X) * (z(X)^2 - z(X)) = 0
-        //
-        // Enable the permutation argument for only the rows involved.
         // degree 2+input or 2+shuffle degree:
-        // (1 - (l_last(X) + l_blind(X))) * (
-        //   z(\omega X) (s(X) + \gamma) - z(X) (a(X) + \gamma)
-        // ) = 0
-
+        // (1 - (l_last + l_blind)) (z(\omega X) (s(X) + \gamma) - z(X) (a(X) + \gamma))
         let mut input_degree = 1;
         for expr in self.input_expressions.iter() {
             input_degree = std::cmp::max(input_degree, expr.degree());

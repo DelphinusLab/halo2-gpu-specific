@@ -390,7 +390,8 @@ impl<C: CurveAffine> Evaluator<C> {
             let shuffle_coset = evaluate_lc(&mut ev, &shuffle.shuffle_expressions);
             // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
             ev.shuffle_results.push(Calculation::AddGamma(input_coset));
-            ev.shuffle_results.push(Calculation::AddGamma(shuffle_coset));
+            ev.shuffle_results
+                .push(Calculation::AddGamma(shuffle_coset));
         }
 
         // Lookups in GPU

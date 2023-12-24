@@ -70,8 +70,8 @@ impl<C: CurveAffine> Evaluated<C> {
     ) -> impl Iterator<Item = C::Scalar> + 'a {
         let active_rows = C::Scalar::one() - (l_last + l_blind);
         let product_expression = || {
-            // z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \beta)
-            // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
+            // z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+            // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \gamma)
             let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
                 expressions
                     .iter()
@@ -94,7 +94,7 @@ impl<C: CurveAffine> Evaluated<C> {
                 * &(compress_expressions(&argument.shuffle_expressions) + &*gamma);
             let right =
                 self.product_eval * &(compress_expressions(&argument.input_expressions) + &*gamma);
-             (left - &right) * &active_rows
+            (left - &right) * &active_rows
         };
 
         std::iter::empty()
@@ -107,10 +107,7 @@ impl<C: CurveAffine> Evaluated<C> {
                 Some(l_last * &(self.product_eval.square() - &self.product_eval)),
             )
             .chain(
-                // (1 - (l_last(X) + l_blind(X))) * (
-                //   z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \beta)
-                //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
-                // ) = 0
+                // (1 - (l_last(X) + l_blind(X))) * ( z(\omega X) (s(X) + \gamma) - z(X) (a(X) + \gamma))
                 Some(product_expression()),
             )
     }

@@ -1,10 +1,10 @@
+use group::ff::BatchInvert;
 use halo2_proofs::arithmetic::FieldExt;
 use halo2_proofs::circuit::{Cell, Chip, Layouter, Region, SimpleFloorPlanner};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use pairing::bn256::Fr as Fp;
 use pairing::bn256::{Bn256, G1Affine};
-
 use std::marker::PhantomData;
 
 use halo2_proofs::poly::{
@@ -12,36 +12,132 @@ use halo2_proofs::poly::{
     Rotation,
 };
 use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
-use rand_core::OsRng;
+use rand_core::{OsRng, RngCore};
+
+fn rand_2d_array<F: FieldExt, R: RngCore, const W: usize, const H: usize>(
+    rng: &mut R,
+) -> [[F; H]; W] {
+    [(); W].map(|_| [(); H].map(|_| F::random(&mut *rng)))
+}
+
+fn shuffled<F: FieldExt, R: RngCore, const W: usize, const H: usize>(
+    original: [[F; H]; W],
+    rng: &mut R,
+) -> [[F; H]; W] {
+    let mut shuffled = original;
+
+    for row in (1..H).rev() {
+        let rand_row = (rng.next_u32() as usize) % row;
+        for column in shuffled.iter_mut() {
+            column.swap(row, rand_row);
+        }
+    }
+
+    shuffled
+}
 
 #[derive(Clone)]
-struct MyConfig {
-    input: Column<Advice>,
-    shuffle: Column<Advice>,
-    input_q: Column<Advice>,
-    s: Column<Fixed>,
-    s2: Column<Fixed>,
+struct MyConfig<const W: usize, const T: usize, const G: usize> {
+    q_shuffle: Column<Fixed>,
+    q_first: Column<Fixed>,
+    q_last: Column<Fixed>,
+    original: [Column<Advice>; W],
+    shuffled: [Column<Advice>; W],
+    z: Column<Advice>,
 }
 
-/// The full circuit implementation.
-///
-/// In this struct we store the private input variables. We use `Option<F>` because
-/// they won't have any value during key generation. During proving, if any of these
-/// were `None` we would get an error.
-#[derive(Default, Clone, Debug)]
-struct MyCircuit<F: FieldExt> {
-    _a: PhantomData<F>,
-}
+impl<const W: usize, const T: usize, const G: usize> MyConfig<W, T, G> {
+    fn configure<F: FieldExt>(meta: &mut ConstraintSystem<F>) -> Self {
+        let [q_shuffle, q_first, q_last] = [(); 3].map(|_| meta.fixed_column());
+        let original = [(); W].map(|_| meta.advice_column());
+        let shuffled = [(); W].map(|_| meta.advice_column());
+        let theta = Expression::Constant(F::from(T as u64));
+        let gamma = Expression::Constant(F::from(G as u64));
+        let z = meta.advice_column();
 
-impl<F: FieldExt> MyCircuit<F> {
-    fn construct() -> Self {
-        return Self { _a: PhantomData };
+        meta.create_gate("z should start with 1", |meta| {
+            let q_first = meta.query_fixed(q_first, Rotation::cur());
+            let z = meta.query_advice(z, Rotation::cur());
+            let one = Expression::Constant(F::one());
+
+            vec![q_first * (one - z)]
+        });
+
+        meta.create_gate("z should end with 1", |meta| {
+            let one = Expression::Constant(F::one());
+            let q_last = meta.query_fixed(q_last, Rotation::cur());
+            let z = meta.query_advice(z, Rotation::cur());
+            vec![q_last * (one - z)]
+        });
+
+        meta.create_gate("z should have valid transition", |meta| {
+            let q_shuffle = meta.query_fixed(q_shuffle, Rotation::cur());
+            let original = original.map(|advice| meta.query_advice(advice, Rotation::cur()));
+            let shuffled = shuffled.map(|advice| meta.query_advice(advice, Rotation::cur()));
+            let z_cur = meta.query_advice(z, Rotation::cur());
+            let z_next = meta.query_advice(z, Rotation::next());
+
+            // Compress
+            let original = original
+                .iter()
+                .cloned()
+                .reduce(|acc, a| acc * theta.clone() + a)
+                .unwrap();
+            let shuffled = shuffled
+                .iter()
+                .cloned()
+                .reduce(|acc, a| acc * theta.clone() + a)
+                .unwrap();
+
+            vec![q_shuffle * (z_cur * (original + gamma.clone()) - z_next * (shuffled + gamma))]
+        });
+
+        Self {
+            q_shuffle,
+            q_first,
+            q_last,
+            original,
+            shuffled,
+            z,
+        }
     }
 }
 
-impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
-    // Since we are using a single chip for everything, we can just reuse its config.
-    type Config = MyConfig;
+#[derive(Clone)]
+struct MyCircuit<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> {
+    original: [[F; H]; W],
+    shuffled: [[F; H]; W],
+}
+
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Default
+for MyCircuit<F, W, H, T, G>
+{
+    fn default() -> Self {
+        Self {
+            original: [[F::zero(); H]; W],
+            shuffled: [[F::zero(); H]; W],
+        }
+    }
+}
+
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize>
+MyCircuit<F, W, H, T, G>
+{
+    fn rand<R: RngCore>(rng: &mut R) -> Self {
+        let original = rand_2d_array::<F, _, W, H>(rng);
+        let shuffled = shuffled(original, rng);
+
+        Self {
+            original: original,
+            shuffled: shuffled,
+        }
+    }
+}
+
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Circuit<F>
+for MyCircuit<F, W, H, T, G>
+{
+    type Config = MyConfig<W, T, G>;
     type FloorPlanner = SimpleFloorPlanner;
 
     fn without_witnesses(&self) -> Self {
@@ -49,62 +145,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        // We create the two advice columns that FieldChip uses for I/O.
-        let advice = [
-            meta.advice_column(),
-            meta.advice_column(),
-            meta.advice_column(),
-        ];
-        let select = meta.fixed_column();
-        let select0 = meta.fixed_column();
-        let select2 = meta.fixed_column();
-
-        meta.create_gate("sum equals to instance", |meta| {
-            let sel = meta.query_fixed(select0, Rotation::cur());
-            let a = meta.query_advice(advice[0], Rotation(0));
-            let b = meta.query_advice(advice[1], Rotation(0));
-            vec![sel * (a - b)]
-        });
-
-        // meta.lookup_any("a to b lookup", |meta| {
-        //     let a = meta.query_advice(advice[0], Rotation(0));
-        //     let b = meta.query_advice(advice[1], Rotation(0));
-        //     vec![(a, b)]
-        // });
-        //
-        //
-        // meta.enable_equality(advice[0]);
-        // meta.enable_equality(advice[1]);
-
-        meta.shuffle("shuffle1", |cell| {
-            let exp_a = cell.query_advice(advice[0], Rotation::cur());
-            let exp_b = cell.query_advice(advice[1], Rotation::cur());
-            let q = cell.query_fixed(select, Rotation::cur());
-            let exp_c = cell.query_advice(advice[2], Rotation::cur());
-            // vec![(exp_a, exp_b),(exp_c,q)]
-            vec![(q* exp_a, exp_b)]
-            // vec![(exp_a, exp_b)]
-            // vec![(exp_a, exp_b)]
-        });
-
-        meta.shuffle("shuffle2", |cell| {
-            let exp_a = cell.query_advice(advice[0], Rotation::cur());
-            // let exp_b = cell.query_advice(advice[1], Rotation::cur());
-            let q = cell.query_fixed(select2, Rotation::cur());
-            let exp_c = cell.query_advice(advice[2], Rotation::cur());
-            // vec![(exp_a, exp_b),(exp_c,q)]
-            vec![(q* exp_a, exp_c)]
-            // vec![(exp_a, exp_b)]
-            // vec![(exp_a, exp_b)]
-        });
-
-        Self::Config {
-            input: advice[0],
-            shuffle: advice[1],
-            input_q: advice[2],
-            s: select,
-            s2:select2,
-        }
+        MyConfig::configure(meta)
     }
 
     fn synthesize(
@@ -112,60 +153,104 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         config: Self::Config,
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
-        // layouter.enabled()
+        let theta = F::from(T as u64);
+        let gamma = F::from(G as u64);
+
         layouter.assign_region(
-            || "sys",
-            |mut region: Region<'_, F>| {
-                let end = 10;
-                for i in 0..end {
-                    // region.enable_selector(||"sel",&config.s,i);
-                    // config.s.enable(&mut region, i);
-                    // region.assign_fixed(||"",config.s,i,||Ok(F::from(1).into()))?;
-                    // region.assign_advice(||"",config.input_q,i,||Ok(F::from((i as u64+1) *10).into()))?;
-                    region.assign_advice(
-                        || "input",
-                        config.input,
-                        i,
-                        || Ok(F::from((i as u64 + 1)).into()),
-                    )?;
-                    // region.assign_advice(
-                    //     || "shuffle",
-                    //     config.shuffle,
-                    //     i,
-                    //     || Ok(F::from(i as u64+1).into()),
-                    // )?;
-                    region.assign_advice(
-                        || "shuffle",
-                        config.shuffle,
-                        i,
-                        || Ok(F::from((end - i) as u64).into()),
-                    )?;
-                    region.assign_fixed(|| "", config.s, i, || Ok(F::from(1).into()))?;
+            || "Shuffle original into shuffled",
+            |mut region| {
+                region.assign_fixed(|| "", config.q_first, 0, || Ok(F::one()))?;
+                region.assign_fixed(|| "", config.q_last, H, || Ok(F::one()))?;
+                for offset in 0..H {
+                    region.assign_fixed(|| "", config.q_shuffle, offset, || Ok(F::one()))?;
                 }
-                // region.assign_fixed(|| "", config.s, 0, || Ok(F::from(1).into()))?;
-                // region.assign_fixed(|| "", config.s, 1, || Ok(F::from(1).into()))?;
-                for i in end..end+10{
-                    region.assign_advice(
-                        || "input",
-                        config.input,
-                        i,
-                        || Ok(F::from((i as u64 + 1)).into()),
-                    )?;
-                    region.assign_advice(
-                        || "shuffle",
-                        config.input_q,
-                        i,
-                        || Ok(F::from( i as u64 +1).into()),
-                    )?;
-                    region.assign_fixed(|| "", config.s2, i, || Ok(F::from(1).into()))?;
+
+                for (idx, (&column, values)) in
+                config.original.iter().zip(self.original.iter()).enumerate()
+                {
+                    for (offset, &value) in values.iter().enumerate() {
+                        region.assign_advice(
+                            || format!("original[{}][{}]", idx, offset),
+                            column,
+                            offset,
+                            || Ok(value),
+                        )?;
+                    }
                 }
+                for (idx, (&column, values)) in
+                config.shuffled.iter().zip(self.shuffled.iter()).enumerate()
+                {
+                    for (offset, &value) in values.iter().enumerate() {
+                        region.assign_advice(
+                            || format!("shuffled[{}][{}]", idx, offset),
+                            column,
+                            offset,
+                            || Ok(value),
+                        )?;
+                    }
+                }
+
+                let z = Some(self.original)
+                    .zip(Some(self.shuffled))
+                    .map(|(original, shuffled)| {
+                        let mut product = vec![F::zero(); H];
+                        for (idx, product) in product.iter_mut().enumerate() {
+                            let mut compressed = F::zero();
+                            for value in shuffled.iter() {
+                                compressed *= theta;
+                                compressed += value[idx];
+                            }
+
+                            *product = compressed + gamma
+                        }
+
+                        product.iter_mut().batch_invert();
+
+                        for (idx, product) in product.iter_mut().enumerate() {
+                            let mut compressed = F::zero();
+                            for value in original.iter() {
+                                compressed *= theta;
+                                compressed += value[idx];
+                            }
+
+                            *product *= compressed + gamma
+                        }
+
+                        #[allow(clippy::let_and_return)]
+                            let z = std::iter::once(F::one())
+                            .chain(product)
+                            .scan(F::one(), |state, cur| {
+                                *state *= &cur;
+                                Some(*state)
+                            })
+                            .collect::<Vec<_>>();
+
+                        #[cfg(feature = "sanity-checks")]
+                        assert_eq!(F::one(), *z.last().unwrap());
+
+                        z
+                    })
+                    .unwrap();
+
+                for (offset, value) in z.iter().enumerate() {
+                    region.assign_advice(
+                        || format!("z[{}]", offset),
+                        config.z,
+                        offset,
+                        || Ok(*value),
+                    )?;
+                }
+
                 Ok(())
             },
         )
     }
 }
 
-fn test_prover(K: u32, circuit: MyCircuit<Fp>) {
+fn test_prover<const W: usize, const H: usize, const T: usize, const G: usize>(
+    K: u32,
+    circuit: MyCircuit<Fp, W, H, T, G>,
+) {
     let public_inputs_size = 0;
     // Initialize the polynomial commitment parameters
     let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(K);
@@ -183,41 +268,31 @@ fn test_prover(K: u32, circuit: MyCircuit<Fp>) {
 
     let strategy = SingleVerifier::new(&params_verifier);
     let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-    let a = verify_proof(
+
+    assert!(verify_proof(
         &params_verifier,
         pk.get_vk(),
         strategy,
         &[&[]],
         &mut transcript,
-    );
-    println!("a={:?}", a);
-    // assert!(verify_proof(
-    //     &params_verifier,
-    //     pk.get_vk(),
-    //     strategy,
-    //     &[&[]],
-    //     &mut transcript,
-    // )
-    // .is_ok());
+    )
+        .is_ok());
 }
 
 fn main() {
-    // The number of rows in our circuit cannot exceed 2^k. Since our example
-    // circuit is very small, we can pick a very small value here.
+    const W: usize = 4;
+    const H: usize = 32;
+
+    const THETA: usize = 111;
+    const GAMMA: usize = 222;
+
+    // The number of rows in our circuit cannot exceed 2^k
     let k = 10;
 
-    // Instantiate the circuit with the private inputs.
-
-    let circuit = MyCircuit::<Fp>::construct();
+    let circuit = MyCircuit::<Fp, W, H, THETA, GAMMA>::rand(&mut OsRng);
 
     let prover = MockProver::run(k, &circuit, vec![]).unwrap();
     assert_eq!(prover.verify(), Ok(()));
-    // Arrange the public input. We expose the multiplication result in row 0
-    // of the instance column, so we position it there in our public inputs.
-    // let mut public_inputs = vec![c];
 
-    // Given the correct public input, our circuit will verify.
-    // let prover = MockProver::run(k, &circuit, vec![public_inputs.clone()]).unwrap();
-    // assert_eq!(prover.verify(), Ok(()));
-    test_prover(k, circuit);
+    test_prover::<W, H, THETA, GAMMA>(k, circuit);
 }
