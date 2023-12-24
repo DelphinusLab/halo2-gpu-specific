@@ -52,7 +52,7 @@ pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
 }
 
 impl<F: FieldExt> Argument<F> {
-    /// Given a Lookup with input expressions [A_0, A_1, ..., A_{m-1}] and shuffle expressions
+    /// Given a Shuffle with input expressions [A_0, A_1, ..., A_{m-1}] and table expressions
     /// [S_0, S_1, ..., S_{m-1}], this method
     /// - constructs A_compressed = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
     ///   and S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1},
@@ -82,10 +82,10 @@ impl<F: FieldExt> Argument<F> {
             ))
         };
 
-        // Get values of input expressions involved in the lookup and compress them
+        // Get values of input expressions involved in the shuffle and compress them
         let input_expression = compress_expressions(&self.input_expressions);
 
-        // Get values of table expressions involved in the lookup and compress them
+        // Get values of table expressions involved in the shuffle and compress them
         let shuffle_expression = compress_expressions(&self.shuffle_expressions);
         Ok(Compressed {
             input_expression,
@@ -95,11 +95,10 @@ impl<F: FieldExt> Argument<F> {
 }
 
 impl<C: CurveAffine> Compressed<C> {
-    /// Given a Lookup with input expressions, table expressions, and the permuted
-    /// input expression and permuted table expression, this method constructs the
-    /// grand product polynomial over the lookup. The grand product polynomial
+    /// Given a Shuffle with input expressions, table expressions this method constructs the
+    /// grand product polynomial over the shuffle. The grand product polynomial
     /// is used to populate the Product<C> struct. The Product<C> struct is
-    /// added to the Lookup and finally returned by the method.
+    /// added to the Shuffle and finally returned by the method.
     pub(in crate::plonk) fn commit_product(
         self,
         pk: &ProvingKey<C>,
@@ -108,19 +107,10 @@ impl<C: CurveAffine> Compressed<C> {
     ) -> Result<Vec<C::Scalar>, Error> {
         let blinding_factors = pk.vk.cs.blinding_factors();
 
-        // Goal is to compute the products of fractions
-        //
-        // Numerator:   (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \gamma)
-        // Denominator: (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        //
-        // where a_j(X) is the jth input expression in this lookup,
-        // s_j(X) is the jth table expression in this lookup,
-        // and i is the ith row of the expression.
         let mut shuffle_product = vec![C::Scalar::zero(); params.n as usize];
-         // #[cfg(not(feature = "cuda"))]
+        // #[cfg(not(feature = "cuda"))]
         {
-            // Denominator uses the permuted input expression and permuted table expression
-            // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
+            // Denominator uses table expression
             parallelize(&mut shuffle_product, |shuffle_product, start| {
                 for (shuffle_product, shuffle_value) in shuffle_product
                     .iter_mut()
@@ -130,12 +120,10 @@ impl<C: CurveAffine> Compressed<C> {
                 }
             });
 
-            // Batch invert to obtain the denominators for the lookup product
-            // polynomials
+            // Batch invert to obtain the denominators for the product polynomials
             batch_invert(&mut shuffle_product);
 
-            // Finish the computation of the entire fraction by computing the numerators
-            // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
+            // Finish the computation of the entire fraction by computing the numerators of input expressions
             parallelize(&mut shuffle_product, |product, start| {
                 for (i, product) in product.iter_mut().enumerate() {
                     let i = i + start;
@@ -144,20 +132,6 @@ impl<C: CurveAffine> Compressed<C> {
             });
         }
 
-        // The product vector is a vector of products of fractions of the form
-        //
-        // Numerator: (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
-        //            * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        // Denominator: (a'(\omega^i) + \beta) (s'(\omega^i) + \gamma)
-        //
-        // where there are m input expressions and m table expressions,
-        // a_j(\omega^i) is the jth input expression in this lookup,
-        // a'j(\omega^i) is the permuted input expression,
-        // s_j(\omega^i) is the jth table expression in this lookup,
-        // s'(\omega^i) is the permuted table expression,
-        // and i is the ith row of the expression.
-        // Compute the evaluations of the lookup product polynomial
-        // over our domain, starting with z[0] = 1
         let z = iter::once(C::Scalar::one())
             .chain(shuffle_product)
             .scan(C::Scalar::one(), |state, cur| {
@@ -170,15 +144,12 @@ impl<C: CurveAffine> Compressed<C> {
             .collect::<Vec<_>>();
 
         #[cfg(feature = "sanity-checks")]
-        // This test works only with intermediate representations in this method.
-        // It can be used for debugging purposes.
         {
             // While in Lagrange basis, check that product is correctly constructed
             let u = (params.n as usize) - (blinding_factors + 1);
             // l_0(X) * (1 - z(X)) = 0
             assert_eq!(z[0], C::Scalar::one());
-            // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+            // z(\omega X) (s'(X) + \gamma) - z(X)(a'(X)  + \gamma) =0
             for i in 0..u {
                 let mut left = z[i + 1];
                 let mut table_term = self.shuffle_expression[i];
@@ -230,13 +201,13 @@ impl<C: CurveAffine> Evaluated<C> {
         let x_next = pk.vk.domain.rotate_omega(*x, Rotation::next());
 
         iter::empty()
-            // Open lookup product commitments at x
+            // Open  product commitments at x
             .chain(Some(ProverQuery {
                 point: *x,
                 rotation: Rotation::cur(),
                 poly: &self.constructed.product_poly,
             }))
-            // Open lookup product commitments at x_next
+            // Open  product commitments at x_next
             .chain(Some(ProverQuery {
                 point: x_next,
                 rotation: Rotation::next(),

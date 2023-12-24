@@ -278,7 +278,6 @@ pub fn verify_proof_ext<
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    println!("shuffles_evaluated={:?}", shuffles_evaluated);
     // This check ensures the circuit is satisfied so long as the polynomial
     // commitments open to the correct values.
     let vanishing = {

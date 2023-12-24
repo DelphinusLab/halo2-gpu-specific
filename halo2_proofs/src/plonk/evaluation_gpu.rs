@@ -251,7 +251,6 @@ use ec_gpu_gen::{
 };
 use pairing::bn256::Bn256;
 
-
 #[cfg(feature = "cuda")]
 #[derive(Debug, PartialEq, Clone)]
 pub(crate) enum CacheAction {
