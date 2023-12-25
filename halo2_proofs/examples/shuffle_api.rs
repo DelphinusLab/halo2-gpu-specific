@@ -1,5 +1,5 @@
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Cell, Chip, Layouter, Region, SimpleFloorPlanner};
+use halo2_proofs::circuit::{Chip, Layouter, Region, SimpleFloorPlanner};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use pairing::bn256::Fr as Fp;
@@ -129,28 +129,28 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         let ch = ShuffleChip::<F>::construct(config.clone());
 
         layouter.assign_region(
-            || "shuffle0",
+            || "inputs",
             |mut region: Region<'_, F>| {
-                for (i, (input, shuffle)) in
-                    self.input0.iter().zip(self.shuffle0.iter()).enumerate()
+                for (i, (input0, input1)) in self.input0.iter().zip(self.input1.iter()).enumerate()
                 {
-                    region.assign_advice(|| "", ch.config.input_0, i, || Ok(*input))?;
-                    region.assign_advice(|| "", ch.config.shuffle_0, i, || Ok(*shuffle))?;
+                    region.assign_advice(|| "", ch.config.input_0, i, || Ok(*input0))?;
+                    region.assign_advice(|| "", ch.config.input_1, i, || Ok(*input1))?;
 
                     region.assign_fixed(|| "", ch.config.s_input, i, || Ok(F::from(1)))?;
-                    region.assign_fixed(|| "", ch.config.s_shuffle, i, || Ok(F::from(1)))?;
                 }
                 Ok(())
             },
         )?;
         layouter.assign_region(
-            || "shuffle1",
+            || "shuffles",
             |mut region: Region<'_, F>| {
-                for (i, (input, shuffle)) in
-                    self.input1.iter().zip(self.shuffle1.iter()).enumerate()
+                for (i, (shuffle0, shuffle1)) in
+                    self.shuffle0.iter().zip(self.shuffle1.iter()).enumerate()
                 {
-                    region.assign_advice(|| "", ch.config.input_1, i, || Ok(*input))?;
-                    region.assign_advice(|| "", ch.config.shuffle_1, i, || Ok(*shuffle))?;
+                    region.assign_advice(|| "", ch.config.shuffle_0, i, || Ok(*shuffle0))?;
+                    region.assign_advice(|| "", ch.config.shuffle_1, i, || Ok(*shuffle1))?;
+
+                    region.assign_fixed(|| "", ch.config.s_shuffle, i, || Ok(F::from(1)))?;
                 }
                 Ok(())
             },
@@ -158,10 +158,10 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 }
 
-fn test_prover(K: u32, circuit: MyCircuit<Fp>) {
+fn test_prover(k: u32, circuit: MyCircuit<Fp>) {
     let public_inputs_size = 0;
     // Initialize the polynomial commitment parameters
-    let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(K);
+    let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);
     let params_verifier: ParamsVerifier<Bn256> = params.verifier(public_inputs_size).unwrap();
 
     let vk = keygen_vk(&params, &circuit).unwrap();

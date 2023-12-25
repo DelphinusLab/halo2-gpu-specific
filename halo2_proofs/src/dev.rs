@@ -188,26 +188,15 @@ pub enum VerifyFailure {
         ///   lookup is active on a row adjacent to an unrelated region.
         location: FailureLocation,
     },
-    /// A lookup input did not exist in its corresponding table.
+    /// A shuffle input did not exist in its corresponding table.
     Shuffle {
-        /// The name of the lookup that is not satisfied.
+        /// The name of the shuffle that is not satisfied.
         name: &'static str,
-        /// The index of the lookup that is not satisfied. These indices are assigned in
-        /// the order in which `ConstraintSystem::lookup` is called during
+        /// The index of the shuffle that is not satisfied. These indices are assigned in
+        /// the order in which `ConstraintSystem::shuffle` is called during
         /// `Circuit::configure`.
         shuffle_index: usize,
-        /// The location at which the lookup is not satisfied.
-        ///
-        /// `FailureLocation::InRegion` is most common, and may be due to the intentional
-        /// use of a lookup (if its inputs are conditional on a complex selector), or an
-        /// unintentional lookup constraint that overlaps the region (indicating that the
-        /// lookup's inputs should be made conditional).
-        ///
-        /// `FailureLocation::OutsideRegion` is uncommon, and could mean that:
-        /// - The input expressions do not correctly constrain a default value that exists
-        ///   in the table when the lookup is not being used.
-        /// - The input expressions use a column queried at a non-zero `Rotation`, and the
-        ///   lookup is active on a row adjacent to an unrelated region.
+        /// The location at which the shuffle is not satisfied.
         location: FailureLocation,
     },
     /// A permutation did not preserve the original value of a cell.
@@ -1127,8 +1116,9 @@ impl<F: FieldExt> MockVerifier<F> {
                 .iter()
                 .enumerate()
                 .flat_map(|(shuffle_index, shuffle)| {
-                    // In the real prover, the lookup expressions are never enforced on
-                    // unusable rows, due to the (1 - (l_last(X) + l_blind(X))) term.
+                    assert!(shuffle.shuffle_expressions.len() == shuffle.input_expressions.len());
+                    assert!(self.usable_rows.end > 0);
+
                     let mut shuffles: Vec<Vec<_>> = self
                         .usable_rows
                         .clone()
@@ -1162,7 +1152,7 @@ impl<F: FieldExt> MockVerifier<F> {
                         .flat_map(|((input_value, row), shuffle_value)| {
                             if input_value != shuffle_value {
                                 Some(VerifyFailure::Shuffle {
-                                    name: shuffle.name,
+                                    name: shuffle.name.clone(),
                                     shuffle_index,
                                     location: FailureLocation::find_expressions(
                                         &self.cs,
@@ -1328,11 +1318,11 @@ mod tests {
             }])
         );
     }
-    use crate::plonk::*;
-    use crate::poly::commitment::{Params, ParamsVerifier};
-    use crate::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
-    use pairing::bn256::{Bn256, G1Affine};
-    use rand_core::OsRng;
+    // use crate::plonk::*;
+    // use crate::poly::commitment::{Params, ParamsVerifier};
+    // use crate::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
+    // use pairing::bn256::{Bn256, G1Affine};
+    // use rand_core::OsRng;
 
     #[test]
     fn bad_lookup() {
@@ -1344,46 +1334,8 @@ mod tests {
             q: Column<Fixed>,
             table: TableColumn,
         }
-        #[derive(Clone)]
         struct FaultyCircuit {}
-        impl FaultyCircuit {
-            fn test_prover(&self, k: u32) {
-                let public_inputs_size = 0;
-                // Initialize the polynomial commitment parameters
-                let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);
-                let params_verifier: ParamsVerifier<Bn256> =
-                    params.verifier(public_inputs_size).unwrap();
 
-                let vk = keygen_vk(&params, self).unwrap();
-                let pk = keygen_pk(&params, vk, self).unwrap();
-
-                let mut transcript = Blake2bWrite::<_, _, Challenge255<_>>::init(vec![]);
-
-                create_proof(
-                    &params,
-                    &pk,
-                    &[self.clone()],
-                    &[&[]],
-                    OsRng,
-                    &mut transcript,
-                )
-                .expect("proof generation should not fail");
-
-                let proof = transcript.finalize();
-
-                let strategy = SingleVerifier::new(&params_verifier);
-                let mut transcript = Blake2bRead::<_, _, Challenge255<_>>::init(&proof[..]);
-
-                assert!(verify_proof(
-                    &params_verifier,
-                    pk.get_vk(),
-                    strategy,
-                    &[&[]],
-                    &mut transcript,
-                )
-                .is_ok());
-            }
-        }
         impl Circuit<Fp> for FaultyCircuit {
             type Config = FaultyCircuitConfig;
             type FloorPlanner = V1;
@@ -1436,8 +1388,6 @@ mod tests {
                     || "Good synthesis",
                     |mut region| {
                         // Enable the lookup on rows 0 and 1.
-                        // config.q.enable(&mut region, 0)?;
-                        // config.q.enable(&mut region, 1)?;
                         region.assign_fixed(|| "", config.q, 0, || Ok(Fp::from(1)))?;
                         region.assign_fixed(|| "", config.q, 1, || Ok(Fp::from(1)))?;
                         // Assign a = 2 and a = 6.
@@ -1446,41 +1396,37 @@ mod tests {
 
                         Ok(())
                     },
-                )
+                )?;
 
-                // layouter.assign_region(
-                //     || "Faulty synthesis",
-                //     |mut region| {
-                //         // Enable the lookup on rows 0 and 1.
-                //         // config.q.enable(&mut region, 0)?;
-                //         // config.q.enable(&mut region, 1)?;
-                //         region.assign_fixed(||"",config.q,0,|| Ok(Fp::from(1)))?;
-                //         region.assign_fixed(||"",config.q,1,||Ok(Fp::from(1)))?;
-                //         // Assign a = 4.
-                //         region.assign_advice(|| "a = 4", config.a, 0, || Ok(Fp::from(4)))?;
-                //
-                //         // BUG: Assign a = 5, which doesn't exist in the table!
-                //         region.assign_advice(|| "a = 5", config.a, 1, || Ok(Fp::from(5)))?;
-                //
-                //         Ok(())
-                //     },
-                // )
+                layouter.assign_region(
+                    || "Faulty synthesis",
+                    |mut region| {
+                        // Enable the lookup on rows 0 and 1.
+                        region.assign_fixed(|| "", config.q, 0, || Ok(Fp::from(1)))?;
+                        region.assign_fixed(|| "", config.q, 1, || Ok(Fp::from(1)))?;
+                        // Assign a = 4.
+                        region.assign_advice(|| "a = 4", config.a, 0, || Ok(Fp::from(4)))?;
+
+                        // BUG: Assign a = 5, which doesn't exist in the table!
+                        region.assign_advice(|| "a = 5", config.a, 1, || Ok(Fp::from(5)))?;
+
+                        Ok(())
+                    },
+                )
             }
         }
 
         let prover = MockProver::run(K, &FaultyCircuit {}, vec![]).unwrap();
-        assert_eq!(prover.verify().is_ok(), true);
-        // assert_eq!(
-        //     prover.verify(),
-        //     Err(vec![VerifyFailure::Lookup {
-        //         name: "lookup",
-        //         lookup_index: 0,
-        //         location: FailureLocation::InRegion {
-        //             region: (2, "Faulty synthesis").into(),
-        //             offset: 1,
-        //         }
-        //     }])
-        // );
-        &FaultyCircuit {}.test_prover(K);
+        assert_eq!(
+            prover.verify(),
+            Err(vec![VerifyFailure::Lookup {
+                name: "lookup",
+                lookup_index: 0,
+                location: FailureLocation::InRegion {
+                    region: (2, "Faulty synthesis").into(),
+                    offset: 1,
+                }
+            }])
+        );
     }
 }

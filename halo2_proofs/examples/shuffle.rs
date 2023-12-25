@@ -1,11 +1,10 @@
 use group::ff::BatchInvert;
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Cell, Chip, Layouter, Region, SimpleFloorPlanner};
+use halo2_proofs::circuit::{Layouter, SimpleFloorPlanner};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use pairing::bn256::Fr as Fp;
 use pairing::bn256::{Bn256, G1Affine};
-use std::marker::PhantomData;
 
 use halo2_proofs::poly::{
     commitment::{Params, ParamsVerifier},
@@ -110,7 +109,7 @@ struct MyCircuit<F: FieldExt, const W: usize, const H: usize, const T: usize, co
 }
 
 impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Default
-for MyCircuit<F, W, H, T, G>
+    for MyCircuit<F, W, H, T, G>
 {
     fn default() -> Self {
         Self {
@@ -121,7 +120,7 @@ for MyCircuit<F, W, H, T, G>
 }
 
 impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize>
-MyCircuit<F, W, H, T, G>
+    MyCircuit<F, W, H, T, G>
 {
     fn rand<R: RngCore>(rng: &mut R) -> Self {
         let original = rand_2d_array::<F, _, W, H>(rng);
@@ -135,7 +134,7 @@ MyCircuit<F, W, H, T, G>
 }
 
 impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Circuit<F>
-for MyCircuit<F, W, H, T, G>
+    for MyCircuit<F, W, H, T, G>
 {
     type Config = MyConfig<W, T, G>;
     type FloorPlanner = SimpleFloorPlanner;
@@ -166,7 +165,7 @@ for MyCircuit<F, W, H, T, G>
                 }
 
                 for (idx, (&column, values)) in
-                config.original.iter().zip(self.original.iter()).enumerate()
+                    config.original.iter().zip(self.original.iter()).enumerate()
                 {
                     for (offset, &value) in values.iter().enumerate() {
                         region.assign_advice(
@@ -178,7 +177,7 @@ for MyCircuit<F, W, H, T, G>
                     }
                 }
                 for (idx, (&column, values)) in
-                config.shuffled.iter().zip(self.shuffled.iter()).enumerate()
+                    config.shuffled.iter().zip(self.shuffled.iter()).enumerate()
                 {
                     for (offset, &value) in values.iter().enumerate() {
                         region.assign_advice(
@@ -217,7 +216,7 @@ for MyCircuit<F, W, H, T, G>
                         }
 
                         #[allow(clippy::let_and_return)]
-                            let z = std::iter::once(F::one())
+                        let z = std::iter::once(F::one())
                             .chain(product)
                             .scan(F::one(), |state, cur| {
                                 *state *= &cur;
@@ -248,12 +247,12 @@ for MyCircuit<F, W, H, T, G>
 }
 
 fn test_prover<const W: usize, const H: usize, const T: usize, const G: usize>(
-    K: u32,
+    k: u32,
     circuit: MyCircuit<Fp, W, H, T, G>,
 ) {
     let public_inputs_size = 0;
     // Initialize the polynomial commitment parameters
-    let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(K);
+    let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);
     let params_verifier: ParamsVerifier<Bn256> = params.verifier(public_inputs_size).unwrap();
 
     let vk = keygen_vk(&params, &circuit).unwrap();
@@ -276,7 +275,7 @@ fn test_prover<const W: usize, const H: usize, const T: usize, const G: usize>(
         &[&[]],
         &mut transcript,
     )
-        .is_ok());
+    .is_ok());
 }
 
 fn main() {

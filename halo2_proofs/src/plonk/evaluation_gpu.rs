@@ -249,7 +249,6 @@ use ec_gpu_gen::{
     fft::FftKernel, rust_gpu_tools::cuda::Buffer, rust_gpu_tools::cuda::Program,
     rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer, EcResult,
 };
-use pairing::bn256::Bn256;
 
 #[cfg(feature = "cuda")]
 #[derive(Debug, PartialEq, Clone)]
