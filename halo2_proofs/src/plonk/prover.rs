@@ -969,7 +969,7 @@ pub fn create_proof_from_witness<
     let shuffles: Vec<Vec<shuffle::prover::Compressed<C>>> = instance
         .iter()
         .zip(advice.iter())
-        .map(|(instance, advice)| {
+        .map(|(instance, advice)| -> Vec<_> {
             pk.vk
                 .cs
                 .shuffles
@@ -991,6 +991,7 @@ pub fn create_proof_from_witness<
         .collect();
 
     end_timer!(timer);
+
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
     // Sample gamma challenge
@@ -1077,19 +1078,19 @@ pub fn create_proof_from_witness<
             .unzip();
         end_timer!(timer);
 
-        let timer = start_timer!(|| format!("shuffle commit product"));
+        let timer = start_timer!(|| "shuffles commit product");
         let shuffles: Vec<Vec<_>> = shuffles
             .into_iter()
             .map(|shuffles| {
                 shuffles
                     .into_par_iter()
-                    .map(|shuffle| shuffle.commit_product(pk, params, gamma).unwrap())
-                    .collect()
+                    .map(|shuffle| shuffle.commit_product(pk, params, gamma.clone()).unwrap())
+                    .collect::<Vec<_>>()
             })
-            .collect();
+            .collect::<Vec<_>>();
         end_timer!(timer);
 
-        let timer = start_timer!(|| format!("shuffle add blinding value"));
+        let timer = start_timer!(|| "shuffles add blinding value");
         let shuffles: Vec<Vec<_>> = shuffles
             .into_iter()
             .map(|shuffles| {
@@ -1099,14 +1100,15 @@ pub fn create_proof_from_witness<
                         for _ in 0..pk.vk.cs.blinding_factors() {
                             z.push(C::Scalar::random(&mut rng))
                         }
+                        assert_eq!(z.len(), params.n as usize);
                         pk.vk.domain.lagrange_from_vec(z)
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
-            .collect();
+            .collect::<Vec<Vec<_>>>();
         end_timer!(timer);
 
-        let timer = start_timer!(|| format!("shuffle msm and fft value"));
+        let timer = start_timer!(|| "shuffles msm and fft");
         let (shuffles_z_commitments, shuffles): (Vec<Vec<_>>, Vec<Vec<_>>) = shuffles
             .into_iter()
             .map(|shuffles| {
@@ -1118,7 +1120,6 @@ pub fn create_proof_from_witness<
                             &pk.vk.domain.get_omega_inv(),
                             &pk.vk.domain.ifft_divisor,
                         );
-
                         let c = c.to_affine();
                         (c, shuffle::prover::Committed { product_poly })
                     })
@@ -1127,7 +1128,6 @@ pub fn create_proof_from_witness<
                     .unzip()
             })
             .unzip();
-
         end_timer!(timer);
 
         let timer = start_timer!(|| "permutation commit");
@@ -1187,7 +1187,6 @@ pub fn create_proof_from_witness<
                         transcript.write_point(lookups_z_commitment).unwrap()
                     })
             });
-
         shuffles_z_commitments
             .into_iter()
             .for_each(|shuffles_z_commitments| {
@@ -1347,13 +1346,32 @@ pub fn create_proof_from_witness<
     });
     end_timer!(timer);
 
+    let timer = start_timer!(|| "eval poly shuffles");
+    // Evaluate the shuffles, if any, at omega^i x.
+    let (shuffles, evals): (
+        Vec<Vec<shuffle::prover::Evaluated<C>>>,
+        Vec<Vec<Vec<C::ScalarExt>>>,
+    ) = shuffles
+        .into_iter()
+        .map(|shuffles| shuffles.into_par_iter().map(|s| s.evaluate(pk, x)).unzip())
+        .unzip();
+    evals.into_iter().for_each(|evals| {
+        evals.into_iter().for_each(|evals| {
+            evals
+                .into_iter()
+                .for_each(|eval| transcript.write_scalar(eval).unwrap())
+        })
+    });
+    end_timer!(timer);
+
     let timer = start_timer!(|| "multi open");
     let instances = instance
         .iter()
         .zip(advice.iter())
         .zip(permutations.iter())
         .zip(lookups.iter())
-        .flat_map(|(((instance, advice), permutation), lookups)| {
+        .zip(shuffles.iter())
+        .flat_map(|((((instance, advice), permutation), lookups), shuffles)| {
             iter::empty()
                 .chain(
                     pk.vk
@@ -1379,6 +1397,7 @@ pub fn create_proof_from_witness<
                 )
                 .chain(permutation.open(pk, x))
                 .chain(lookups.iter().flat_map(move |p| p.open(pk, x)).into_iter())
+                .chain(shuffles.iter().flat_map(move |p| p.open(pk, x)).into_iter())
         })
         .chain(
             pk.vk
@@ -1401,6 +1420,7 @@ pub fn create_proof_from_witness<
         multiopen::shplonk::create_proof(params, transcript, instances).map_err(|_| Error::Opening)
     };
     end_timer!(timer);
+
     res
 }
 
