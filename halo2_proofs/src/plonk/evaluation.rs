@@ -1,6 +1,8 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
-use crate::plonk::evaluation_gpu::{LookupProveExpression, ProveExpression};
+use crate::plonk::symbol::ProveExpression;
+use crate::plonk::symbol;
+use crate::plonk::evaluation_gpu::LookupProveExpression;
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -314,14 +316,12 @@ impl<C: CurveAffine> Evaluator<C> {
                 }).collect::<Vec<_>>();
                 es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
                 end_timer!(timer);
-                /*
                 for e in &es {
                     println!("depth is {}", e.depth());
                     println!("notation is {}", e.to_string());
                 }
-                */
                 es.iter().skip(1).fold(es[0].clone(), |acc, es| {
-                    ProveExpression::Op(Box::new(acc), Box::new(es.clone()), evaluation_gpu::Bop::Sum)
+                    ProveExpression::Op(Box::new(acc), Box::new(es.clone()), symbol::Bop::Sum)
                 })
             })
             .collect::<Vec<_>>();
@@ -858,18 +858,26 @@ impl<C: CurveAffine> Evaluator<C> {
         */
         end_timer!(cache_timer);
 
-        let mut values = pk
+        let (mut values, cache) = pk
             .ev
             .gpu_gates_expr
-            .par_iter()
+            //.par_iter()
+            .iter()
             .enumerate()
             .map(|(group_idx, x)| x.eval_gpu(group_idx, pk, &unit_stat, &advice_poly[0], &instance_poly[0], y))
             .collect::<Vec<_>>()
             .into_iter()
-            .reduce(|acc, x| acc + &x)
+            .reduce(|(acc, cache), (x,_)| (acc + &x, cache))
             .unwrap();
 
         end_timer!(timer);
+
+                            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
+                                .unwrap_or("5".to_owned());
+                            let cache_size = usize::from_str_radix(&cache_size, 10)
+                                .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+                            let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+                            unit_cache.data = cache;
 
         let domain = &pk.vk.domain;
         let size = domain.extended_len();
@@ -1113,7 +1121,8 @@ impl<C: CurveAffine> Evaluator<C> {
 
         if group_expr_len > 0 {
             values = lookups
-                .par_chunks(group_expr_len)
+                //.par_chunks(group_expr_len)
+                .chunks(group_expr_len)
                 .enumerate()
                 .map(|(group_idx, lookups)| {
                     // combine fft with eval_h_lookups:
@@ -1160,13 +1169,19 @@ impl<C: CurveAffine> Evaluator<C> {
                                 do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
                             create_buffer_from!(l_active_row_buf, &l_active_row[..]);
 
+                            /*
                             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
                                 .unwrap_or("5".to_owned());
                             let cache_size = usize::from_str_radix(&cache_size, 10)
                                 .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
                             let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+                            */
                             for (lookup_idx, lookup) in lookups.iter().enumerate() {
                                 let mut ys = vec![C::ScalarExt::one(), y];
+                                println!("lookup: {}", pk.ev.gpu_lookup_expr
+                                    [lookup_idx + group_idx * group_expr_len]
+                                    .to_string());
+                                let timer = start_timer!(|| "eval lookup expr");
                                 let table_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
                                     ._eval_gpu(
@@ -1186,6 +1201,9 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .unwrap()
                                     .0;
 
+                                end_timer!(timer);
+
+                                let timer = start_timer!(|| "3 fft");
                                 let permuted_input_coset_buf = do_extended_fft(
                                     pk,
                                     program,
@@ -1207,6 +1225,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     &mut allocator,
                                     &mut helper,
                                 )?;
+
+                                end_timer!(timer);
 
                                 let local_work_size = 128;
                                 let global_work_size = size / local_work_size;
