@@ -1,6 +1,7 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
 use crate::plonk::symbol::ProveExpression;
+use crate::plonk::symbol::ProveExpressionUnit;
 use crate::plonk::symbol;
 use crate::plonk::evaluation_gpu::LookupProveExpression;
 use crate::plonk::lookup::prover::Committed;
@@ -296,7 +297,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
 
         let n_gpu = *crate::plonk::N_GPU;
-        println!("gpus number is {}", n_gpu);
+        println!("USED GPU number is {}", n_gpu);
         let es = ProveExpression::mk_group(&e_exprs).into_iter().flatten().collect::<Vec<_>>();
         let es = es
             .chunks((es.len() + n_gpu - 1) / n_gpu)
@@ -314,7 +315,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     let a = ProveExpression::reconstruct(e.as_slice());
                     a
                 }).collect::<Vec<_>>();
-                es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
+                //es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
                 end_timer!(timer);
                 for e in &es {
                     println!("depth is {}", e.depth());
@@ -877,6 +878,9 @@ impl<C: CurveAffine> Evaluator<C> {
                             let cache_size = usize::from_str_radix(&cache_size, 10)
                                 .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
                             let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+                            for c in cache.keys() {
+                                println!("cache key: {}", ProveExpressionUnit::key_to_string(*c));
+                            }
                             unit_cache.data = cache;
 
         let domain = &pk.vk.domain;

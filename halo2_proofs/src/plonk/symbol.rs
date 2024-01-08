@@ -606,46 +606,6 @@ impl<F: FieldExt> ProveExpression<F> {
         Self::reconstruct_tree(tree, r_deep)
     }
 
-    pub(crate) fn disjoint(es: &Vec<ProveExpressionUnit>, src: &Vec<ProveExpressionUnit>) -> bool {
-       let mut disjoint = true;
-       for e in src {
-           if es.iter().find(|x| x.get_group() == e.get_group() && !e.is_fix()).is_some() {
-               disjoint = false;
-               break
-           }
-       }
-       disjoint
-    }
-
-    pub(crate) fn disjoint_group(gs: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>, src: &Vec<ProveExpressionUnit>) -> bool {
-        let mut disjoint = true;
-        for g in gs {
-            if Self::disjoint(&g.0, src) {
-                disjoint = false;
-                break;
-            }
-        }
-        disjoint
-    }
-
-    pub(crate) fn mk_group(tree: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>) -> Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> {
-        let mut vs: Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> = vec![];
-        for (es, m) in tree {
-            let mut ns = vec![];
-            let mut c = vec![(es.clone(), m.clone())];
-            for s in vs.clone().into_iter() {
-                if Self::disjoint_group(&s, es) {
-                    c.append(&mut s.clone());
-                } else {
-                    ns.push(s.clone());
-                }
-            }
-            ns.push(c);
-            vs = ns
-        }
-        println!("total vs group is {}", vs.len());
-        vs
-    }
     pub(crate) fn get_complexity(&self) -> ComplexityProfiler {
         match self {
             ProveExpression::Unit(u) => ComplexityProfiler {
@@ -784,4 +744,47 @@ impl<F: FieldExt> ProveExpression<F> {
             ProveExpression::Scale(_, _) => unreachable!(),
         }
     }
+}
+impl<F:FieldExt> ProveExpression<F> {
+    pub(crate) fn disjoint(es: &Vec<ProveExpressionUnit>, src: &Vec<ProveExpressionUnit>) -> bool {
+       let mut disjoint = true;
+       for e in src {
+           if es.iter().find(|x| x.get_group() == e.get_group() && !e.is_fix()).is_some() {
+               disjoint = false;
+               break
+           }
+       }
+       disjoint
+    }
+
+    pub(crate) fn disjoint_group(gs: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>, src: &Vec<ProveExpressionUnit>) -> bool {
+        let mut disjoint = true;
+        for g in gs {
+            if Self::disjoint(&g.0, src) {
+                disjoint = false;
+                break;
+            }
+        }
+        disjoint
+    }
+
+    pub(crate) fn mk_group(tree: &Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>) -> Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> {
+        let mut vs: Vec<Vec<(Vec<ProveExpressionUnit>, BTreeMap<u32, F>)>> = vec![];
+        for (es, m) in tree {
+            let mut ns = vec![];
+            let mut c = vec![(es.clone(), m.clone())];
+            for s in vs.clone().into_iter() {
+                if Self::disjoint_group(&s, es) {
+                    c.append(&mut s.clone());
+                } else {
+                    ns.push(s.clone());
+                }
+            }
+            ns.push(c);
+            vs = ns
+        }
+        println!("total vs group is {}", vs.len());
+        vs
+    }
+
 }
