@@ -858,7 +858,6 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
     program: &Program,
 ) -> EcResult<ExtendedFFTHelper<F>> {
-    const MAX_LOG2_RADIX: u32 = 8;
     const LOG2_MAX_ELEMENTS: usize = 32;
 
     let domain = &pk.vk.domain;
@@ -868,7 +867,14 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     let log_n = pk.vk.domain.extended_k();
     let n = 1 << log_n;
     let omega = pk.vk.domain.get_extended_omega();
-    let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+
+    let max_log2_radix: u32 = if log_n % 8 == 1 {
+        7
+    } else {
+        8
+    };
+
+    let max_deg = cmp::min(max_log2_radix, log_n);
     // Precalculate:
     // [omega^(0/(2^(deg-1))), omega^(1/(2^(deg-1))), ..., omega^((2^(deg-1)-1)/(2^(deg-1)))]
     let mut pq = vec![F::zero(); 1 << max_deg >> 1];
@@ -901,6 +907,9 @@ pub(crate) fn gen_do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     })
 }
 
+/*
+ * 1. Loading from memory is slow.
+ * 2. Leave the code block for potential use case
 #[cfg(feature = "cuda")]
 pub(crate) fn load_unit_from_mem_cache<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
     pk: &ProvingKey<C>,
@@ -918,6 +927,7 @@ pub(crate) fn load_unit_from_mem_cache<F: FieldExt, C: CurveAffine<ScalarExt = F
     program.write_from_buffer(&mut values, &poly.values)?;
     Ok(values)
 }
+*/
 
 
 #[cfg(feature = "cuda")]
@@ -939,20 +949,20 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
     let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
-    let timer = start_timer!(|| "write from buffer");
+    //let timer = start_timer!(|| "write from buffer");
     program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "distribute powers zeta");
+    //let timer = start_timer!(|| "distribute powers zeta");
     do_distribute_powers_zeta(
         pk,
         program,
         origin_values_buffer,
         &helper.coset_powers_buffer,
     )?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "eval fft prepare");
+    //let timer = start_timer!(|| "eval fft prepare");
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
         &kernel_name,
@@ -964,9 +974,9 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .arg(&values)
         .arg(&origin_size)
         .run()?;
-    end_timer!(timer);
+    //end_timer!(timer);
 
-    let timer = start_timer!(|| "do fft pure");
+    //let timer = start_timer!(|| "do fft pure");
     let domain = &pk.vk.domain;
     let a = do_fft_pure(
         program,
@@ -976,7 +986,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         &helper.pq_buffer,
         &helper.omegas_buffer,
     );
-    end_timer!(timer);
+    //end_timer!(timer);
     //end_timer!(timerall);
     a
 }
@@ -1054,15 +1064,19 @@ pub(crate) fn do_fft_core<F: FieldExt>(
     omegas_buffer: &Buffer<F>,
 ) -> EcResult<Buffer<F>> {
     let n = 1 << log_n;
-    const MAX_LOG2_RADIX: u32 = 8;
-    const MAX_LOG2_LOCAL_WORK_SIZE: u32 = 7;
+    let max_log2_radix = if log_n % 8 == 1 {
+        7 // scale the local worker size of the last round
+    } else {
+        8
+    };
+    let max_log2_local_work_size: u32 = 6;
 
     let mut src_buffer = values;
     let mut dst_buffer = allocator
         .pop_front()
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(n).unwrap() });
     // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
-    let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
+    let max_deg = cmp::min(max_log2_radix, log_n);
 
     // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
     let mut log_p = 0u32;
@@ -1072,7 +1086,7 @@ pub(crate) fn do_fft_core<F: FieldExt>(
         let deg = cmp::min(max_deg, log_n - log_p);
 
         let n = 1u32 << log_n;
-        let local_work_size = 1 << cmp::min(deg - 1, MAX_LOG2_LOCAL_WORK_SIZE);
+        let local_work_size = 1 << cmp::min(deg - 1, max_log2_local_work_size);
         let global_work_size = n >> deg;
         let kernel_name = format!("{}_radix_fft", "Bn256_Fr");
         let kernel = program.create_kernel(

@@ -1,7 +1,4 @@
 use super::Expression;
-use crate::multicore;
-use crate::plonk::{lookup, permutation, Any, ProvingKey};
-use crate::poly::Basis;
 use crate::arithmetic::FieldExt;
 use crate::poly::Rotation;
 
@@ -15,22 +12,9 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 */
-use ark_std::{end_timer, start_timer};
-use group::prime::PrimeCurve;
-use group::{
-    ff::{BatchInvert, Field},
-    Curve,
-};
-use std::collections::{BTreeSet, HashMap, LinkedList, HashSet};
-use std::convert::TryInto;
+use std::collections::{HashMap, HashSet};
 use std::iter::FromIterator;
-use std::num::ParseIntError;
-use std::{cmp, slice};
-use std::{
-    collections::BTreeMap,
-    iter,
-    ops::{Index, Mul, MulAssign},
-};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug)]
 pub enum Bop {
@@ -166,12 +150,107 @@ impl<F:FieldExt> ProveExpression<F> {
             ProveExpression::Scale(a, _b) => a.get_unit_set()
         }
     }
+
     pub fn string_of_bundle(v: &Vec<ProveExpressionUnit>) -> String {
         let mut full = "".to_string();
         for e in v.iter() {
             full = format!("{}{}", e.to_string(), full);
         }
         format!("<{}>", full)
+    }
+
+    pub fn flat_unique_unit_scale(&self) -> Option<(Self, Vec<Self>)> {
+        match &self {
+            ProveExpression::Op(a, b, Bop::Sum) => {
+                if let Some ((ua, mut va)) = a.flat_unique_unit_scale() {
+                    if let Some ((ub, mut vb)) = b.flat_unique_unit_scale() {
+                        if ua.get_unit_group().unwrap() == ub.get_unit_group().unwrap() {
+                            va.append(&mut vb);
+                            Some ((ua, va))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            },
+            ProveExpression::Scale(a, _) => match a.as_ref().clone() {
+                ProveExpression::Unit(_) => Some ((a.as_ref().clone(), vec![self.clone()])),
+                _ => None
+            },
+            _ => None
+        }
+    }
+
+    fn get_unit_element(&self) -> Option<ProveExpressionUnit> {
+        match &self {
+            ProveExpression::Unit(a) => {
+                Some(a.clone())
+            },
+            _ => None
+        }
+    }
+
+    fn get_atomic_unit(&self) -> Option<Self> {
+        match &self {
+            ProveExpression::Unit(_) => Some(self.clone()),
+            ProveExpression::Op(_, _, _) => None,
+            ProveExpression::Y(_) => None,
+            ProveExpression::Scale(a, _) => a.get_atomic_unit()
+        }
+    }
+
+    pub fn get_unit_rotation(&self) -> Option<i32> {
+        self.get_atomic_unit().map(|x| x.get_unit_element().unwrap().get_rotation())
+    }
+
+
+    fn get_unit_group(&self) -> Option<usize>{
+        self.get_atomic_unit().map(|x| x.get_unit_element().unwrap().get_group())
+    }
+
+    // ys = 0, y, y^2, ... y^k
+    // y is the scale coeff cache
+    // scale = y[key] * v where k, v in ys
+    pub fn get_scale_coeff(&self, y: &mut Vec<F>) -> Option<F> {
+        match &self {
+            ProveExpression::Scale(_, ys) => {
+                    let max_y_order = ys.keys().max().unwrap();
+                    for _ in (y.len() as u32)..max_y_order + 1 {
+                        y.push(y[1] * y.last().unwrap());
+                    }
+
+                    let c = ys.iter().fold(F::zero(), |acc, (y_order, f)| {
+                        acc + y[*y_order as usize] * f
+                    });
+                    Some (c)
+            },
+            _ => None,
+        }
+    }
+
+
+    pub fn depth(&self) -> usize {
+        match &self {
+            ProveExpression::Unit(_) => {
+                1
+            },
+            ProveExpression::Op(a, b, _) => {
+                let sa = a.depth();
+                let sb = b.depth();
+                if sa >= sb {
+                    sa + 1
+                }
+                else {
+                    sb + 1
+                }
+            },
+            ProveExpression::Y(_) => 0,
+            ProveExpression::Scale(a, _b) => a.depth()
+        }
     }
     pub fn prefetch_units(&self, cache: &mut BTreeMap<usize, ProveExpression<F>>) {
         match &self {
@@ -205,127 +284,6 @@ impl<F:FieldExt> ProveExpression<F> {
         }
     }
 
-    pub fn calculate_balances(&self) -> HashSet<usize> {
-        match &self {
-            ProveExpression::Unit(a) => {
-                let mut s = HashSet::new();
-                s.insert(a.get_group());
-                s
-            },
-            ProveExpression::Op(a, b, _) => {
-                let sa = a.calculate_balances();
-                let sb = b.calculate_balances();
-                let si = sa.intersection(&sb).count();
-                sa.union(&sb).collect::<HashSet<_>>()
-                    .into_iter()
-                    .map(|x| *x)
-                    .collect()
-            },
-            ProveExpression::Y(_) => HashSet::new(),
-            ProveExpression::Scale(a, _b) => a.calculate_balances()
-        }
-    }
-
-    pub fn flat_unique_unit_scale(&self) -> Option<(Self, Vec<Self>)> {
-        match &self {
-            ProveExpression::Op(a, b, Bop::Sum) => {
-                if let Some ((ua, mut va)) = a.flat_unique_unit_scale() {
-                    if let Some ((ub, mut vb)) = b.flat_unique_unit_scale() {
-                        if ua.get_unit().unwrap().get_group() == ub.get_unit().unwrap().get_group() {
-                            va.append(&mut vb);
-                            Some ((ua, va))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            },
-            ProveExpression::Scale(a, _) => match a.as_ref().clone() {
-                ProveExpression::Unit(_) => Some ((a.as_ref().clone(), vec![self.clone()])),
-                _ => None
-            },
-            _ => None
-        }
-    }
-
-    pub fn get_unit(&self) -> Option<ProveExpressionUnit> {
-        match &self {
-            ProveExpression::Unit(a) => {
-                Some(a.clone())
-            },
-            _ => None
-        }
-    }
-
-    pub fn get_unit_rotation(&self) -> Option<i32> {
-        match &self {
-            ProveExpression::Unit(a) => {
-                Some(a.get_rotation())
-            },
-            ProveExpression::Scale(a, ys) => a.get_unit_rotation(),
-            _ => None
-        }
-    }
-
-    // ys = 0, y, y^2, ... y^k
-    // y is the scale coeff cache
-    // scale = y[key] * v where k, v in ys
-    pub fn get_scale_coeff(&self, y: &mut Vec<F>) -> Option<F> {
-        match &self {
-            ProveExpression::Scale(a, ys) => {
-                    let max_y_order = ys.keys().max().unwrap();
-                    for _ in (y.len() as u32)..max_y_order + 1 {
-                        y.push(y[1] * y.last().unwrap());
-                    }
-
-                    let c = ys.iter().fold(F::zero(), |acc, (y_order, f)| {
-                        acc + y[*y_order as usize] * f
-                    });
-                    Some (c)
-            },
-            _ => None,
-        }
-    }
-
-
-    pub fn depth(&self) -> usize {
-        match &self {
-            ProveExpression::Unit(a) => {
-                1
-            },
-            ProveExpression::Op(a, b, _) => {
-                let sa = a.depth();
-                let sb = b.depth();
-                if sa >= sb {
-                    //println!("left is heavier {} {}", sa, sb);
-                    sa + 1
-                }
-                else {
-                    //println!("right is heavier {} {}", sa, sb);
-                    sb + 1
-                }
-            },
-            ProveExpression::Y(_) => 0,
-            ProveExpression::Scale(a, _b) => a.depth()
-        }
-    }
-
-    fn get_atomic_unit(&self) -> Option<Self> {
-        match &self {
-            ProveExpression::Unit(a) => Some(self.clone()),
-            ProveExpression::Op(_, _, _) => None,
-            ProveExpression::Y(_) => None,
-            ProveExpression::Scale(a, _) => a.get_atomic_unit()
-        }
-    }
-
-    fn get_unit_group(&self) -> Option<usize>{
-        self.get_atomic_unit().map(|x| x.get_unit().unwrap().get_group())
-    }
 }
 
 
@@ -456,32 +414,6 @@ impl<F: FieldExt> ProveExpression<F> {
         assert!(res.get_r_deep() <= 1);
         res
     }
-
-    fn is_scale_with_same_unit(
-        acc: &ProveExpression<F>,
-        x: &ProveExpression<F>
-    ) -> bool {
-        match acc {
-            Self::Scale(a, _) => {
-                match (a.as_ref().clone(), x.clone()) {
-                    (Self::Unit(a), Self::Scale(ub, _)) => {
-                        match ub.as_ref().clone() {
-                            Self::Unit(b) => if a.get_group() == b.get_group() {
-                                println!("find merge {} {}", a.to_string(), b.to_string());
-                                true
-                            } else {
-                                false
-                            },
-                            _ => false
-                        }
-                    },
-                    _ => false
-                }
-            },
-            _ => false
-        }
-    }
-
 
     fn reconstruct_tree(
         mut tree: Vec<(BTreeMap<ProveExpressionUnit, u32>, BTreeMap<u32, F>)>,

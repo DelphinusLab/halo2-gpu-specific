@@ -851,30 +851,10 @@ impl<C: CurveAffine> Evaluator<C> {
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
 
-
-        let mut units = BTreeMap::new();
         let mut unit_stat = BTreeMap::new();
-
         for gate_expr in &pk.ev.gpu_gates_expr {
-            gate_expr.prefetch_units(&mut units);
             gate_expr.calculate_units(&mut unit_stat);
         }
-
-        /* XXX
-        for (k, v) in unit_stat.iter() {
-            println!("key {} showed {} times", k, v);
-        }
-        */
-
-        let cache_timer = start_timer!(|| "cache units in memory");
-
-        /*
-        for (index, expr) in units.iter() {
-            let values = expr.eval_gpu(0, pk, &memory_unit_cache, &advice_poly[0], &instance_poly[0], y);
-            memory_unit_cache.insert(*index, values);
-        };
-        */
-        end_timer!(cache_timer);
 
         let (mut values, cache) = pk
             .ev
@@ -890,15 +870,15 @@ impl<C: CurveAffine> Evaluator<C> {
 
         end_timer!(timer);
 
-                            let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
-                                .unwrap_or("5".to_owned());
-                            let cache_size = usize::from_str_radix(&cache_size, 10)
-                                .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
-                            let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
-                            for c in cache.keys() {
-                                println!("cache key: {}", ProveExpressionUnit::key_to_string(*c));
-                            }
-                            unit_cache.data = cache;
+        let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
+            .unwrap_or("5".to_owned());
+        let cache_size = usize::from_str_radix(&cache_size, 10)
+            .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
+        let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
+        for c in cache.keys() {
+            println!("cache key: {}", ProveExpressionUnit::key_to_string(*c));
+        }
+        unit_cache.data = cache;
 
         let domain = &pk.vk.domain;
         let size = domain.extended_len();
