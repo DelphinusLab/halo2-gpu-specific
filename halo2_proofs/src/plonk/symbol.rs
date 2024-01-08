@@ -154,6 +154,18 @@ impl<F:FieldExt> ProveExpression<F> {
             |x| x
         )
     }
+    pub fn get_unit_set(&self) -> HashSet<usize> {
+        match &self {
+            ProveExpression::Unit(a) => {
+                HashSet::from([a.get_group()])
+            }
+            ProveExpression::Op(a, b, _) => {
+                a.get_unit_set().union(&b.get_unit_set()).cloned().collect()
+            },
+            ProveExpression::Y(_) => HashSet::new(),
+            ProveExpression::Scale(a, _b) => a.get_unit_set()
+        }
+    }
     pub fn string_of_bundle(v: &Vec<ProveExpressionUnit>) -> String {
         let mut full = "".to_string();
         for e in v.iter() {

@@ -939,20 +939,20 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
 
     let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
-    //let timer = start_timer!(|| "write from buffer");
+    let timer = start_timer!(|| "write from buffer");
     program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
-    //end_timer!(timer);
+    end_timer!(timer);
 
-    //let timer = start_timer!(|| "distribute powers zeta");
+    let timer = start_timer!(|| "distribute powers zeta");
     do_distribute_powers_zeta(
         pk,
         program,
         origin_values_buffer,
         &helper.coset_powers_buffer,
     )?;
-    //end_timer!(timer);
+    end_timer!(timer);
 
-    //let timer = start_timer!(|| "eval fft prepare");
+    let timer = start_timer!(|| "eval fft prepare");
     let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
     let kernel = program.create_kernel(
         &kernel_name,
@@ -964,9 +964,9 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         .arg(&values)
         .arg(&origin_size)
         .run()?;
-    //end_timer!(timer);
+    end_timer!(timer);
 
-    //let timer = start_timer!(|| "do fft pure");
+    let timer = start_timer!(|| "do fft pure");
     let domain = &pk.vk.domain;
     let a = do_fft_pure(
         program,
@@ -976,7 +976,7 @@ pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
         &helper.pq_buffer,
         &helper.omegas_buffer,
     );
-    //end_timer!(timer);
+    end_timer!(timer);
     //end_timer!(timerall);
     a
 }
@@ -1064,7 +1064,6 @@ pub(crate) fn do_fft_core<F: FieldExt>(
     // The precalculated values pq` and `omegas` are valid for radix degrees up to `max_deg`
     let max_deg = cmp::min(MAX_LOG2_RADIX, log_n);
 
-    //let timer = start_timer!(|| format!("fft main {}", log_n));
     // Specifies log2 of `p`, (http://www.bealto.com/gpu-fft_group-1.html)
     let mut log_p = 0u32;
     // Each iteration performs a FFT round
@@ -1081,6 +1080,8 @@ pub(crate) fn do_fft_core<F: FieldExt>(
             global_work_size as usize,
             local_work_size as usize,
         )?;
+
+        //let timer = start_timer!(|| format!("fft round {} of {}, deg is {}", log_p, log_n, deg));
         kernel
             .arg(&src_buffer)
             .arg(&dst_buffer)
@@ -1095,6 +1096,7 @@ pub(crate) fn do_fft_core<F: FieldExt>(
 
         log_p += deg;
         std::mem::swap(&mut src_buffer, &mut dst_buffer);
+        //end_timer!(timer); 
     }
 
     if let Some(divisor) = divisor {

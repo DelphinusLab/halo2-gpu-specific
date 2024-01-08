@@ -25,6 +25,7 @@ use group::{
 use num_bigint::BigUint;
 use std::any::TypeId;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
@@ -298,47 +299,6 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let n_gpu = *crate::plonk::N_GPU;
         println!("USED GPU number is {}", n_gpu);
-        let es = ProveExpression::mk_group(&e_exprs).into_iter().flatten().collect::<Vec<_>>();
-        let es = es
-            .chunks((es.len() + n_gpu - 1) / n_gpu)
-            .map(|es| {
-                let timer = start_timer!(|| "group exprs");
-                let es = ProveExpression::mk_group(&es.to_vec());
-                let mut es = es.into_iter().map(|e| {
-                    /*
-                    println!("elements:");
-                    for s in &e {
-                        println!("cells are {}", ProveExpression::<C::Scalar>::string_of_bundle(&s.0))
-                    }
-                    */
-
-                    let a = ProveExpression::reconstruct(e.as_slice());
-                    a
-                }).collect::<Vec<_>>();
-                //es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
-                end_timer!(timer);
-                for e in &es {
-                    println!("depth is {}", e.depth());
-                    println!("notation is {}", e.to_string());
-                }
-                es.iter().skip(1).fold(es[0].clone(), |acc, es| {
-                    ProveExpression::Op(Box::new(acc), Box::new(es.clone()), symbol::Bop::Sum)
-                })
-            })
-            .collect::<Vec<_>>();
-
-        for (i, e) in es.iter().enumerate() {
-            let complexity = e.get_complexity();
-            ev.unit_ref_count = complexity.ref_cnt.into_iter().collect();
-            ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
-            ev.unit_ref_count.reverse();
-
-            println!("--------- expr part {} ---------", i);
-            println!("complexity is {:?}", e.get_complexity());
-            println!("sorted ref cnt is {:?}", ev.unit_ref_count);
-            println!("r deep is {}", e.get_r_deep());
-        }
-
         // Lookups
         for lookup in cs.lookups.iter() {
             let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>| {
@@ -362,30 +322,87 @@ impl<C: CurveAffine> Evaluator<C> {
                 .push(Calculation::LcBeta(compressed_input_coset, right_gamma));
         }
 
+        
+        let mut lookup_set: HashSet<usize> = HashSet::new();
+
         // Lookups in GPU
         for lookup in cs.lookups.iter() {
             let evaluate_lc = |expressions: &Vec<Expression<_>>| {
+                let mut lookup_set: HashSet<usize> = HashSet::new();
                 let parts = expressions
                     .iter()
-                    .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
+                    .map(|expr| {
+                        let prove_expr = ProveExpression::from_expr(expr);
+                        lookup_set = lookup_set.union(&prove_expr.get_unit_set()).cloned().collect::<HashSet<usize>>();
+
+                        LookupProveExpression::Expression(prove_expr)
+                    })
                     .collect::<Vec<_>>();
                 let mut lc = parts[0].clone();
                 for part in parts.into_iter().skip(1) {
                     lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
                 }
-                lc
+                (lc, lookup_set)
             };
             // Input coset
-            let compressed_input_coset = evaluate_lc(&lookup.input_expressions);
+            let (compressed_input_coset, ciset) = evaluate_lc(&lookup.input_expressions);
             // table coset
-            let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
+            let (compressed_table_coset, ctset) = evaluate_lc(&lookup.table_expressions);
             // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
             let right_gamma = LookupProveExpression::AddGamma(Box::new(compressed_table_coset));
             ev.gpu_lookup_expr.push(LookupProveExpression::LcBeta(
                 Box::new(compressed_input_coset),
                 Box::new(right_gamma),
             ));
+
+            lookup_set = ciset.union(&ctset).cloned().collect();
         }
+
+        let mut es = ProveExpression::mk_group(&e_exprs).into_iter().flatten().collect::<Vec<_>>();
+        es.sort_unstable_by_key(|(x, _)| {
+            let s = x.iter().map(|x| x.get_group()).collect::<HashSet<_>>();
+            s.intersection(&lookup_set).count();
+        });
+        es.reverse();
+
+        let es = es
+            .chunks((es.len() + n_gpu - 1) / n_gpu)
+            .map(|es| {
+                //let es = ProveExpression::mk_group(&es.to_vec());
+                let timer = start_timer!(|| "group exprs");
+                let es = ProveExpression::mk_group(&es.to_vec());
+                let es = es.into_iter().map(|e| {
+                    let a = ProveExpression::reconstruct(e.as_slice());
+                    a
+                }).collect::<Vec<_>>();
+                //es.sort_by(|a, b| b.depth().partial_cmp(&a.depth()).unwrap());
+                end_timer!(timer);
+                for e in &es {
+                    println!("depth is {}", e.depth());
+                    println!("notation is {}",
+                             e.to_string());
+                }
+                es.iter().skip(1).fold(es[0].clone(), |acc,
+                es| {
+                    ProveExpression::Op(Box::new(acc),
+                    Box::new(es.clone()), symbol::Bop::Sum)
+                })
+            })
+        .collect::<Vec<_>>();
+
+        for (i, e) in es.iter().enumerate() {
+            let complexity = e.get_complexity();
+            ev.unit_ref_count = complexity.ref_cnt.into_iter().collect();
+            ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
+            ev.unit_ref_count.reverse();
+
+            println!("--------- expr part {} ---------", i);
+            println!("complexity is {:?}", e.get_complexity());
+            println!("sorted ref cnt is {:?}", ev.unit_ref_count);
+            println!("r deep is {}", e.get_r_deep());
+        }
+
+
 
         ev.gpu_gates_expr = es;
         ev
