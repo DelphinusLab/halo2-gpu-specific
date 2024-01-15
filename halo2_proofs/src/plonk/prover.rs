@@ -93,8 +93,6 @@ fn create_single_instances<
         }
     }
 
-    println!("k is {}", pk.vk.domain.k());
-
     // Hash verification key into transcript
     pk.vk.hash_into(transcript)?;
 
