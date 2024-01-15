@@ -19,6 +19,7 @@ use group::{
     ff::{BatchInvert, Field},
     Curve,
 };
+use log::debug;
 use num_bigint::BigUint;
 use std::any::TypeId;
 use std::collections::BTreeSet;
@@ -294,7 +295,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let e_exprs = e.flatten().into_iter().collect::<Vec<_>>();
 
         let n_gpu = *crate::plonk::N_GPU;
-        println!("gpus number is {}", n_gpu);
+        log::debug!("gpus number is {}", n_gpu);
         let es = e_exprs
             .chunks((e_exprs.len() + n_gpu - 1) / n_gpu)
             .map(|e| ProveExpression::reconstruct(e))
@@ -306,10 +307,10 @@ impl<C: CurveAffine> Evaluator<C> {
             ev.unit_ref_count.sort_by(|(_, l), (_, r)| u32::cmp(l, r));
             ev.unit_ref_count.reverse();
 
-            println!("--------- expr part {} ---------", i);
-            println!("complexity is {:?}", e.get_complexity());
-            println!("sorted ref cnt is {:?}", ev.unit_ref_count);
-            println!("r deep is {}", e.get_r_deep());
+            debug!("--------- expr part {} ---------", i);
+            debug!("complexity is {:?}", e.get_complexity());
+            debug!("sorted ref cnt is {:?}", ev.unit_ref_count);
+            debug!("r deep is {}", e.get_r_deep());
         }
 
         // Lookups

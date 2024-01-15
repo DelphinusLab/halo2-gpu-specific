@@ -30,7 +30,7 @@ harness = false
 
 [dependencies]
 core_affinity = "0.5.10"
-ark-std = { version = "0.3.0", features = ["print-trace"] }
+ark-std = { version = "0.4.0" }
 backtrace = { version = "0.3", optional = true }
 ec-gpu-gen = { git = "https://github.com/lanbones/ec-gpu", branch = "halo2-opt-v2", optional = true }
 pairing = { git = "https://github.com/lanbones/pairing", package = "pairing_bn256"}
@@ -50,6 +50,7 @@ num = "0.4"
 cuda-driver-sys = "0.3.0"
 lazy_static = "1.4.0"
 memmap = "0.7"
+log = "0.4.17"
 
 # Developer tooling dependencies
 plotters = { version = "0.3.0", optional = true }
@@ -83,6 +84,7 @@ gadget-traces = ["backtrace"]
 sanity-checks = []
 shplonk = []
 gwc = []
+profile = ["ark-std/print-trace"]
 cuda = ["ec-gpu-gen/cuda", "pairing/gpu"]
 
 [lib]
