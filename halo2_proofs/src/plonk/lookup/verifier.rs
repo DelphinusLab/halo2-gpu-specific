@@ -54,10 +54,7 @@ impl<F: FieldExt> Argument<F> {
 }
 
 impl<C: CurveAffine> PermutationCommitments<C> {
-    pub fn read_product_commitment<
-        E: EncodedChallenge<C>,
-        T: TranscriptRead<C, E>,
-    >(
+    pub fn read_product_commitment<E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
         self,
         transcript: &mut T,
     ) -> Result<Committed<C>, Error> {

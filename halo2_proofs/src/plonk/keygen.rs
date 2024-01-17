@@ -407,7 +407,7 @@ where
     //We do not support the case when selectors exists
     //let selectors = vec![vec![false; params.n as usize]; cs.num_selectors];
     let selectors = vec![];
-    use ark_std::{start_timer, end_timer};
+    use ark_std::{end_timer, start_timer};
 
     let timer = start_timer!(|| "compress selectors ...");
     let (cs, _) = cs.compress_selectors(selectors);

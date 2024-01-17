@@ -58,7 +58,7 @@ pub trait ParaSerializable: Clone {
     fn vec_store(&self, fd: &mut File) -> io::Result<()>;
 }
 
-fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
+pub(crate) fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
     let mut r = [0u8; 4];
     reader.read(&mut r)?;
     Ok(u32::from_le_bytes(r))
@@ -102,7 +102,6 @@ impl Serializable for (String, u32) {
     }
 }
 
-
 impl ParaSerializable for Vec<Vec<(u32, u32)>> {
     fn vec_fetch(fd: &mut File) -> io::Result<Self> {
         let columns = read_u32(fd)?;
@@ -114,7 +113,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
             offset = offset + l;
         }
         let position = fd.stream_position()?;
-        let res:Vec<Vec<(u32,u32)>> = (0..columns)
+        let res: Vec<Vec<(u32, u32)>> = (0..columns)
             .into_par_iter()
             .map(|i| {
                 let mmap = unsafe {
@@ -125,7 +124,10 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
                         .unwrap()
                 };
                 let s: &[(u32, u32)] = unsafe {
-                    std::slice::from_raw_parts(mmap.as_ptr() as *const (u32, u32), offsets[i as usize].1 as usize)
+                    std::slice::from_raw_parts(
+                        mmap.as_ptr() as *const (u32, u32),
+                        offsets[i as usize].1 as usize,
+                    )
                 };
                 let mut s2 = vec![];
                 s2.extend_from_slice(s);
@@ -149,33 +151,31 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         let position = fd.stream_position()?;
         fd.set_len(position + (offset as u64 * 8)).unwrap();
         self.into_par_iter().enumerate().for_each(|(i, s2)| {
-           let mut mmap = unsafe {
-               MmapOptions::new()
-                   .offset(position + (offsets[i as usize].0 as u64 * 8))
-                   .len(offsets[i as usize].1 as usize * 8)
-                   .map_mut(&fd)
-                   .unwrap()
-           };
-           let s: &[u8] = unsafe {
-               std::slice::from_raw_parts(
-                   s2.as_ptr() as *const u8,
-                   offsets[i as usize].1 as usize * 8,
-               )
-           };
-           (&mut mmap).copy_from_slice(s);
+            let mut mmap = unsafe {
+                MmapOptions::new()
+                    .offset(position + (offsets[i as usize].0 as u64 * 8))
+                    .len(offsets[i as usize].1 as usize * 8)
+                    .map_mut(&fd)
+                    .unwrap()
+            };
+            let s: &[u8] = unsafe {
+                std::slice::from_raw_parts(
+                    s2.as_ptr() as *const u8,
+                    offsets[i as usize].1 as usize * 8,
+                )
+            };
+            (&mut mmap).copy_from_slice(s);
         });
         Ok(())
     }
 }
 
-impl<B:Clone, F: FieldExt> Serializable for Polynomial<F, B> {
+impl<B: Clone, F: FieldExt> Serializable for Polynomial<F, B> {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         let u = read_u32(reader)?;
         let mut buf = vec![0u8; u as usize * 32];
         reader.read_exact(&mut buf)?;
-        let s: &[F] = unsafe {
-            std::slice::from_raw_parts(buf.as_ptr() as *const F, u as usize)
-        };
+        let s: &[F] = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const F, u as usize) };
         Ok(Polynomial::new(s.to_vec()))
     }
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
@@ -189,19 +189,21 @@ impl<B:Clone, F: FieldExt> Serializable for Polynomial<F, B> {
     }
 }
 
-
-
 impl<C: CurveAffine> Serializable for VerifyingKey<C> {
+    /// deprecated, use CircuitData instead
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let j = (self.domain.get_quotient_poly_degree() + 1) as u32; // quotient_poly_degree is j-1
         let k = self.domain.k() as u32;
         writer.write(&mut j.to_le_bytes())?;
         writer.write(&mut k.to_le_bytes())?;
         write_cs::<C, W>(&self.cs, writer)?;
+
         self.write(writer)?;
+
         Ok(())
     }
 
+    /// deprecated, use CircuitData instead
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<VerifyingKey<C>> {
         let j = read_u32(reader)?;
         let k = read_u32(reader)?;
@@ -392,7 +394,7 @@ fn read_fixed_columns<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<C
     Ok(columns)
 }
 
-fn write_cs<C: CurveAffine, W: io::Write>(
+pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
     cs: &ConstraintSystem<C::Scalar>,
     writer: &mut W,
 ) -> io::Result<()> {
@@ -420,7 +422,9 @@ fn write_cs<C: CurveAffine, W: io::Write>(
     Ok(())
 }
 
-fn read_cs<C: CurveAffine, R: io::Read>(reader: &mut R) -> io::Result<ConstraintSystem<C::Scalar>> {
+pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
+    reader: &mut R,
+) -> io::Result<ConstraintSystem<C::Scalar>> {
     let num_advice_columns = read_u32(reader)? as usize;
     let num_instance_columns = read_u32(reader)? as usize;
     let num_selectors = read_u32(reader)? as usize;
@@ -790,7 +794,7 @@ impl ParaSerializable for Assembly {
     fn vec_fetch(fd: &mut File) -> io::Result<Self> {
         let assembly = Assembly {
             columns: vec![], //Vec::fetch(reader)?,
-            mapping: Vec::<Vec::<(u32, u32)>>::vec_fetch(fd)?,
+            mapping: Vec::<Vec<(u32, u32)>>::vec_fetch(fd)?,
             aux: vec![],   //Vec::fetch(reader)?,
             sizes: vec![], //Vec::fetch(reader)?,
         };
@@ -950,6 +954,7 @@ impl<F: FieldExt> Serializable for Assigned<F> {
     }
 }
 
+#[deprecated = "use CircuitData::new instead"]
 pub fn store_pk_info<C: CurveAffine, ConcreteCircuit>(
     params: &Params<C>,
     vk: &VerifyingKey<C>,
@@ -960,7 +965,7 @@ pub fn store_pk_info<C: CurveAffine, ConcreteCircuit>(
 where
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    use ark_std::{start_timer, end_timer};
+    use ark_std::{end_timer, start_timer};
     let timer = start_timer!(|| "test generate_pk_info ...");
     let (fixed, permutation) = generate_pk_info(params, vk, circuit).unwrap();
     end_timer!(timer);
@@ -973,12 +978,13 @@ where
     Ok(())
 }
 
+#[deprecated = "use CircuitData::read and CircuitData::into_proving_key instead"]
 pub fn fetch_pk_info<C: CurveAffine>(
     params: &Params<C>,
     vk: &VerifyingKey<C>,
     reader: &mut File,
 ) -> io::Result<ProvingKey<C>> {
-    use ark_std::{start_timer, end_timer};
+    use ark_std::{end_timer, start_timer};
     let timer = start_timer!(|| "test fetch fixed...");
     let fixed = Vec::fetch(reader)?;
     end_timer!(timer);

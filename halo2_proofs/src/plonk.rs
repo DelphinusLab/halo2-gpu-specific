@@ -8,7 +8,7 @@
 use blake2b_simd::Params as Blake2bParams;
 
 use crate::arithmetic::{BaseExt, CurveAffine, FieldExt};
-use crate::helpers::CurveRead;
+use crate::helpers::{read_cs, read_u32, write_cs, CurveRead, ParaSerializable, Serializable};
 use crate::poly::{
     commitment::Params, Coeff, EvaluationDomain, ExtendedLagrangeCoeff, LagrangeCoeff,
     PinnedEvaluationDomain, Polynomial,
@@ -35,9 +35,11 @@ pub use keygen::*;
 pub use prover::*;
 pub use verifier::*;
 
+use std::fs::File;
 use std::io;
 
 use self::evaluation::Evaluator;
+use self::permutation::keygen::Assembly;
 
 /// This is a verifying key which allows for the verification of proofs for a
 /// particular circuit.
@@ -116,6 +118,87 @@ impl<C: CurveAffine> VerifyingKey<C> {
     }
 }
 
+#[derive(Debug)]
+pub struct CircuitData<C: CurveAffine> {
+    vkey: VerifyingKey<C>,
+    fixed: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    permutation: permutation::keygen::Assembly,
+}
+
+impl<C: CurveAffine> CircuitData<C> {
+    pub fn new<ConcreteCircuit: Circuit<C::Scalar>>(
+        params: &Params<C>,
+        vkey: VerifyingKey<C>,
+        circuit: &ConcreteCircuit,
+    ) -> io::Result<Self> {
+        let (fixed, permutation) = generate_pk_info(params, &vkey, circuit).unwrap();
+
+        Ok(CircuitData {
+            vkey,
+            fixed,
+            permutation,
+        })
+    }
+
+    pub fn read_vkey(reader: &mut File) -> io::Result<VerifyingKey<C>> {
+        let j = read_u32(reader)?;
+        let k = read_u32(reader)?;
+        let domain: EvaluationDomain<C::Scalar> = EvaluationDomain::new(j, k);
+        let cs = read_cs::<C, _>(reader)?;
+
+        let fixed_commitments: Vec<_> = (0..cs.num_fixed_columns)
+            .map(|_| C::read(reader))
+            .collect::<Result<_, _>>()?;
+
+        let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
+
+        Ok(VerifyingKey {
+            domain,
+            cs,
+            fixed_commitments,
+            permutation,
+        })
+    }
+
+    pub fn read(reader: &mut File) -> io::Result<Self> {
+        let vkey = Self::read_vkey(reader)?;
+
+        let fixed = Vec::fetch(reader)?;
+        let permutation = Assembly::vec_fetch(reader)?;
+
+        Ok(CircuitData {
+            vkey,
+            fixed,
+            permutation,
+        })
+    }
+
+    pub fn write(&self, fd: &mut File) -> io::Result<()> {
+        use std::io::Write;
+
+        let j = (self.vkey.domain.get_quotient_poly_degree() + 1) as u32; // quotient_poly_degree is j-1
+        let k = self.vkey.domain.k() as u32;
+        fd.write(&mut j.to_le_bytes())?;
+        fd.write(&mut k.to_le_bytes())?;
+        write_cs::<C, _>(&self.vkey.cs, fd)?;
+
+        self.vkey.write(fd)?;
+
+        self.fixed.store(fd)?;
+        self.permutation.vec_store(fd)?;
+
+        Ok(())
+    }
+
+    pub fn into_proving_key(self, params: &Params<C>) -> ProvingKey<C> {
+        keygen_pk_from_info(params, &self.vkey, self.fixed, self.permutation).unwrap()
+    }
+
+    pub fn get_vkey(&self) -> &VerifyingKey<C> {
+        &self.vkey
+    }
+}
+
 /// Minimal representation of a verification key that can be used to identify
 /// its active contents.
 #[allow(dead_code)]
@@ -133,14 +216,14 @@ pub struct PinnedVerificationKey<'a, C: CurveAffine> {
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
     vk: VerifyingKey<C>,
-    
+
     l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
 
     #[cfg(not(feature = "cuda"))]
     l0: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
     #[cfg(not(feature = "cuda"))]
     l_last: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
-    
+
     #[cfg(feature = "cuda")]
     l0: Polynomial<C::Scalar, Coeff>,
     #[cfg(feature = "cuda")]
