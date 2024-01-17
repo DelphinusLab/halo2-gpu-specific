@@ -1,6 +1,5 @@
 //! # halo2_proofs
 #![feature(local_key_cell_methods)]
-
 #![cfg_attr(docsrs, feature(doc_cfg))]
 // Build without warnings on stable 1.51 and later.
 #![allow(unknown_lints)]

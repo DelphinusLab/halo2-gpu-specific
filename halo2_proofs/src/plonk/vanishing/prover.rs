@@ -5,7 +5,7 @@ use group::Curve;
 use rand::rngs::ThreadRng;
 use rand::thread_rng;
 use rand_core::RngCore;
-use rayon::prelude::{ParallelIterator, IntoParallelRefIterator};
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use rayon::slice::ParallelSlice;
 
 use super::Argument;

@@ -450,8 +450,6 @@ impl<F: FieldExt> ProveExpression<F> {
         let mut values = pk.vk.domain.empty_extended();
         let devices = Device::all();
 
-
-
         let device = devices[gpu_idx % devices.len()];
         let programs = vec![ec_gpu_gen::program!(device).unwrap()];
         let kern =

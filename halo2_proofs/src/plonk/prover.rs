@@ -1,3 +1,4 @@
+use crate::helpers::AssignWitnessCollection;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
 use ff::Field;
@@ -12,14 +13,13 @@ use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::slice::ParallelSlice;
 use std::env::var;
-use std::iter::FromIterator;
 use std::fs::File;
+use std::iter::FromIterator;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Condvar, Mutex};
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
-use crate::helpers::AssignWitnessCollection;
 
 use super::{
     circuit::{
@@ -77,11 +77,7 @@ struct InstanceSingle<C: CurveAffine> {
     pub instance_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
 }
 
-fn create_single_instances<
-    C: CurveAffine,
-    E: EncodedChallenge<C>,
-    T: TranscriptWrite<C, E>,
->(
+fn create_single_instances<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptWrite<C, E>>(
     params: &Params<C>,
     pk: &ProvingKey<C>,
     instances: &[&[&[C::Scalar]]],
@@ -160,8 +156,6 @@ fn create_single_instances<
     Ok(instance)
 }
 
-
-
 /// This creates a proof for the provided `circuit` when given the public
 /// parameters `params` and the proving key [`ProvingKey`] that was
 /// generated previously for the same circuit. The provided `instances`
@@ -180,7 +174,6 @@ pub fn create_proof<
     mut rng: R,
     transcript: &mut T,
 ) -> Result<(), Error> {
-
     let domain = &pk.vk.domain;
 
     let timer = start_timer!(|| "instance");
@@ -816,10 +809,7 @@ pub fn create_proof<
 }
 
 /// generate and write witness to files
-pub fn create_witness<
-    C: CurveAffine,
-    ConcreteCircuit: Circuit<C::Scalar>,
->(
+pub fn create_witness<C: CurveAffine, ConcreteCircuit: Circuit<C::Scalar>>(
     params: &Params<C>,
     pk: &ProvingKey<C>,
     circuit: &ConcreteCircuit,
@@ -828,7 +818,14 @@ pub fn create_witness<
 ) -> Result<(), Error> {
     let meta = &pk.vk.cs;
     let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
-    AssignWitnessCollection::store_witness(params, pk, instances, unusable_rows_start, circuit, fd)?;
+    AssignWitnessCollection::store_witness(
+        params,
+        pk,
+        instances,
+        unusable_rows_start,
+        circuit,
+        fd,
+    )?;
     Ok(())
 }
 
@@ -880,12 +877,13 @@ pub fn create_proof_from_witness<
         get_scalar_bits(x.iter().fold(C::Scalar::zero(), |acc, x| acc.max(*x)))
     };
 
-    let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> =
-        instances.iter()
+    let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> = instances
+        .iter()
         .map(|_| -> Vec<Polynomial<C::Scalar, LagrangeCoeff>> {
             let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
 
-            let mut advice = AssignWitnessCollection::fetch_witness(params, fd).expect("fetch witness should not fail");
+            let mut advice = AssignWitnessCollection::fetch_witness(params, fd)
+                .expect("fetch witness should not fail");
 
             let timer = start_timer!(|| "rng");
             advice.par_iter_mut().for_each(|advice| {
@@ -1303,4 +1301,3 @@ pub fn create_proof_from_witness<
     end_timer!(timer);
     res
 }
-

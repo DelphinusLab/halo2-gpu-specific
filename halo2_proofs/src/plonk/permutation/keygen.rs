@@ -77,12 +77,15 @@ impl Assembly {
             return Ok(());
         }
 
-        if self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] < self.sizes[right_cycle.0 as usize][right_cycle.1 as usize] {
+        if self.sizes[left_cycle.0 as usize][left_cycle.1 as usize]
+            < self.sizes[right_cycle.0 as usize][right_cycle.1 as usize]
+        {
             std::mem::swap(&mut left_cycle, &mut right_cycle);
         }
 
         // Merge the right cycle into the left one.
-        self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] += self.sizes[right_cycle.0 as usize][right_cycle.1 as usize];
+        self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] +=
+            self.sizes[right_cycle.0 as usize][right_cycle.1 as usize];
         let mut i = right_cycle;
         loop {
             self.aux[i.0 as usize][i.1 as usize] = left_cycle;
