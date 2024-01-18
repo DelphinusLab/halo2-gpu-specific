@@ -269,19 +269,21 @@ impl<G: Group> EvaluationDomain<G> {
     /// evaluation domain, rotating by `rotation` if desired.
     pub fn coeff_to_extended(
         &self,
-        mut a: Polynomial<G, Coeff>,
+        a: &Polynomial<G, Coeff>,
     ) -> Polynomial<G, ExtendedLagrangeCoeff> {
         assert_eq!(a.values.len(), 1 << self.k);
-
+        // pre allocate memory to avoid vec growing
+        let mut values = Vec::with_capacity(self.extended_len());
+        values.extend_from_slice(&a.values);
         //let timer = start_timer!(|| format!("prepare {}", self.k));
-        self.distribute_powers_zeta(&mut a.values, true);
+        self.distribute_powers_zeta(&mut values, true);
         //end_timer!(timer);
 
-        a.values.resize(self.extended_len(), G::group_zero());
-        best_fft(&mut a.values, self.extended_omega, self.extended_k);
+        values.resize(self.extended_len(), G::group_zero());
+        best_fft(&mut values, self.extended_omega, self.extended_k);
 
         Polynomial {
-            values: a.values,
+            values,
             _marker: PhantomData,
         }
     }

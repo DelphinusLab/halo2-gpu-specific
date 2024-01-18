@@ -25,10 +25,14 @@ impl Assembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
         // Initialize the copy vector to keep track of copy constraints in all
         // the permutation arguments.
-        let mut columns = vec![];
+        let mut columns = Vec::with_capacity(p.columns.len());
         for i in 0..p.columns.len() {
             // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
-            columns.push((0..n).map(|j| (i as u32, j as u32)).collect());
+            let mut values = Vec::with_capacity(n);
+            for j in 0..n {
+                values.push((i as u32, j as u32));
+            }
+            columns.push(values);
         }
 
         // Before any equality constraints are applied, every cell in the permutation is
@@ -36,9 +40,9 @@ impl Assembly {
         // its own distinguished element.
         Assembly {
             columns: p.columns.clone(),
-            mapping: columns.clone(),
-            aux: columns,
-            sizes: vec![vec![1usize; n]; p.columns.len()],
+            mapping: columns,
+            aux: vec![], //columns,
+            sizes: vec![], //vec![vec![1usize; n]; p.columns.len()],
         }
     }
 
@@ -202,7 +206,7 @@ impl Assembly {
         #[cfg(not(feature = "cuda"))]
         let cosets = polys
             .par_iter()
-            .map(|poly| domain.coeff_to_extended(poly.clone()))
+            .map(|poly| domain.coeff_to_extended(poly))
             .collect();
 
         ProvingKey {

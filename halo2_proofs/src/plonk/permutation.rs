@@ -88,9 +88,11 @@ impl<C: CurveAffine> VerifyingKey<C> {
     }
 
     pub fn read<R: io::Read>(reader: &mut R, argument: &Argument) -> io::Result<Self> {
-        let commitments = (0..argument.columns.len())
-            .map(|_| C::read(reader))
-            .collect::<Result<Vec<_>, _>>()?;
+        let len = argument.columns.len();
+        let mut commitments = Vec::with_capacity(len);
+        for _ in 0..len {
+            commitments.push(C::read(reader)?);
+        }
         Ok(VerifyingKey { commitments })
     }
 }

@@ -717,15 +717,15 @@ impl<C: CurveAffine> Evaluator<C> {
                 // Polynomials required for this lookup.
                 // Calculated here so these only have to be kept in memory for the short time
                 // they are actually needed.
-                let product_coset = pk.vk.domain.coeff_to_extended(lookup.product_poly.clone());
+                let product_coset = pk.vk.domain.coeff_to_extended(&lookup.product_poly);
                 let permuted_input_coset = pk
                     .vk
                     .domain
-                    .coeff_to_extended(lookup.permuted_input_poly.clone());
+                    .coeff_to_extended(&lookup.permuted_input_poly);
                 let permuted_table_coset = pk
                     .vk
                     .domain
-                    .coeff_to_extended(lookup.permuted_table_poly.clone());
+                    .coeff_to_extended(&lookup.permuted_table_poly);
 
                 parallelize(&mut values, |values, start| {
                     for (i, value) in values.iter_mut().enumerate() {
