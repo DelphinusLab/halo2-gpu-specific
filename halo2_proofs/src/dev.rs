@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::iter;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::ops::{Add, Mul, Neg, Range};
 
 use ff::Field;
@@ -509,14 +511,18 @@ pub struct MockProver<F: Group + Field> {
     usable_rows: Range<usize>,
 }
 
-impl<F: Field + Group> Assignment<F> for MockProver<F> {
-    fn enter_region<NR, N>(&mut self, name: N)
+#[derive(Debug)]
+pub struct SharedMockProver<F: Group + Field> (Arc<Mutex<MockProver<F>>>);
+
+impl<F: Field + Group> Assignment<F> for SharedMockProver<F> {
+    fn enter_region<NR, N>(&self, name: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
     {
-        assert!(self.current_region.is_none());
-        self.current_region = Some(Region {
+        let mut prover = self.0.lock().unwrap();
+        assert!(prover.current_region.is_none());
+        prover.current_region = Some(Region {
             name: name().into(),
             columns: HashSet::default(),
             rows: None,
@@ -525,22 +531,25 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         });
     }
 
-    fn exit_region(&mut self) {
-        self.regions.push(self.current_region.take().unwrap());
+    fn exit_region(&self) {
+        let mut prover = self.0.lock().unwrap();
+        let t = prover.current_region.take().unwrap();
+        prover.regions.push(t);
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
         // Track that this selector was enabled. We require that all selectors are enabled
         // inside some region (i.e. no floating selectors).
-        self.current_region
+        prover.current_region
             .as_mut()
             .unwrap()
             .enabled_selectors
@@ -548,17 +557,18 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
             .or_default()
             .push(row);
 
-        self.selectors[selector.0][row] = true;
+        prover.selectors[selector.0][row] = true;
 
         Ok(())
     }
 
     fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Option<F>, Error> {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        self.instance
+        prover.instance
             .get(column.index())
             .and_then(|column| column.get(row))
             .map(|v| Some(*v))
@@ -566,7 +576,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Advice>,
         row: usize,
@@ -578,16 +588,17 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        if let Some(region) = self.current_region.as_mut() {
+        if let Some(region) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
         }
 
-        *self
+        *prover
             .advice
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
@@ -597,7 +608,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Fixed>,
         row: usize,
@@ -609,16 +620,17 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        if let Some(region) = self.current_region.as_mut() {
+        if let Some(region) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
         }
 
-        *self
+        *prover
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
@@ -628,38 +640,40 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn copy(
-        &mut self,
+        &self,
         left_column: Column<Any>,
         left_row: usize,
         right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), crate::plonk::Error> {
-        if !self.usable_rows.contains(&left_row) || !self.usable_rows.contains(&right_row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&left_row) || !prover.usable_rows.contains(&right_row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        self.permutation
+        prover.permutation
             .copy(left_column, left_row, right_column, right_row)
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         col: Column<Fixed>,
         from_row: usize,
         to: Option<Assigned<F>>,
     ) -> Result<(), Error> {
-        if !self.usable_rows.contains(&from_row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let prover = self.0.lock().unwrap();
+        if !prover.usable_rows.contains(&from_row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        for row in self.usable_rows.clone().skip(from_row) {
+        for row in prover.usable_rows.clone().skip(from_row) {
             self.assign_fixed(|| "", col, row, || to.ok_or(Error::Synthesis))?;
         }
 
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -667,7 +681,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         // TODO: Do something with namespaces :)
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // TODO: Do something with namespaces :)
     }
 }
@@ -726,7 +740,7 @@ impl<F: FieldExt> MockProver<F> {
         let permutation = permutation::keygen::Assembly::new(n, &cs.permutation);
         let constants = cs.constants.clone();
 
-        let mut prover = MockProver {
+        let prover = SharedMockProver (Arc::new(Mutex::new(MockProver {
             k,
             n: n as u32,
             cs,
@@ -738,9 +752,13 @@ impl<F: FieldExt> MockProver<F> {
             selectors,
             permutation,
             usable_rows: 0..usable_rows,
-        };
+        })));
 
-        ConcreteCircuit::FloorPlanner::synthesize(&mut prover, circuit, config, constants)?;
+        ConcreteCircuit::FloorPlanner::synthesize(&prover, circuit, config, constants)?;
+
+        let mock_prover = prover.0;
+
+        let mut prover = Arc::try_unwrap(mock_prover).unwrap().into_inner().unwrap();
 
         let (cs, selector_polys) = prover.cs.compress_selectors(prover.selectors.clone());
         prover.cs = cs;

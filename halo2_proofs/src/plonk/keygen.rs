@@ -1,6 +1,9 @@
 #![allow(clippy::int_plus_one)]
 
+use std::borrow::BorrowMut;
 use std::ops::Range;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ark_std::{end_timer, start_timer};
 use ff::Field;
@@ -47,10 +50,8 @@ where
     (domain, cs, config)
 }
 
-/// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
-struct Assembly<F: Field> {
-    k: u32,
+struct AssemblyDynamic<F:Field> {
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
     selectors: Vec<Vec<bool>>,
@@ -59,8 +60,15 @@ struct Assembly<F: Field> {
     _marker: std::marker::PhantomData<F>,
 }
 
+/// Assembly to be used in circuit synthesis.
+#[derive(Debug)]
+struct Assembly<F: Field> {
+    k: u32,
+    dynamic: Arc<Mutex<AssemblyDynamic<F>>>
+}
+
 impl<F: Field> Assignment<F> for Assembly<F> {
-    fn enter_region<NR, N>(&mut self, _: N)
+    fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -68,26 +76,26 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn exit_region(&mut self) {
+    fn exit_region(&self) {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
+        if !self.dynamic.lock().unwrap().usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        self.selectors[selector.0][row] = true;
+        self.dynamic.lock().unwrap().selectors[selector.0][row] = true;
 
         Ok(())
     }
 
     fn query_instance(&self, _: Column<Instance>, row: usize) -> Result<Option<F>, Error> {
-        if !self.usable_rows.contains(&row) {
+        if !self.dynamic.lock().unwrap().usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
@@ -96,7 +104,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Advice>,
         _: usize,
@@ -113,7 +121,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Fixed>,
         row: usize,
@@ -125,11 +133,14 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
+        if !self.dynamic.lock().unwrap().usable_rows.contains(&row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
         *self
+            .dynamic
+            .lock()
+            .unwrap()
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
@@ -139,43 +150,47 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn copy(
-        &mut self,
+        &self,
         left_column: Column<Any>,
         left_row: usize,
         right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), Error> {
-        if !self.usable_rows.contains(&left_row) || !self.usable_rows.contains(&right_row) {
+        let mut dynamic = self.dynamic.lock().unwrap();
+        if !dynamic.usable_rows.contains(&left_row) || !dynamic.usable_rows.contains(&right_row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        self.permutation
+        dynamic.permutation
             .copy(left_column, left_row, right_column, right_row)
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         column: Column<Fixed>,
         from_row: usize,
         to: Option<Assigned<F>>,
     ) -> Result<(), Error> {
-        if !self.usable_rows.contains(&from_row) {
+        let mut dynamic = self.dynamic.lock().unwrap();
+        if !dynamic.usable_rows.contains(&from_row) {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        let col = self
+        let rows = dynamic.usable_rows.clone();
+
+        let col = dynamic
             .fixed
             .get_mut(column.index())
             .ok_or(Error::BoundsFailure)?;
 
-        for row in self.usable_rows.clone().skip(from_row) {
+        for row in rows.skip(from_row) {
             col[row] = to.ok_or(Error::Synthesis)?;
         }
 
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -183,7 +198,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         // Do nothing; we don't care about namespaces in this context.
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
@@ -205,11 +220,13 @@ where
 
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k,
-        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
-        usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        dynamic: Arc::new(Mutex::new(AssemblyDynamic {
+            fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns],
+            permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
+            selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+            usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
+            _marker: std::marker::PhantomData,
+        })),
     };
 
     // Synthesize the circuit to obtain URS
@@ -220,15 +237,17 @@ where
         cs.constants.clone(),
     )?;
 
-    let mut fixed = batch_invert_assigned(assembly.fixed);
-    let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
+    let dynamic = Arc::try_unwrap(assembly.dynamic).unwrap().into_inner().unwrap();
+
+    let mut fixed = batch_invert_assigned(dynamic.fixed);
+    let (cs, selector_polys) = cs.compress_selectors(dynamic.selectors);
     fixed.extend(
         selector_polys
             .into_iter()
             .map(|poly| domain.lagrange_from_vec(poly)),
     );
 
-    let permutation_vk = assembly
+    let permutation_vk = dynamic
         .permutation
         .build_vk(params, &domain, &cs.permutation);
 
@@ -264,27 +283,31 @@ where
         return Err(Error::not_enough_rows_available(params.k));
     }
 
-    let mut assembly: Assembly<C::Scalar> = Assembly {
+    let assembly: Assembly<C::Scalar> = Assembly {
         k: params.k,
-        fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
-        usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        dynamic: Arc::new(Mutex::new(AssemblyDynamic {
+            fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
+            permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
+            selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+            usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
+            _marker: std::marker::PhantomData,
+        })),
     };
 
     // Synthesize the circuit to obtain URS
     ConcreteCircuit::FloorPlanner::synthesize(
-        &mut assembly,
+        &assembly,
         circuit,
         config,
         cs.constants.clone(),
     )?;
 
+    let dynamic = Arc::try_unwrap(assembly.dynamic).unwrap().into_inner().unwrap();
+
     let timer = start_timer!(|| "unnecessary part");
     let (cs, fixed) = if false {
-        let mut fixed = batch_invert_assigned(assembly.fixed);
-        let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
+        let mut fixed = batch_invert_assigned(dynamic.fixed);
+        let (cs, selector_polys) = cs.compress_selectors(dynamic.selectors);
         fixed.extend(
             selector_polys
                 .into_iter()
@@ -292,10 +315,10 @@ where
         );
         (cs, fixed)
     } else {
-        assert!(assembly.selectors.len() == 0);
+        assert!(dynamic.selectors.len() == 0);
         (
             cs,
-            assembly
+            dynamic
                 .fixed
                 .into_par_iter()
                 .map(|x| Polynomial {
@@ -327,7 +350,7 @@ where
         .collect();
 
     let timer = start_timer!(|| "assembly build pkey");
-    let permutation_pk = assembly
+    let permutation_pk = dynamic
         .permutation
         .build_pk(params, &vk.domain, &cs.permutation);
     end_timer!(timer);
@@ -515,11 +538,13 @@ where
 
     let mut assembly: Assembly<C::Scalar> = Assembly {
         k: params.k,
-        fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
-        usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        dynamic: Arc::new(Mutex::new(AssemblyDynamic {
+            fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
+            permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
+            selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+            usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
+            _marker: std::marker::PhantomData,
+        })),
     };
 
     // Synthesize the circuit to obtain URS
@@ -529,6 +554,8 @@ where
         config,
         cs.constants.clone(),
     )?;
-    let fixed = batch_invert_assigned(assembly.fixed);
-    Ok((fixed, assembly.permutation))
+
+    let dynamic = Arc::try_unwrap(assembly.dynamic).unwrap().into_inner().unwrap();
+    let fixed = batch_invert_assigned(dynamic.fixed);
+    Ok((fixed, dynamic.permutation))
 }

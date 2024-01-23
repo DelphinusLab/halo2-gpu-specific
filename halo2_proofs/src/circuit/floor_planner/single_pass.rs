@@ -2,12 +2,14 @@ use std::cmp;
 use std::collections::HashMap;
 use std::fmt;
 use std::marker::PhantomData;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ff::Field;
 
 use crate::{
     circuit::{
-        layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter},
+        layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter, SharedRegion},
         Cell, Layouter, Region, RegionIndex, RegionStart, Table,
     },
     plonk::{
@@ -26,7 +28,7 @@ pub struct SimpleFloorPlanner;
 
 impl FloorPlanner for SimpleFloorPlanner {
     fn synthesize<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        cs: &mut CS,
+        cs: &CS,
         circuit: &C,
         config: C::Config,
         constants: Vec<Column<Fixed>>,
@@ -36,9 +38,7 @@ impl FloorPlanner for SimpleFloorPlanner {
     }
 }
 
-/// A [`Layouter`] for a single-chip circuit.
-pub struct SingleChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
-    cs: &'a mut CS,
+pub struct SingleChipDynamic<F: Field> {
     constants: Vec<Column<Fixed>>,
     /// Stores the starting row for each region.
     regions: Vec<RegionStart>,
@@ -49,25 +49,34 @@ pub struct SingleChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
     _marker: PhantomData<F>,
 }
 
+/// A [`Layouter`] for a single-chip circuit.
+pub struct SingleChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
+    cs: &'a CS,
+    dynamic: Arc<Mutex<SingleChipDynamic<F>>>,
+}
+
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SingleChipLayouter<'a, F, CS> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let dynamic = self.dynamic.lock().unwrap();
         f.debug_struct("SingleChipLayouter")
-            .field("regions", &self.regions)
-            .field("columns", &self.columns)
+            .field("regions", &dynamic.regions)
+            .field("columns", &dynamic.columns)
             .finish()
     }
 }
 
 impl<'a, F: Field, CS: Assignment<F>> SingleChipLayouter<'a, F, CS> {
     /// Creates a new single-chip layouter.
-    pub fn new(cs: &'a mut CS, constants: Vec<Column<Fixed>>) -> Result<Self, Error> {
+    pub fn new(cs: &'a CS, constants: Vec<Column<Fixed>>) -> Result<Self, Error> {
         let ret = SingleChipLayouter {
             cs,
-            constants,
-            regions: vec![],
-            columns: HashMap::default(),
-            table_columns: vec![],
-            _marker: PhantomData,
+            dynamic: Arc::new(Mutex::new(SingleChipDynamic {
+                constants,
+                regions: vec![],
+                columns: HashMap::default(),
+                table_columns: vec![],
+                _marker: PhantomData,
+            })),
         };
         Ok(ret)
     }
@@ -76,60 +85,67 @@ impl<'a, F: Field, CS: Assignment<F>> SingleChipLayouter<'a, F, CS> {
 impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a, F, CS> {
     type Root = Self;
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
-        let region_index = self.regions.len();
+        let mut dynamic = self.dynamic.lock().unwrap();
+        let region_index = dynamic.regions.len();
 
         // Get shape of the region.
-        let mut shape = RegionShape::new(region_index.into());
-        {
-            let region: &mut dyn RegionLayouter<F> = &mut shape;
-            assignment(region.into())?;
-        }
+        let shape = RegionShape::new(region_index.into());
+        let shared_region = SharedRegion(Arc::new(Mutex::new(shape)));
+
+        let region: &dyn RegionLayouter<F> = &shared_region;
+        assignment(region.into())?;
+
+        let shape = Arc::try_unwrap(shared_region.0).unwrap().into_inner().unwrap();
 
         // Lay out this region. We implement the simplest approach here: position the
         // region starting at the earliest row for which none of the columns are in use.
         let mut region_start = 0;
         for column in &shape.columns {
-            region_start = cmp::max(region_start, self.columns.get(column).cloned().unwrap_or(0));
+            region_start = cmp::max(region_start, dynamic.columns.get(column).cloned().unwrap_or(0));
         }
-        self.regions.push(region_start.into());
+        dynamic.regions.push(region_start.into());
 
         // Update column usage information.
         for column in shape.columns {
-            self.columns.insert(column, region_start + shape.row_count);
+            dynamic.columns.insert(column, region_start + shape.row_count);
         }
 
         // Assign region cells.
         self.cs.enter_region(name);
-        let mut region = SingleChipLayouterRegion::new(self, region_index.into());
+
+        let region = SingleChipLayouterRegion::new(self, region_index.into());
         let result = {
-            let region: &mut dyn RegionLayouter<F> = &mut region;
+            let region: &dyn RegionLayouter<F> = &region;
             assignment(region.into())
         }?;
-        let constants_to_assign = region.constants;
+
+        let constants_to_assign = Arc::try_unwrap(region.constants).unwrap().into_inner().unwrap();
         self.cs.exit_region();
 
         // Assign constants. For the simple floor planner, we assign constants in order in
         // the first `constants` column.
-        if self.constants.is_empty() {
+        if dynamic.constants.is_empty() {
             if !constants_to_assign.is_empty() {
                 return Err(Error::NotEnoughColumnsForConstants);
             }
         } else {
-            let constants_column = self.constants[0];
-            let next_constant_row = self
+            let constants_column = dynamic.constants[0];
+            let regions = dynamic.regions.clone();
+
+            let next_constant_row = dynamic
                 .columns
                 .entry(Column::<Any>::from(constants_column).into())
                 .or_default();
             for (constant, advice) in constants_to_assign {
                 self.cs.assign_fixed(
                     || format!("Constant({:?})", constant.evaluate()),
-                    constants_column,
+                    constants_column.clone(),
                     *next_constant_row,
                     || Ok(constant),
                 )?;
@@ -137,7 +153,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
                     constants_column.into(),
                     *next_constant_row,
                     advice.column,
-                    *self.regions[*advice.region_index] + advice.row_offset,
+                    *regions[*advice.region_index] + advice.row_offset,
                 )?;
                 *next_constant_row += 1;
             }
@@ -146,7 +162,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         Ok(result)
     }
 
-    fn assign_table<A, N, NR>(&mut self, name: N, mut assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, mut assignment: A) -> Result<(), Error>
     where
         A: FnMut(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
@@ -154,13 +170,15 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
     {
         // Maintenance hazard: there is near-duplicate code in `v1::AssignmentPass::assign_table`.
         // Assign table cells.
+        let mut dynamic = self.dynamic.lock().unwrap();
         self.cs.enter_region(name);
-        let mut table = SimpleTableLayouter::new(self.cs, &self.table_columns);
+        let mut table = SimpleTableLayouter::new(self.cs, &dynamic.table_columns);
         {
             let table: &mut dyn TableLayouter<F> = &mut table;
             assignment(table.into())
         }?;
-        let default_and_assigned = table.default_and_assigned;
+
+        let default_and_assigned = table.default_and_assigned.lock().unwrap();
         self.cs.exit_region();
 
         // Check that all table columns have the same length `first_unused`,
@@ -186,10 +204,10 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
 
         // Record these columns so that we can prevent them from being used again.
         for column in default_and_assigned.keys() {
-            self.table_columns.push(*column);
+            dynamic.table_columns.push(*column);
         }
 
-        for (col, (default_val, _)) in default_and_assigned {
+        for (col, (default_val, _)) in default_and_assigned.iter() {
             // default_val must be Some because we must have assigned
             // at least one cell in each column, and in that case we checked
             // that all cells up to first_unused were assigned.
@@ -201,24 +219,25 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
     }
 
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         instance: Column<Instance>,
         row: usize,
     ) -> Result<(), Error> {
+        let dynamic = self.dynamic.lock().unwrap();
         self.cs.copy(
             cell.column,
-            *self.regions[*cell.region_index] + cell.row_offset,
+            *dynamic.regions[*cell.region_index] + cell.row_offset,
             instance.into(),
             row,
         )
     }
 
-    fn get_root(&mut self) -> &mut Self::Root {
+    fn get_root(&self) -> &Self::Root {
         self
     }
 
-    fn push_namespace<NR, N>(&mut self, name_fn: N)
+    fn push_namespace<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -226,16 +245,16 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         self.cs.push_namespace(name_fn)
     }
 
-    fn pop_namespace(&mut self, gadget_name: Option<String>) {
+    fn pop_namespace(&self, gadget_name: Option<String>) {
         self.cs.pop_namespace(gadget_name)
     }
 }
 
 struct SingleChipLayouterRegion<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
-    layouter: &'r mut SingleChipLayouter<'a, F, CS>,
+    layouter: &'r SingleChipLayouter<'a, F, CS>,
     region_index: RegionIndex,
     /// Stores the constants to be assigned, and the cells to which they are copied.
-    constants: Vec<(Assigned<F>, Cell)>,
+    constants: Arc<Mutex<Vec<(Assigned<F>, Cell)>>>,
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug
@@ -250,11 +269,11 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SingleChipLayouterRegion<'r, 'a, F, CS> {
-    fn new(layouter: &'r mut SingleChipLayouter<'a, F, CS>, region_index: RegionIndex) -> Self {
+    fn new(layouter: &'r SingleChipLayouter<'a, F, CS>, region_index: RegionIndex) -> Self {
         SingleChipLayouterRegion {
             layouter,
             region_index,
-            constants: vec![],
+            constants: Arc::new(Mutex::new(vec![])),
         }
     }
 }
@@ -263,7 +282,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
     for SingleChipLayouterRegion<'r, 'a, F, CS>
 {
     fn enable_selector<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         selector: &Selector,
         offset: usize,
@@ -271,21 +290,22 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
         self.layouter.cs.enable_selector(
             annotation,
             selector,
-            *self.layouter.regions[*self.region_index] + offset,
+            *self.layouter.dynamic.lock().unwrap().regions[*self.region_index] + offset,
         )
     }
 
     fn assign_advice<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
         to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
+        let dynamic = self.layouter.dynamic.lock().unwrap();
         self.layouter.cs.assign_advice(
             annotation,
             column,
-            *self.layouter.regions[*self.region_index] + offset,
+            *dynamic.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -297,7 +317,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
     }
 
     fn assign_advice_from_constant<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -310,13 +330,14 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
     }
 
     fn assign_advice_from_instance<'v>(
-        &mut self,
+        &self,
         annotation: &'v (dyn Fn() -> String + 'v),
         instance: Column<Instance>,
         row: usize,
         advice: Column<Advice>,
         offset: usize,
     ) -> Result<(Cell, Option<F>), Error> {
+        let dynamic = self.layouter.dynamic.lock().unwrap();
         let value = self.layouter.cs.query_instance(instance, row)?;
 
         let cell = self.assign_advice(annotation, advice, offset, &mut || {
@@ -325,7 +346,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
 
         self.layouter.cs.copy(
             cell.column,
-            *self.layouter.regions[*cell.region_index] + cell.row_offset,
+            *dynamic.regions[*cell.region_index] + cell.row_offset,
             instance.into(),
             row,
         )?;
@@ -334,16 +355,17 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
     }
 
     fn assign_fixed<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Fixed>,
         offset: usize,
         to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
+        let dynamic = self.layouter.dynamic.lock().unwrap();
         self.layouter.cs.assign_fixed(
             annotation,
             column,
-            *self.layouter.regions[*self.region_index] + offset,
+            *dynamic.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -354,17 +376,18 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
         })
     }
 
-    fn constrain_constant(&mut self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
-        self.constants.push((constant, cell));
+    fn constrain_constant(&self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
+        self.constants.lock().unwrap().push((constant, cell));
         Ok(())
     }
 
-    fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error> {
+    fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error> {
+        let dynamic = self.layouter.dynamic.lock().unwrap();
         self.layouter.cs.copy(
             left.column,
-            *self.layouter.regions[*left.region_index] + left.row_offset,
+            *dynamic.regions[*left.region_index] + left.row_offset,
             right.column,
-            *self.layouter.regions[*right.region_index] + right.row_offset,
+            *dynamic.regions[*right.region_index] + right.row_offset,
         )?;
 
         Ok(())
@@ -381,10 +404,10 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
 type DefaultTableValue<F> = Option<Option<Assigned<F>>>;
 
 pub(crate) struct SimpleTableLayouter<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
-    cs: &'a mut CS,
+    cs: &'a CS,
     used_columns: &'r [TableColumn],
     // maps from a fixed column to a pair (default value, vector saying which rows are assigned)
-    pub(crate) default_and_assigned: HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    pub(crate) default_and_assigned: Arc<Mutex<HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>>>,
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayouter<'r, 'a, F, CS> {
@@ -397,11 +420,11 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayoute
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SimpleTableLayouter<'r, 'a, F, CS> {
-    pub(crate) fn new(cs: &'a mut CS, used_columns: &'r [TableColumn]) -> Self {
+    pub(crate) fn new(cs: &'a CS, used_columns: &'r [TableColumn]) -> Self {
         SimpleTableLayouter {
             cs,
             used_columns,
-            default_and_assigned: HashMap::default(),
+            default_and_assigned: Arc::new(Mutex::new(HashMap::default())),
         }
     }
 }
@@ -410,7 +433,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
     for SimpleTableLayouter<'r, 'a, F, CS>
 {
     fn assign_cell<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: TableColumn,
         offset: usize,
@@ -420,7 +443,9 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
             return Err(Error::Synthesis); // TODO better error
         }
 
-        let entry = self.default_and_assigned.entry(column).or_default();
+        let mut binding = self.default_and_assigned.lock().unwrap();
+
+        let entry = binding.entry(column).or_default();
 
         let mut value = None;
         self.cs.assign_fixed(

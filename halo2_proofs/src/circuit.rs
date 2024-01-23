@@ -163,11 +163,11 @@ where
 /// `Chip::Config`).
 #[derive(Debug)]
 pub struct Region<'r, F: Field> {
-    region: &'r mut dyn layouter::RegionLayouter<F>,
+    region: &'r dyn layouter::RegionLayouter<F>,
 }
 
-impl<'r, F: Field> From<&'r mut dyn layouter::RegionLayouter<F>> for Region<'r, F> {
-    fn from(region: &'r mut dyn layouter::RegionLayouter<F>) -> Self {
+impl<'r, F: Field> From<&'r dyn layouter::RegionLayouter<F>> for Region<'r, F> {
+    fn from(region: &'r dyn layouter::RegionLayouter<F>) -> Self {
         Region { region }
     }
 }
@@ -175,7 +175,7 @@ impl<'r, F: Field> From<&'r mut dyn layouter::RegionLayouter<F>> for Region<'r, 
 impl<'r, F: Field> Region<'r, F> {
     /// Enables a selector at the given offset.
     pub(crate) fn enable_selector<A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         selector: &Selector,
         offset: usize,
@@ -228,7 +228,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Returns the advice cell.
     pub fn assign_advice_from_constant<VR, A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         column: Column<Advice>,
         offset: usize,
@@ -258,7 +258,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Returns the advice cell, and its value if known.
     pub fn assign_advice_from_instance<A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         instance: Column<Instance>,
         row: usize,
@@ -355,7 +355,7 @@ impl<'r, F: Field> Table<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_cell<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: TableColumn,
         offset: usize,
@@ -396,9 +396,9 @@ pub trait Layouter<F: Field> {
     ///     region.assign_advice(config.a, offset, || { Some(value)});
     /// });
     /// ```
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
@@ -410,16 +410,16 @@ pub trait Layouter<F: Field> {
     ///     table.assign_fixed(config.a, offset, || { Some(value)});
     /// });
     /// ```
-    fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
     /// Constrains a [`Cell`] to equal an instance column's row value at an
     /// absolute position.
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         column: Column<Instance>,
         row: usize,
@@ -428,12 +428,12 @@ pub trait Layouter<F: Field> {
     /// Gets the "root" of this assignment, bypassing the namespacing.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn get_root(&mut self) -> &mut Self::Root;
+    fn get_root(&self) -> &Self::Root;
 
     /// Creates a new (sub)namespace and enters into it.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn push_namespace<NR, N>(&mut self, name_fn: N)
+    fn push_namespace<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR;
@@ -441,10 +441,10 @@ pub trait Layouter<F: Field> {
     /// Exits out of the existing namespace.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn pop_namespace(&mut self, gadget_name: Option<String>);
+    fn pop_namespace(&self, gadget_name: Option<String>);
 
     /// Enters into a namespace.
-    fn namespace<NR, N>(&mut self, name_fn: N) -> NamespacedLayouter<'_, F, Self::Root>
+    fn namespace<NR, N>(&self, name_fn: N) -> NamespacedLayouter<'_, F, Self::Root>
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -458,23 +458,23 @@ pub trait Layouter<F: Field> {
 /// This is a "namespaced" layouter which borrows a `Layouter` (pushing a namespace
 /// context) and, when dropped, pops out of the namespace context.
 #[derive(Debug)]
-pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a mut L, PhantomData<F>);
+pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a L, PhantomData<F>);
 
 impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F, L> {
     type Root = L::Root;
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
         self.0.assign_region(name, assignment)
     }
 
-    fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -482,7 +482,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
     }
 
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         column: Column<Instance>,
         row: usize,
@@ -490,11 +490,11 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         self.0.constrain_instance(cell, column, row)
     }
 
-    fn get_root(&mut self) -> &mut Self::Root {
+    fn get_root(&self) -> &Self::Root {
         self.0.get_root()
     }
 
-    fn push_namespace<NR, N>(&mut self, _name_fn: N)
+    fn push_namespace<NR, N>(&self, _name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -502,7 +502,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         panic!("Only the root's push_namespace should be called");
     }
 
-    fn pop_namespace(&mut self, _gadget_name: Option<String>) {
+    fn pop_namespace(&self, _gadget_name: Option<String>) {
         panic!("Only the root's pop_namespace should be called");
     }
 }

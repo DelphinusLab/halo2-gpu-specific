@@ -4,6 +4,8 @@ use crate::{
     plonk::{generate_pk_info, keygen_pk_from_info},
     poly::batch_invert_assigned,
 };
+use std::sync::Arc;
+use std::sync::Mutex;
 use crate::{
     plonk::{
         self,
@@ -657,14 +659,14 @@ impl<F: FieldExt> Serializable for Expression<F> {
 #[derive(Debug)]
 pub struct AssignWitnessCollection<'a, C: CurveAffine> {
     pub k: u32,
-    pub advice: Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>,
+    pub advice: Arc<Mutex<Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>>>,
     pub instances: &'a [&'a [C::Scalar]],
     pub usable_rows: RangeTo<usize>,
     pub _marker: std::marker::PhantomData<C>,
 }
 
 impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C> {
-    fn enter_region<NR, N>(&mut self, _: N)
+    fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -672,11 +674,11 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn exit_region(&mut self) {
+    fn exit_region(&self) {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, _: &Selector, _: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
@@ -703,7 +705,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Advice>,
         row: usize,
@@ -721,6 +723,8 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
 
         *self
             .advice
+            .lock()
+            .unwrap()
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? = to()?.into();
@@ -729,7 +733,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Fixed>,
         _: usize,
@@ -746,14 +750,14 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         Ok(())
     }
 
-    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+    fn copy(&self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
         // We only care about advice columns here
 
         Ok(())
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         _: Column<Fixed>,
         _: usize,
         _: Option<Assigned<C::Scalar>>,
@@ -761,7 +765,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -769,7 +773,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         // Do nothing; we don't care about namespaces in this context.
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
@@ -824,7 +828,7 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
         let meta = &pk.get_vk().cs;
         let mut witness = AssignWitnessCollection::<C> {
             k: params.k,
-            advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+            advice: Arc::new(Mutex::new(vec![domain.empty_lagrange_assigned(); meta.num_advice_columns])),
             instances,
             // The prover will not be allowed to assign values to advice
             // cells that exist within inactive rows, which include some
@@ -843,7 +847,8 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
         )?;
 
         let bundlesize = params.k + 5;
-        let advice = batch_invert_assigned(witness.advice);
+        let advice = Arc::try_unwrap(witness.advice).unwrap().into_inner().unwrap();
+        let advice = batch_invert_assigned(advice);
         fd.set_len(4 + (1u64 << bundlesize)).unwrap();
         fd.write(&(advice.len() as u32).to_le_bytes())?;
         fd.set_len(4 + ((advice.len() as u64) << bundlesize))

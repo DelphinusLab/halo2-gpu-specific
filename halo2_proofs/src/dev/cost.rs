@@ -6,6 +6,8 @@ use std::{
     marker::PhantomData,
     ops::{Add, Mul},
 };
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ff::{Field, PrimeField};
 use group::prime::PrimeGroup;
@@ -42,11 +44,11 @@ pub struct CircuitCost<G: PrimeGroup, ConcreteCircuit: Circuit<G::Scalar>> {
 }
 
 struct Assembly {
-    selectors: Vec<Vec<bool>>,
+    selectors: Arc<Mutex<Vec<Vec<bool>>>>,
 }
 
 impl<F: Field> Assignment<F> for Assembly {
-    fn enter_region<NR, N>(&mut self, _: N)
+    fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -54,16 +56,16 @@ impl<F: Field> Assignment<F> for Assembly {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn exit_region(&mut self) {
+    fn exit_region(&self) {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        self.selectors[selector.0][row] = true;
+        self.selectors.lock().unwrap()[selector.0][row] = true;
 
         Ok(())
     }
@@ -73,7 +75,7 @@ impl<F: Field> Assignment<F> for Assembly {
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Advice>,
         _: usize,
@@ -89,7 +91,7 @@ impl<F: Field> Assignment<F> for Assembly {
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Fixed>,
         _: usize,
@@ -104,12 +106,12 @@ impl<F: Field> Assignment<F> for Assembly {
         Ok(())
     }
 
-    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+    fn copy(&self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
         Ok(())
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         _: Column<Fixed>,
         _: usize,
         _: Option<Assigned<F>>,
@@ -117,7 +119,7 @@ impl<F: Field> Assignment<F> for Assembly {
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -125,7 +127,7 @@ impl<F: Field> Assignment<F> for Assembly {
         // Do nothing; we don't care about namespaces in this context.
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
@@ -139,7 +141,7 @@ impl<G: PrimeGroup, ConcreteCircuit: Circuit<G::Scalar>> CircuitCost<G, Concrete
         let mut cs = ConstraintSystem::default();
         let config = ConcreteCircuit::configure(&mut cs);
         let mut assembly = Assembly {
-            selectors: vec![vec![false; 1 << k]; cs.num_selectors],
+            selectors: Arc::new(Mutex::new(vec![vec![false; 1 << k]; cs.num_selectors])),
         };
         ConcreteCircuit::FloorPlanner::synthesize(
             &mut assembly,
@@ -148,7 +150,7 @@ impl<G: PrimeGroup, ConcreteCircuit: Circuit<G::Scalar>> CircuitCost<G, Concrete
             cs.constants.clone(),
         )
         .unwrap();
-        let (cs, _) = cs.compress_selectors(assembly.selectors);
+        let (cs, _) = cs.compress_selectors(assembly.selectors.lock().unwrap().clone());
 
         assert!((1 << k) >= cs.minimum_rows());
 

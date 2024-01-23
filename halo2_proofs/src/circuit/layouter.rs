@@ -3,6 +3,8 @@
 use std::cmp;
 use std::collections::HashSet;
 use std::fmt;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ff::Field;
 
@@ -42,7 +44,7 @@ use crate::plonk::{Advice, Any, Assigned, Column, Error, Fixed, Instance, Select
 pub trait RegionLayouter<F: Field>: fmt::Debug {
     /// Enables a selector at the given offset.
     fn enable_selector<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         selector: &Selector,
         offset: usize,
@@ -50,7 +52,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
 
     /// Assign an advice column value (witness)
     fn assign_advice<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -64,7 +66,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
     ///
     /// Returns the advice cell that has been equality-constrained to the constant.
     fn assign_advice_from_constant<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -76,7 +78,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
     ///
     /// Returns the advice cell, and its value if known.
     fn assign_advice_from_instance<'v>(
-        &mut self,
+        & self,
         annotation: &'v (dyn Fn() -> String + 'v),
         instance: Column<Instance>,
         row: usize,
@@ -86,7 +88,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
 
     /// Assign a fixed value
     fn assign_fixed<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Fixed>,
         offset: usize,
@@ -96,12 +98,12 @@ pub trait RegionLayouter<F: Field>: fmt::Debug {
     /// Constrains a cell to have a constant value.
     ///
     /// Returns an error if the cell is in a column where equality has not been enabled.
-    fn constrain_constant(&mut self, cell: Cell, constant: Assigned<F>) -> Result<(), Error>;
+    fn constrain_constant(&self, cell: Cell, constant: Assigned<F>) -> Result<(), Error>;
 
     /// Constraint two cells to have the same value.
     ///
     /// Returns an error if either of the cells is not within the given permutation.
-    fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error>;
+    fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error>;
 }
 
 /// Helper trait for implementing a custom [`Layouter`].
@@ -114,7 +116,7 @@ pub trait TableLayouter<F: Field>: fmt::Debug {
     ///
     /// Returns an error if the table cell has already been assigned to.
     fn assign_cell<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: TableColumn,
         offset: usize,
@@ -196,38 +198,43 @@ impl RegionShape {
     }
 }
 
-impl<F: Field> RegionLayouter<F> for RegionShape {
+#[derive (Debug, Clone)]
+pub struct SharedRegion<T> (pub Arc<Mutex<T>>);
+
+impl<F: Field> RegionLayouter<F> for SharedRegion<RegionShape> {
     fn enable_selector<'v>(
-        &'v mut self,
+        &'v self,
         _: &'v (dyn Fn() -> String + 'v),
         selector: &Selector,
         offset: usize,
     ) -> Result<(), Error> {
         // Track the selector's fixed column as part of the region's shape.
-        self.columns.insert((*selector).into());
-        self.row_count = cmp::max(self.row_count, offset + 1);
+        let mut region = self.0.lock().unwrap();
+        region.columns.insert((*selector).into());
+        region.row_count = cmp::max(region.row_count, offset + 1);
         Ok(())
     }
 
     fn assign_advice<'v>(
-        &'v mut self,
+        &'v self,
         _: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
-        self.columns.insert(Column::<Any>::from(column).into());
-        self.row_count = cmp::max(self.row_count, offset + 1);
+        let mut region = self.0.lock().unwrap();
+        region.columns.insert(Column::<Any>::from(column).into());
+        region.row_count = cmp::max(region.row_count, offset + 1);
 
         Ok(Cell {
-            region_index: self.region_index,
+            region_index: region.region_index,
             row_offset: offset,
             column: column.into(),
         })
     }
 
     fn assign_advice_from_constant<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -238,19 +245,20 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
     }
 
     fn assign_advice_from_instance<'v>(
-        &mut self,
+        &self,
         _: &'v (dyn Fn() -> String + 'v),
         _: Column<Instance>,
         _: usize,
         advice: Column<Advice>,
         offset: usize,
     ) -> Result<(Cell, Option<F>), Error> {
-        self.columns.insert(Column::<Any>::from(advice).into());
-        self.row_count = cmp::max(self.row_count, offset + 1);
+        let mut region = self.0.lock().unwrap();
+        region.columns.insert(Column::<Any>::from(advice).into());
+        region.row_count = cmp::max(region.row_count, offset + 1);
 
         Ok((
             Cell {
-                region_index: self.region_index,
+                region_index: region.region_index,
                 row_offset: offset,
                 column: advice.into(),
             },
@@ -259,28 +267,29 @@ impl<F: Field> RegionLayouter<F> for RegionShape {
     }
 
     fn assign_fixed<'v>(
-        &'v mut self,
+        &'v self,
         _: &'v (dyn Fn() -> String + 'v),
         column: Column<Fixed>,
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
-        self.columns.insert(Column::<Any>::from(column).into());
-        self.row_count = cmp::max(self.row_count, offset + 1);
+        let mut region = self.0.lock().unwrap();
+        region.columns.insert(Column::<Any>::from(column).into());
+        region.row_count = cmp::max(region.row_count, offset + 1);
 
         Ok(Cell {
-            region_index: self.region_index,
+            region_index: region.region_index,
             row_offset: offset,
             column: column.into(),
         })
     }
 
-    fn constrain_constant(&mut self, _cell: Cell, _constant: Assigned<F>) -> Result<(), Error> {
+    fn constrain_constant(&self, _cell: Cell, _constant: Assigned<F>) -> Result<(), Error> {
         // Global constants don't affect the region shape.
         Ok(())
     }
 
-    fn constrain_equal(&mut self, _left: Cell, _right: Cell) -> Result<(), Error> {
+    fn constrain_equal(&self, _left: Cell, _right: Cell) -> Result<(), Error> {
         // Equality constraints don't affect the region shape.
         Ok(())
     }

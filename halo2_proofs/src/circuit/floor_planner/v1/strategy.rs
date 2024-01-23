@@ -4,7 +4,7 @@ use std::{
     ops::Range,
 };
 
-use super::{RegionColumn, RegionShape};
+use super::{RegionColumn, RegionShape, SharedRegion};
 use crate::{circuit::RegionStart, plonk::Any};
 
 /// A region allocated within a column.
@@ -163,7 +163,7 @@ fn first_fit_region(
 /// Positions the regions starting at the earliest row for which none of the columns are
 /// in use, taking into account gaps between earlier regions.
 fn slot_in(
-    region_shapes: Vec<RegionShape>,
+    region_shapes: Vec<SharedRegion<RegionShape>>,
 ) -> (Vec<(RegionStart, RegionShape)>, CircuitAllocations) {
     // Tracks the empty regions for each column.
     let mut column_allocations: CircuitAllocations = Default::default();
@@ -171,6 +171,7 @@ fn slot_in(
     let regions = region_shapes
         .into_iter()
         .map(|region| {
+            let region = region.0.lock().unwrap();
             // Sort the region's columns to ensure determinism.
             // - An unstable sort is fine, because region.columns() returns a set.
             // - The sort order relies on Column's Ord implementation!
@@ -186,7 +187,7 @@ fn slot_in(
             )
             .expect("We can always fit a region somewhere");
 
-            (region_start.into(), region)
+            (region_start.into(), region.clone())
         })
         .collect();
 
@@ -196,11 +197,12 @@ fn slot_in(
 
 /// Sorts the regions by advice area and then lays them out with the [`slot_in`] strategy.
 pub fn slot_in_biggest_advice_first(
-    region_shapes: Vec<RegionShape>,
+    region_shapes: Vec<SharedRegion<RegionShape>>,
 ) -> (Vec<RegionStart>, CircuitAllocations) {
     let mut sorted_regions: Vec<_> = region_shapes.into_iter().collect();
     sorted_regions.sort_unstable_by_key(|shape| {
         // Count the number of advice columns
+        let shape = shape.0.lock().unwrap();
         let advice_cols = shape
             .columns()
             .iter()

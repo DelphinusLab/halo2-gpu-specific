@@ -1,11 +1,13 @@
 use std::fmt;
+use std::sync::Arc;
+use std::sync::Mutex;
 
 use ff::Field;
 
 use crate::{
     circuit::{
         floor_planner::single_pass::SimpleTableLayouter,
-        layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter},
+        layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter, SharedRegion},
         Cell, Layouter, Region, RegionIndex, RegionStart, Table,
     },
     plonk::{
@@ -27,14 +29,17 @@ mod strategy;
 #[derive(Debug)]
 pub struct V1;
 
-struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
-    cs: &'a mut CS,
-    /// Stores the starting row for each region.
+struct V1PlanDynamic<F: Field> {
     regions: Vec<RegionStart>,
     /// Stores the constants to be assigned, and the cells to which they are copied.
     constants: Vec<(Assigned<F>, Cell)>,
     /// Stores the table fixed columns.
     table_columns: Vec<TableColumn>,
+}
+
+struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
+    cs: &'a CS,
+    dynamic: Arc<Mutex<V1PlanDynamic<F>>>,
 }
 
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
@@ -45,12 +50,14 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
 
 impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
     /// Creates a new v1 layouter.
-    pub fn new(cs: &'a mut CS) -> Result<Self, Error> {
+    pub fn new(cs: &'a CS) -> Result<Self, Error> {
         let ret = V1Plan {
             cs,
+            dynamic: Arc::new(Mutex::new(V1PlanDynamic {
             regions: vec![],
             constants: vec![],
             table_columns: vec![],
+            }))
         };
         Ok(ret)
     }
@@ -58,12 +65,12 @@ impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
 
 impl FloorPlanner for V1 {
     fn synthesize<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        cs: &mut CS,
+        cs: &CS,
         circuit: &C,
         config: C::Config,
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error> {
-        let mut plan = V1Plan::new(cs)?;
+        let plan = V1Plan::new(cs)?;
 
         // First pass: measure the regions within the circuit.
         let mut measure = MeasurementPass::new();
@@ -76,8 +83,12 @@ impl FloorPlanner for V1 {
 
         // Planning:
         // - Position the regions.
-        let (regions, column_allocations) = strategy::slot_in_biggest_advice_first(measure.regions);
-        plan.regions = regions;
+        let regions = measure.regions.lock().unwrap();
+        let (regions, column_allocations) = strategy::slot_in_biggest_advice_first(regions.clone());
+
+        let mut dynamic = plan.dynamic.lock().unwrap();
+
+        dynamic.regions = regions;
 
         // - Determine how many rows our planned circuit will require.
         let first_unassigned_row = column_allocations
@@ -109,18 +120,18 @@ impl FloorPlanner for V1 {
 
         // Second pass:
         // - Assign the regions.
-        let mut assign = AssignmentPass::new(&mut plan);
+        let mut assign = AssignmentPass::new(&plan);
         {
             let pass = &mut assign;
             circuit.synthesize(config, V1Pass::assign(pass))?;
         }
 
         // - Assign the constants.
-        if constant_positions().count() < plan.constants.len() {
+        if constant_positions().count() < dynamic.constants.len() {
             return Err(Error::NotEnoughColumnsForConstants);
         }
         for ((fixed_column, fixed_row), (value, advice)) in
-            constant_positions().zip(plan.constants.into_iter())
+            constant_positions().zip(dynamic.constants.clone().into_iter())
         {
             plan.cs.assign_fixed(
                 || format!("Constant({:?})", value.evaluate()),
@@ -132,7 +143,7 @@ impl FloorPlanner for V1 {
                 fixed_column.into(),
                 fixed_row,
                 advice.column,
-                *plan.regions[*advice.region_index] + advice.row_offset,
+                *dynamic.regions[*advice.region_index] + advice.row_offset,
             )?;
         }
 
@@ -142,8 +153,8 @@ impl FloorPlanner for V1 {
 
 #[derive(Debug)]
 enum Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
-    Measurement(&'p mut MeasurementPass),
-    Assignment(&'p mut AssignmentPass<'p, 'a, F, CS>),
+    Measurement(&'p MeasurementPass),
+    Assignment(&'p AssignmentPass<'p, 'a, F, CS>),
 }
 
 /// A single pass of the [`V1`] layouter.
@@ -163,58 +174,58 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> V1Pass<'p, 'a, F, CS> {
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F, CS> {
     type Root = Self;
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
-        match &mut self.0 {
+        match &self.0 {
             Pass::Measurement(pass) => pass.assign_region(assignment),
             Pass::Assignment(pass) => pass.assign_region(name, assignment),
         }
     }
 
-    fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
         A: FnMut(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
-        match &mut self.0 {
+        match &self.0 {
             Pass::Measurement(_) => Ok(()),
             Pass::Assignment(pass) => pass.assign_table(name, assignment),
         }
     }
 
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         instance: Column<Instance>,
         row: usize,
     ) -> Result<(), Error> {
-        match &mut self.0 {
+        match &self.0 {
             Pass::Measurement(_) => Ok(()),
             Pass::Assignment(pass) => pass.constrain_instance(cell, instance, row),
         }
     }
 
-    fn get_root(&mut self) -> &mut Self::Root {
+    fn get_root(&self) -> &Self::Root {
         self
     }
 
-    fn push_namespace<NR, N>(&mut self, name_fn: N)
+    fn push_namespace<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
     {
-        if let Pass::Assignment(pass) = &mut self.0 {
+        if let Pass::Assignment(pass) = &self.0 {
             pass.plan.cs.push_namespace(name_fn);
         }
     }
 
-    fn pop_namespace(&mut self, gadget_name: Option<String>) {
-        if let Pass::Assignment(pass) = &mut self.0 {
+    fn pop_namespace(&self, gadget_name: Option<String>) {
+        if let Pass::Assignment(pass) = &self.0 {
             pass.plan.cs.pop_namespace(gadget_name);
         }
     }
@@ -223,27 +234,27 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 /// Measures the circuit.
 #[derive(Debug)]
 pub struct MeasurementPass {
-    regions: Vec<RegionShape>,
+    regions: Arc<Mutex<Vec<SharedRegion<RegionShape>>>>,
 }
 
 impl MeasurementPass {
     fn new() -> Self {
-        MeasurementPass { regions: vec![] }
+        MeasurementPass { regions: Arc::new(Mutex::new(vec![])) }
     }
 
-    fn assign_region<F: Field, A, AR>(&mut self, mut assignment: A) -> Result<AR, Error>
+    fn assign_region<F: Field, A, AR>(&self, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
     {
-        let region_index = self.regions.len();
+        let region_index = self.regions.lock().unwrap().len();
 
         // Get shape of the region.
-        let mut shape = RegionShape::new(region_index.into());
+        let shape = SharedRegion(Arc::new(Mutex::new(RegionShape::new(region_index.into()))));
         let result = {
-            let region: &mut dyn RegionLayouter<F> = &mut shape;
+            let region: &dyn RegionLayouter<F> = &shape;
             assignment(region.into())
         }?;
-        self.regions.push(shape);
+        self.regions.lock().unwrap().push(shape);
 
         Ok(result)
     }
@@ -252,33 +263,35 @@ impl MeasurementPass {
 /// Assigns the circuit.
 #[derive(Debug)]
 pub struct AssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
-    plan: &'p mut V1Plan<'a, F, CS>,
+    plan: &'p V1Plan<'a, F, CS>,
     /// Counter tracking which region we need to assign next.
-    region_index: usize,
+    region_index: Arc<Mutex<usize>>,
 }
 
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
-    fn new(plan: &'p mut V1Plan<'a, F, CS>) -> Self {
+    fn new(plan: &'p V1Plan<'a, F, CS>) -> Self {
         AssignmentPass {
             plan,
-            region_index: 0,
+            region_index: Arc::new(Mutex::new(0)),
         }
     }
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
         // Get the next region we are assigning.
-        let region_index = self.region_index;
-        self.region_index += 1;
+        let mut region_index = self.region_index.lock().unwrap();
+
+        let index = *region_index;
+        *region_index += 1;
 
         self.plan.cs.enter_region(name);
-        let mut region = V1Region::new(self.plan, region_index.into());
+        let region = V1Region::new(self.plan, index.into());
         let result = {
-            let region: &mut dyn RegionLayouter<F> = &mut region;
+            let region: &dyn RegionLayouter<F> = &region;
             assignment(region.into())
         }?;
         self.plan.cs.exit_region();
@@ -286,7 +299,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         Ok(result)
     }
 
-    fn assign_table<A, AR, N, NR>(&mut self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_table<A, AR, N, NR>(&self, name: N, mut assignment: A) -> Result<AR, Error>
     where
         A: FnMut(Table<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
@@ -296,12 +309,13 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 
         // Assign table cells.
         self.plan.cs.enter_region(name);
-        let mut table = SimpleTableLayouter::new(self.plan.cs, &self.plan.table_columns);
+        let mut dynamic = self.plan.dynamic.lock().unwrap();
+        let mut table = SimpleTableLayouter::new(self.plan.cs, &dynamic.table_columns);
         let result = {
             let table: &mut dyn TableLayouter<F> = &mut table;
             assignment(table.into())
         }?;
-        let default_and_assigned = table.default_and_assigned;
+        let default_and_assigned = table.default_and_assigned.lock().unwrap();
         self.plan.cs.exit_region();
 
         // Check that all table columns have the same length `first_unused`,
@@ -327,10 +341,10 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 
         // Record these columns so that we can prevent them from being used again.
         for column in default_and_assigned.keys() {
-            self.plan.table_columns.push(*column);
+            dynamic.table_columns.push(*column);
         }
 
-        for (col, (default_val, _)) in default_and_assigned {
+        for (col, (default_val, _)) in default_and_assigned.iter() {
             // default_val must be Some because we must have assigned
             // at least one cell in each column, and in that case we checked
             // that all cells up to first_unused were assigned.
@@ -343,14 +357,15 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
     }
 
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         instance: Column<Instance>,
         row: usize,
     ) -> Result<(), Error> {
+        let dynamic = self.plan.dynamic.lock().unwrap();
         self.plan.cs.copy(
             cell.column,
-            *self.plan.regions[*cell.region_index] + cell.row_offset,
+            *dynamic.regions[*cell.region_index] + cell.row_offset,
             instance.into(),
             row,
         )
@@ -358,7 +373,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 }
 
 struct V1Region<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
-    plan: &'r mut V1Plan<'a, F, CS>,
+    plan: &'r V1Plan<'a, F, CS>,
     region_index: RegionIndex,
 }
 
@@ -372,36 +387,38 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Region<'r, 'a, F
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> V1Region<'r, 'a, F, CS> {
-    fn new(plan: &'r mut V1Plan<'a, F, CS>, region_index: RegionIndex) -> Self {
+    fn new(plan: &'r V1Plan<'a, F, CS>, region_index: RegionIndex) -> Self {
         V1Region { plan, region_index }
     }
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r, 'a, F, CS> {
     fn enable_selector<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         selector: &Selector,
         offset: usize,
     ) -> Result<(), Error> {
+        let dynamic = self.plan.dynamic.lock().unwrap();
         self.plan.cs.enable_selector(
             annotation,
             selector,
-            *self.plan.regions[*self.region_index] + offset,
+            *dynamic.regions[*self.region_index] + offset,
         )
     }
 
     fn assign_advice<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
         to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
+        let dynamic = self.plan.dynamic.lock().unwrap();
         self.plan.cs.assign_advice(
             annotation,
             column,
-            *self.plan.regions[*self.region_index] + offset,
+            *dynamic.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -413,7 +430,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_advice_from_constant<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -426,7 +443,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_advice_from_instance<'v>(
-        &mut self,
+        &self,
         annotation: &'v (dyn Fn() -> String + 'v),
         instance: Column<Instance>,
         row: usize,
@@ -434,6 +451,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
         offset: usize,
     ) -> Result<(Cell, Option<F>), Error> {
         let value = self.plan.cs.query_instance(instance, row)?;
+        let dynamic = self.plan.dynamic.lock().unwrap();
 
         let cell = self.assign_advice(annotation, advice, offset, &mut || {
             value.ok_or(Error::Synthesis).map(|v| v.into())
@@ -441,7 +459,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
 
         self.plan.cs.copy(
             cell.column,
-            *self.plan.regions[*cell.region_index] + cell.row_offset,
+            *dynamic.regions[*cell.region_index] + cell.row_offset,
             instance.into(),
             row,
         )?;
@@ -450,16 +468,17 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_fixed<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Fixed>,
         offset: usize,
         to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
+        let dynamic = self.plan.dynamic.lock().unwrap();
         self.plan.cs.assign_fixed(
             annotation,
             column,
-            *self.plan.regions[*self.region_index] + offset,
+            *dynamic.regions[*self.region_index] + offset,
             to,
         )?;
 
@@ -470,17 +489,19 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
         })
     }
 
-    fn constrain_constant(&mut self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
-        self.plan.constants.push((constant, cell));
+    fn constrain_constant(&self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
+        let mut dynamic = self.plan.dynamic.lock().unwrap();
+        dynamic.constants.push((constant, cell));
         Ok(())
     }
 
-    fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error> {
+    fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error> {
+        let dynamic = self.plan.dynamic.lock().unwrap();
         self.plan.cs.copy(
             left.column,
-            *self.plan.regions[*left.region_index] + left.row_offset,
+            *dynamic.regions[*left.region_index] + left.row_offset,
             right.column,
-            *self.plan.regions[*right.region_index] + right.row_offset,
+            *dynamic.regions[*right.region_index] + right.row_offset,
         )?;
 
         Ok(())
