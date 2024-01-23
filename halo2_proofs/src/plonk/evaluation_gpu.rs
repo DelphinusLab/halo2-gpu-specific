@@ -929,6 +929,58 @@ pub(crate) fn load_unit_from_mem_cache<F: FieldExt, C: CurveAffine<ScalarExt = F
 }
 */
 
+#[cfg(feature = "cuda")]
+pub(crate) fn do_extended_fft_lookup<F: FieldExt, C: CurveAffine<ScalarExt = F>>(
+    pk: &ProvingKey<C>,
+    program: &Program,
+    origin_values: &Polynomial<F, Coeff>,
+    allocator: &mut LinkedList<Buffer<F>>,
+    helper: &mut ExtendedFFTHelper<F>,
+) -> EcResult<Buffer<F>> {
+    let origin_size = 1u32 << pk.vk.domain.k();
+    let extended_size = 1u32 << pk.vk.domain.extended_k();
+    let local_work_size = 128;
+    let global_work_size = extended_size / local_work_size;
+
+    let timerall = start_timer!(|| "gpu eval unit");
+    let values = allocator
+        .pop_front()
+        .unwrap_or_else(|| unsafe { program.create_buffer::<F>(extended_size as usize).unwrap() });
+
+    let origin_values_buffer = Rc::get_mut(&mut helper.origin_value_buffer).unwrap();
+    let timer = start_timer!(|| "fft write from buffer");
+    program.write_from_buffer(origin_values_buffer, &origin_values.values)?;
+    end_timer!(timer);
+
+    // let timer = start_timer!(|| "distribute powers zeta");
+    do_distribute_powers_zeta(
+        pk,
+        program,
+        origin_values_buffer,
+        &helper.coset_powers_buffer,
+    )?;
+    // end_timer!(timer);
+
+    // let timer = start_timer!(|| "eval fft prepare");
+    let kernel_name = format!("{}_eval_fft_prepare", "Bn256_Fr");
+    let kernel = program.create_kernel(
+        &kernel_name,
+        global_work_size as usize,
+        local_work_size as usize,
+    )?;
+    kernel
+        .arg(origin_values_buffer)
+        .arg(&values)
+        .arg(&origin_size)
+        .run()?;
+
+    // end_timer!(timer);
+
+    end_timer!(timerall);
+    Ok(values)
+
+}
+
 
 #[cfg(feature = "cuda")]
 pub(crate) fn do_extended_fft<F: FieldExt, C: CurveAffine<ScalarExt = F>>(

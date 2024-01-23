@@ -846,7 +846,9 @@ impl<C: CurveAffine> Evaluator<C> {
         };
         use std::{collections::LinkedList, marker::PhantomData};
 
-        use crate::plonk::evaluation_gpu::{do_extended_fft, gen_do_extended_fft};
+        use crate::plonk::evaluation_gpu::{
+            do_extended_fft, do_extended_fft_lookup, do_fft_pure, gen_do_extended_fft,
+        };
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -1203,29 +1205,95 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .0;
 
                                 end_timer!(timer);
-
                                 let timer = start_timer!(|| "3 fft");
-                                let permuted_input_coset_buf = do_extended_fft(
-                                    pk,
-                                    program,
-                                    &lookup.permuted_input_poly,
-                                    &mut allocator,
-                                    &mut helper,
-                                )?;
-                                let permuted_table_coset_buf = do_extended_fft(
-                                    pk,
-                                    program,
-                                    &lookup.permuted_table_poly,
-                                    &mut allocator,
-                                    &mut helper,
-                                )?;
-                                let product_coset_buf = do_extended_fft(
-                                    pk,
-                                    program,
-                                    &lookup.product_poly,
-                                    &mut allocator,
-                                    &mut helper,
-                                )?;
+                                let domain = &pk.vk.domain;
+                                let mut buf_vec = vec![];
+                                let (
+                                    permuted_input_coset_buf,
+                                    permuted_table_coset_buf,
+                                    product_coset_buf,
+                                ) = std::thread::scope(|s| {
+                                    let permuted_input_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &lookup.permuted_input_poly,
+                                        &mut allocator,
+                                        &mut helper,
+                                    ).expect("input fail");
+                                    let s_handle = s.spawn(|| {
+                                        let a = do_fft_pure(
+                                            program,
+                                            permuted_input_coset_buf,
+                                            domain.extended_k(),
+                                            &mut allocator,
+                                            &helper.pq_buffer,
+                                            &helper.omegas_buffer,
+                                        );
+                                        buf_vec.push(a.unwrap());
+                                        //     std::sync::Arc::new(std::sync::Mutex::new(a.unwrap()))
+                                        //     a
+                                    });
+
+
+                                    let permuted_table_coset_value = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &lookup.permuted_table_poly,
+                                        &mut allocator,
+                                        &mut helper,
+                                    ).expect("table fail");
+                                    // let permuted_input_coset_buf =
+                                    //     a1.join().expect("input thead fail");
+                                    //     let permuted_input_coset_buf =
+                                    //     in_rx.recv().unwrap();
+                                        s_handle.join().expect("input thread fail");
+
+                                    let a1 = s.spawn(|| {
+                                        let a = do_fft_pure(
+                                            program,
+                                            permuted_table_coset_value,
+                                            domain.extended_k(),
+                                            &mut allocator,
+                                            &helper.pq_buffer,
+                                            &helper.omegas_buffer,
+                                        );
+                                            buf_vec.push(a.unwrap());
+                                            // std::rc::Rc::new(a.unwrap())
+                                            // a
+                                    });
+
+                                    let product_coset_value = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &lookup.product_poly,
+                                        &mut allocator,
+                                        &mut helper,
+                                    ).expect("product fail");
+                                    // let permuted_table_coset_buf =
+                                    //     a1.join().expect("table thead fail");
+                                        s_handle.join().expect("table thead fail");
+
+                                    let a1 = s.spawn(|| {
+                                        let a = do_fft_pure(
+                                            program,
+                                            product_coset_value,
+                                            domain.extended_k(),
+                                            &mut allocator,
+                                            &helper.pq_buffer,
+                                            &helper.omegas_buffer,
+                                        );
+                                            // std::rc::Rc::new(a)
+                                            buf_vec.push(a.unwrap());
+                                    });
+                                    // let product_coset_buf = a1.join().expect("product thead fail");
+                                        s_handle.join().expect("product thead fail");
+                                    // (
+                                    //     permuted_input_coset_buf,
+                                    //     permuted_table_coset_buf,
+                                    //     product_coset_buf,
+                                    // )
+                                        (buf_vec[0],buf_vec[1],buf_vec[2])
+                                });
 
                                 end_timer!(timer);
 
