@@ -50,9 +50,14 @@ pub struct SingleChipDynamic<F: Field> {
 }
 
 /// A [`Layouter`] for a single-chip circuit.
+#[derive (Clone)]
 pub struct SingleChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a CS,
     dynamic: Arc<Mutex<SingleChipDynamic<F>>>,
+}
+
+unsafe impl<'a, F: Field, CS: Assignment<F> + 'a>  Send for SingleChipLayouter<'a, F, CS> {
+        // No need to provide methods; it's a marker trait
 }
 
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SingleChipLayouter<'a, F, CS> {
@@ -116,6 +121,8 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
             dynamic.columns.insert(column, region_start + shape.row_count);
         }
 
+        drop(dynamic);
+
         // Assign region cells.
         self.cs.enter_region(name);
 
@@ -127,6 +134,9 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
 
         let constants_to_assign = Arc::try_unwrap(region.constants).unwrap().into_inner().unwrap();
         self.cs.exit_region();
+
+
+        let mut dynamic = self.dynamic.lock().unwrap();
 
         // Assign constants. For the simple floor planner, we assign constants in order in
         // the first `constants` column.
@@ -178,7 +188,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
             assignment(table.into())
         }?;
 
-        let default_and_assigned = table.default_and_assigned.lock().unwrap();
+        let default_and_assigned = table.default_and_assigned.lock().unwrap().clone();
         self.cs.exit_region();
 
         // Check that all table columns have the same length `first_unused`,
@@ -337,12 +347,13 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
         advice: Column<Advice>,
         offset: usize,
     ) -> Result<(Cell, Option<F>), Error> {
-        let dynamic = self.layouter.dynamic.lock().unwrap();
         let value = self.layouter.cs.query_instance(instance, row)?;
 
         let cell = self.assign_advice(annotation, advice, offset, &mut || {
             value.ok_or(Error::Synthesis).map(|v| v.into())
         })?;
+
+        let dynamic = self.layouter.dynamic.lock().unwrap();
 
         self.layouter.cs.copy(
             cell.column,

@@ -254,7 +254,7 @@ pub struct Selector(pub(crate) usize, bool);
 
 impl Selector {
     /// Enable this selector at the given offset within the given region.
-    pub fn enable<F: Field>(&self, region: &mut Region<F>, offset: usize) -> Result<(), Error> {
+    pub fn enable<F: Field>(&self, region: &Region<F>, offset: usize) -> Result<(), Error> {
         region.enable_selector(|| "", self, offset)
     }
 
@@ -295,7 +295,7 @@ impl TableColumn {
 
 /// This trait allows a [`Circuit`] to direct some backend to assign a witness
 /// for a constraint system.
-pub trait Assignment<F: Field> {
+pub trait Assignment<F: Field>: Clone {
     /// Creates a new region and enters into it.
     ///
     /// Panics if we are currently in a region (if `exit_region` was not called).

@@ -43,6 +43,7 @@ pub struct CircuitCost<G: PrimeGroup, ConcreteCircuit: Circuit<G::Scalar>> {
     _marker: PhantomData<(G, ConcreteCircuit)>,
 }
 
+#[derive (Clone)]
 struct Assembly {
     selectors: Arc<Mutex<Vec<Vec<bool>>>>,
 }

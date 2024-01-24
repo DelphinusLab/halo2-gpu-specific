@@ -61,7 +61,7 @@ struct AssemblyDynamic<F:Field> {
 }
 
 /// Assembly to be used in circuit synthesis.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Assembly<F: Field> {
     k: u32,
     dynamic: Arc<Mutex<AssemblyDynamic<F>>>

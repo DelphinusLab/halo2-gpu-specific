@@ -192,7 +192,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_advice<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: Column<Advice>,
         offset: usize,
@@ -288,7 +288,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_fixed<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: Column<Fixed>,
         offset: usize,
@@ -331,7 +331,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Returns an error if either of the cells are in columns where equality
     /// has not been enabled.
-    pub fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error> {
+    pub fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error> {
         self.region.constrain_equal(left, right)
     }
 }
@@ -379,7 +379,7 @@ impl<'r, F: Field> Table<'r, F> {
 ///
 /// This abstracts over the circuit assignments, handling row indices etc.
 ///
-pub trait Layouter<F: Field> {
+pub trait Layouter<F: Field>: Clone + Send {
     /// Represents the type of the "root" of this layouter, so that nested namespaces
     /// can minimize indirection.
     type Root: Layouter<F>;
@@ -457,8 +457,12 @@ pub trait Layouter<F: Field> {
 
 /// This is a "namespaced" layouter which borrows a `Layouter` (pushing a namespace
 /// context) and, when dropped, pops out of the namespace context.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a L, PhantomData<F>);
+
+
+unsafe impl<'a, F: Field, L: Layouter<F> + 'a> Send for NamespacedLayouter<'a, F, L> {
+}
 
 impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F, L> {
     type Root = L::Root;

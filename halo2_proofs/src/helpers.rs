@@ -656,7 +656,7 @@ impl<F: FieldExt> Serializable for Expression<F> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AssignWitnessCollection<'a, C: CurveAffine> {
     pub k: u32,
     pub advice: Arc<Mutex<Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>>>,

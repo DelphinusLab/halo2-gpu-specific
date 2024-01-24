@@ -37,6 +37,7 @@ struct V1PlanDynamic<F: Field> {
     table_columns: Vec<TableColumn>,
 }
 
+#[derive(Clone)]
 struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a CS,
     dynamic: Arc<Mutex<V1PlanDynamic<F>>>,
@@ -151,15 +152,19 @@ impl FloorPlanner for V1 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     Measurement(&'p MeasurementPass),
     Assignment(&'p AssignmentPass<'p, 'a, F, CS>),
 }
 
 /// A single pass of the [`V1`] layouter.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct V1Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a>(Pass<'p, 'a, F, CS>);
+
+unsafe impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Send for V1Pass<'p, 'a, F, CS> {
+     // No need to provide methods; it's a marker trait
+}
 
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> V1Pass<'p, 'a, F, CS> {
     fn measure(pass: &'p mut MeasurementPass) -> Self {
@@ -188,7 +193,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 
     fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -232,7 +237,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 }
 
 /// Measures the circuit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct MeasurementPass {
     regions: Arc<Mutex<Vec<SharedRegion<RegionShape>>>>,
 }
@@ -261,7 +266,7 @@ impl MeasurementPass {
 }
 
 /// Assigns the circuit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AssignmentPass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     plan: &'p V1Plan<'a, F, CS>,
     /// Counter tracking which region we need to assign next.

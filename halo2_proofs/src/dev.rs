@@ -511,7 +511,7 @@ pub struct MockProver<F: Group + Field> {
     usable_rows: Range<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SharedMockProver<F: Group + Field> (Arc<Mutex<MockProver<F>>>);
 
 impl<F: Field + Group> Assignment<F> for SharedMockProver<F> {
@@ -666,7 +666,10 @@ impl<F: Field + Group> Assignment<F> for SharedMockProver<F> {
             return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        for row in prover.usable_rows.clone().skip(from_row) {
+        let usable_rows = prover.usable_rows.clone();
+        drop(prover);
+
+        for row in usable_rows.skip(from_row) {
             self.assign_fixed(|| "", col, row, || to.ok_or(Error::Synthesis))?;
         }
 

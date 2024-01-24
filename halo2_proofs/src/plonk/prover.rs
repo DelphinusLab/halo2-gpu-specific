@@ -162,6 +162,7 @@ fn create_single_instances<
     Ok(instance)
 }
 
+#[derive(Clone)]
 struct ProofWitnessCollection<'a, F: Field> {
     k: u32,
     pub advice: Arc<Mutex<Vec<Polynomial<F, LagrangeCoeff>>>>,
