@@ -17,6 +17,8 @@ use std::fs::File;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Condvar, Mutex, Arc};
+use std::rc::Rc;
+use std::cell::RefCell;
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 use crate::helpers::AssignWitnessCollection;
@@ -165,7 +167,7 @@ fn create_single_instances<
 #[derive(Clone)]
 struct ProofWitnessCollection<'a, F: Field> {
     k: u32,
-    pub advice: Arc<Mutex<Vec<Polynomial<F, LagrangeCoeff>>>>,
+    pub advice: Vec<*mut Polynomial<F, LagrangeCoeff>>,
     instances: &'a [&'a [F]],
     usable_rows: RangeTo<usize>,
     _marker: std::marker::PhantomData<F>,
@@ -239,13 +241,16 @@ impl<'a, F: Field> Assignment<F> for ProofWitnessCollection<'a, F> {
                     assigned.numerator()
                 };
 
-                *self
+                let column = self
                     .advice
-                    .lock()
-                    .unwrap()
-                    .get_mut(column.index())
-                    .and_then(|v| v.get_mut(row))
-                    .ok_or(Error::BoundsFailure)? = v;
+                    .get(column.index().clone())
+                    .ok_or(Error::BoundsFailure)?;
+
+                //let mut column = column.borrow_mut();
+                unsafe {
+                    let r = column.as_mut().unwrap().get_mut(row).ok_or(Error::BoundsFailure)?;
+                    *r = v;
+                }
 
                 Ok(())
             }
@@ -370,16 +375,15 @@ pub fn create_proof<
             let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
 
             let timer = start_timer!(|| "prepare collection");
-            let advice = Arc::new(Mutex::new(
+            let mut advice =
                     (0..meta.num_advice_columns)
-                    .into_par_iter()
+                    .into_iter()
                     .map(|_| domain.empty_lagrange())
-                    .collect()
-                    ));
+                    .collect::<Vec<_>>();
 
             let mut witness = ProofWitnessCollection {
                 k: params.k,
-                advice,
+                advice: advice.iter_mut().map(|x| x as *mut Polynomial<C::Scalar, LagrangeCoeff>).collect::<Vec<_>>(),
                 instances,
                 // The prover will not be allowed to assign values to advice
                 // cells that exist within inactive rows, which include some
@@ -401,7 +405,7 @@ pub fn create_proof<
             .unwrap();
             end_timer!(timer);
 
-            let mut advice = witness.advice.lock().unwrap().clone();
+            //let mut advice: Vec<Polynomial<C::Scalar, LagrangeCoeff>> = witness.advice.iter().map(|x| x.borrow_mut().clone()).collect::<_>();
 
             let named = &pk.vk.cs.named_advices;
 
