@@ -11,6 +11,7 @@ use crate::{
 
 pub mod floor_planner;
 pub use floor_planner::single_pass::SimpleFloorPlanner;
+pub use floor_planner::flat::FlatFloorPlanner;
 
 pub mod layouter;
 
@@ -161,10 +162,14 @@ where
 /// TODO: It would be great if we could constrain the columns in these types to be
 /// "logical" columns that are guaranteed to correspond to the chip (and have come from
 /// `Chip::Config`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Region<'r, F: Field> {
     region: &'r dyn layouter::RegionLayouter<F>,
 }
+
+unsafe impl<'r, F: Field> Sync for Region<'r, F> {}
+unsafe impl<'r, F: Field> Send for Region<'r, F> {}
+
 
 impl<'r, F: Field> From<&'r dyn layouter::RegionLayouter<F>> for Region<'r, F> {
     fn from(region: &'r dyn layouter::RegionLayouter<F>) -> Self {

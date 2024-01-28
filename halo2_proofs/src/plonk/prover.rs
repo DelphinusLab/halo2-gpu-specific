@@ -377,7 +377,7 @@ pub fn create_proof<
             let timer = start_timer!(|| "prepare collection");
             let mut advice =
                     (0..meta.num_advice_columns)
-                    .into_iter()
+                    .into_par_iter()
                     .map(|_| domain.empty_lagrange())
                     .collect::<Vec<_>>();
 
