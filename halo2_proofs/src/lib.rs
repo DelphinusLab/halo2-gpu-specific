@@ -21,6 +21,7 @@
 #![deny(missing_debug_implementations)]
 // Remove this once we update pasta_curves
 #![allow(unused_imports)]
+#![feature(get_mut_unchecked)]
 
 pub mod arithmetic;
 pub mod circuit;

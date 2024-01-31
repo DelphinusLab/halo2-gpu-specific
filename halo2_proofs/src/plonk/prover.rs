@@ -15,9 +15,10 @@ use rayon::slice::ParallelSlice;
 use std::env::var;
 use std::fs::File;
 use std::iter::FromIterator;
-use std::ops::RangeTo;
+use std::ops::{RangeBounds, RangeTo};
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread;
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 
@@ -213,14 +214,16 @@ pub fn create_proof<
     };
 
     let advice: Vec<Vec<Polynomial<C::Scalar, LagrangeCoeff>>> = circuits
-        .iter()
+        .into_iter()
         .zip(instances.iter())
         .map(|(circuit, instances)| {
             struct WitnessCollection<'a, F: Field> {
                 k: u32,
-                pub advice: Vec<Polynomial<F, LagrangeCoeff>>,
+                pub advice: Arc<Vec<Polynomial<F, LagrangeCoeff>>>,
                 instances: &'a [&'a [F]],
                 usable_rows: RangeTo<usize>,
+                start: usize,
+                end: usize,
                 _marker: std::marker::PhantomData<F>,
             }
 
@@ -285,19 +288,21 @@ pub fn create_proof<
                         return Err(Error::not_enough_rows_available(self.k));
                     }
 
-                    let assigned: Assigned<F> = to()?.into();
-                    let v = if let Some(inv) = assigned.denominator() {
-                        assigned.numerator() * inv.invert().unwrap()
-                    } else {
-                        assigned.numerator()
-                    };
+                    if row >= self.start && row < self.end {
+                        let assigned: Assigned<F> = to()?.into();
+                        let v = if let Some(inv) = assigned.denominator() {
+                            assigned.numerator() * inv.invert().unwrap()
+                        } else {
+                            assigned.numerator()
+                        };
 
-                    *self
-                        .advice
-                        .get_mut(column.index())
-                        .and_then(|v| v.get_mut(row))
-                        .ok_or(Error::BoundsFailure)? = v;
-
+                        unsafe {
+                            *Arc::get_mut_unchecked(&mut self.advice)
+                                .get_mut(column.index())
+                                .and_then(|v| v.get_mut(row))
+                                .ok_or(Error::BoundsFailure)? = v;
+                        }
+                    }
                     Ok(())
                 }
 
@@ -355,36 +360,64 @@ pub fn create_proof<
 
             let unusable_rows_start = params.n as usize - (meta.blinding_factors() + 1);
 
-            let timer = start_timer!(|| "prepare collection");
-            let advice = (0..meta.num_advice_columns)
-                .into_par_iter()
-                .map(|_| domain.empty_lagrange())
-                .collect();
-            let mut witness = WitnessCollection {
-                k: params.k,
-                advice,
-                instances,
-                // The prover will not be allowed to assign values to advice
-                // cells that exist within inactive rows, which include some
-                // number of blinding factors and an extra row for use in the
-                // permutation argument.
-                usable_rows: ..unusable_rows_start,
-                _marker: std::marker::PhantomData,
+            let mut advice = {
+                let timer = start_timer!(|| "prepare collection");
+                let advice = (0..meta.num_advice_columns)
+                    .into_par_iter()
+                    .map(|_| domain.empty_lagrange())
+                    .collect::<Vec<_>>();
+                let advice = Arc::new(advice);
+                end_timer!(timer);
+
+                let timer = start_timer!(|| "synthesize");
+                // Synthesize the circuit to obtain the witness and other information.
+
+                let n_thread = std::env::var("HALO2_PROOF_ADVICE_SYNTHESIZE_THREADS")
+                    .unwrap_or("8".to_owned());
+                let n_thread = usize::from_str_radix(&n_thread, 10)
+                    .expect("Invalid HALO2_PROOF_GPU_EVAL_R_DEEP");
+
+                let rows_per_thread = (unusable_rows_start + n_thread - 1) / n_thread;
+
+                thread::scope(|s| {
+                    for i in 0..n_thread {
+                        let advice = advice.clone();
+                        let circuit = circuit.clone();
+                        let config = config.clone();
+
+                        s.spawn(move || {
+                            println!(
+                                "start is {}, end is {}",
+                                i.clone() * rows_per_thread,
+                                (i + 1) * rows_per_thread
+                            );
+                            let mut witness = WitnessCollection {
+                                k: params.k,
+                                advice,
+                                instances,
+                                // The prover will not be allowed to assign values to advice
+                                // cells that exist within inactive rows, which include some
+                                // number of blinding factors and an extra row for use in the
+                                // permutation argument.
+                                usable_rows: ..unusable_rows_start,
+                                start: i.clone() * rows_per_thread,
+                                end: (i + 1) * rows_per_thread,
+                                _marker: std::marker::PhantomData,
+                            };
+                            ConcreteCircuit::FloorPlanner::synthesize(
+                                &mut witness,
+                                circuit,
+                                config,
+                                meta.constants.clone(),
+                            )
+                            .unwrap();
+                        });
+                    }
+                });
+                end_timer!(timer);
+
+                Arc::try_unwrap(advice).unwrap()
             };
-            end_timer!(timer);
-
-            let timer = start_timer!(|| "synthesize");
-            // Synthesize the circuit to obtain the witness and other information.
-            ConcreteCircuit::FloorPlanner::synthesize(
-                &mut witness,
-                circuit,
-                config.clone(),
-                meta.constants.clone(),
-            )
-            .unwrap();
-            end_timer!(timer);
-
-            let mut advice = witness.advice;
 
             let named = &pk.vk.cs.named_advices;
 

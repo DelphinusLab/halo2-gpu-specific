@@ -420,9 +420,9 @@ pub trait FloorPlanner {
 /// This is a trait that circuits provide implementations for so that the
 /// backend prover can ask the circuit to synthesize using some given
 /// [`ConstraintSystem`] implementation.
-pub trait Circuit<F: Field> {
+pub trait Circuit<F: Field>: Send + Sync {
     /// This is a configuration object that stores things like columns.
-    type Config: Clone;
+    type Config: Clone + Send + Sync;
     /// The floor planner used for this circuit. This is an associated type of the
     /// `Circuit` trait because its behaviour is circuit-critical.
     type FloorPlanner: FloorPlanner;
