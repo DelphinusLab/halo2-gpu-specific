@@ -6,3 +6,6 @@ members = [
 
 [patch.'https://github.com/lanbones/ec-gpu']
 ec-gpu-gen = { path = '../ec-gpu/ec-gpu-gen' }
+
+[patch.'crates-io']
+rust-gpu-tools={path='../moore/rust-gpu-tools'}

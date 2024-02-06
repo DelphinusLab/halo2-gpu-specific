@@ -3,7 +3,7 @@ use crate::multicore;
 use crate::plonk::symbol::ProveExpression;
 use crate::plonk::symbol::ProveExpressionUnit;
 use crate::plonk::symbol;
-use crate::plonk::evaluation_gpu::LookupProveExpression;
+use crate::plonk::evaluation_gpu::{gen_do_extended_fft_lookup, LookupProveExpression};
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -833,7 +833,7 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer};
+        use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer,rust_gpu_tools::cuda::Program};
         use ff::PrimeField;
         use group::ff::Field;
         use pairing::bn256::Fr;
@@ -845,10 +845,9 @@ impl<C: CurveAffine> Evaluator<C> {
             slice::ParallelSlice,
         };
         use std::{collections::LinkedList, marker::PhantomData};
+        use std::rc::Rc;
 
-        use crate::plonk::evaluation_gpu::{
-            do_extended_fft, do_extended_fft_lookup, do_fft_pure, gen_do_extended_fft,
-        };
+        use crate::plonk::evaluation_gpu::{do_extended_fft, do_extended_fft_lookup, do_extended_fft_buffer_copy,gen_do_extended_fft,gen_do_extended_fft_lookup};
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -896,6 +895,7 @@ impl<C: CurveAffine> Evaluator<C> {
         // Permutations
         let permutation = &permutations[0];
         let sets = &permutation.sets;
+        println!("permutations.len: {:?}", sets.len());
         if !sets.is_empty() {
             let blinding_factors = pk.vk.cs.blinding_factors();
             let last_rotation = Rotation(-((blinding_factors + 1) as i32));
@@ -1044,7 +1044,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             .run()?;
 
                         let right_buf = curr_set_buf;
-
+                        println!("permutation colums: {}",columns.len());
                         for (values, permutation) in columns
                             .iter()
                             .map(|&column| match column.column_type() {
@@ -1116,12 +1116,26 @@ impl<C: CurveAffine> Evaluator<C> {
         }
         end_timer!(timer);
 
-        let timer = ark_std::start_timer!(|| "eval_h_lookups");
+
         let lookups = &lookups[0];
+        let timer = start_timer!(|| "lookups_register");
+        let devices = Device::all();
+        lookups.iter().for_each(|c|{
+            Program::set_context_hook(&devices[0].cuda_device().unwrap(),||{
+                let timer = start_timer!(|| "init poly");
+                Program::register_slice(&c.permuted_input_poly.values).unwrap();
+                Program::register_slice(&c.permuted_table_poly.values).unwrap();
+                Program::register_slice(&c.product_poly.values).unwrap();
+                end_timer!(timer);
+            }).unwrap();
+
+        });
+        end_timer!(timer);
 
         let n_gpu = *crate::plonk::N_GPU;
         let group_expr_len = (lookups.len() + n_gpu - 1) / n_gpu;
 
+        let timer = ark_std::start_timer!(|| "eval_h_lookups");
         if group_expr_len > 0 {
             values = lookups
                 //.par_chunks(group_expr_len)
@@ -1163,7 +1177,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 unsafe { program.create_buffer(domain.extended_len())? };
                             create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
-                            let mut helper = gen_do_extended_fft(pk, program)?;
+                            let mut helper = gen_do_extended_fft_lookup(pk, program)?;
                             let mut allocator = LinkedList::new();
 
                             let l0_buf =
@@ -1205,95 +1219,55 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .0;
 
                                 end_timer!(timer);
+
                                 let timer = start_timer!(|| "3 fft");
-                                let domain = &pk.vk.domain;
-                                let mut buf_vec = vec![];
-                                let (
-                                    permuted_input_coset_buf,
-                                    permuted_table_coset_buf,
-                                    product_coset_buf,
-                                ) = std::thread::scope(|s| {
-                                    let permuted_input_coset_buf = do_extended_fft_lookup(
-                                        pk,
+                                do_extended_fft_buffer_copy(
                                         program,
                                         &lookup.permuted_input_poly,
-                                        &mut allocator,
-                                        &mut helper,
-                                    ).expect("input fail");
-                                    let s_handle = s.spawn(|| {
-                                        let a = do_fft_pure(
-                                            program,
-                                            permuted_input_coset_buf,
-                                            domain.extended_k(),
-                                            &mut allocator,
-                                            &helper.pq_buffer,
-                                            &helper.omegas_buffer,
-                                        );
-                                        buf_vec.push(a.unwrap());
-                                        //     std::sync::Arc::new(std::sync::Mutex::new(a.unwrap()))
-                                        //     a
-                                    });
+                                        Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
+                                    );
+                                program.stream_2_wait()?;
 
-
-                                    let permuted_table_coset_value = do_extended_fft_lookup(
-                                        pk,
+                                let timer_fft = start_timer!(|| "buff+fft");
+                                do_extended_fft_buffer_copy(
                                         program,
                                         &lookup.permuted_table_poly,
-                                        &mut allocator,
-                                        &mut helper,
-                                    ).expect("table fail");
-                                    // let permuted_input_coset_buf =
-                                    //     a1.join().expect("input thead fail");
-                                    //     let permuted_input_coset_buf =
-                                    //     in_rx.recv().unwrap();
-                                        s_handle.join().expect("input thread fail");
+                                        Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
+                                    );
+                                let permuted_input_coset_buf = do_extended_fft_lookup(
+                                    pk,
+                                    program,
+                                    &mut allocator,
+                                    &mut helper,
+                                    true,
+                                )?;
+                                program.stream_2_wait()?;
+                                end_timer!(timer_fft);
 
-                                    let a1 = s.spawn(|| {
-                                        let a = do_fft_pure(
-                                            program,
-                                            permuted_table_coset_value,
-                                            domain.extended_k(),
-                                            &mut allocator,
-                                            &helper.pq_buffer,
-                                            &helper.omegas_buffer,
-                                        );
-                                            buf_vec.push(a.unwrap());
-                                            // std::rc::Rc::new(a.unwrap())
-                                            // a
-                                    });
-
-                                    let product_coset_value = do_extended_fft_lookup(
-                                        pk,
+                                let timer_fft = start_timer!(|| " buff+fft");
+                                do_extended_fft_buffer_copy(
                                         program,
                                         &lookup.product_poly,
-                                        &mut allocator,
-                                        &mut helper,
-                                    ).expect("product fail");
-                                    // let permuted_table_coset_buf =
-                                    //     a1.join().expect("table thead fail");
-                                        s_handle.join().expect("table thead fail");
+                                        Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
+                                    );
+                                let permuted_table_coset_buf = do_extended_fft_lookup(
+                                    pk,
+                                    program,
+                                    &mut allocator,
+                                    &mut helper,
+                                        false,
+                                )?;
+                                program.stream_2_wait()?;
+                                end_timer!(timer_fft);
 
-                                    let a1 = s.spawn(|| {
-                                        let a = do_fft_pure(
-                                            program,
-                                            product_coset_value,
-                                            domain.extended_k(),
-                                            &mut allocator,
-                                            &helper.pq_buffer,
-                                            &helper.omegas_buffer,
-                                        );
-                                            // std::rc::Rc::new(a)
-                                            buf_vec.push(a.unwrap());
-                                    });
-                                    // let product_coset_buf = a1.join().expect("product thead fail");
-                                        s_handle.join().expect("product thead fail");
-                                    // (
-                                    //     permuted_input_coset_buf,
-                                    //     permuted_table_coset_buf,
-                                    //     product_coset_buf,
-                                    // )
-                                        (buf_vec[0],buf_vec[1],buf_vec[2])
-                                });
+                                let product_coset_buf = do_extended_fft_lookup(
+                                    pk,
+                                    program,
+                                    // origin_buffer,
+                                    &mut allocator,
+                                    &mut helper,
+                                        true
+                                )?;
 
                                 end_timer!(timer);
 
