@@ -150,14 +150,14 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
     fn load_private(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         value: Option<F>,
     ) -> Result<Self::Num, Error> {
         let config = self.config();
 
         layouter.assign_region(
             || "load private",
-            |mut region| {
+            |region| {
                 region
                     .assign_advice(
                         || "private input",
@@ -172,14 +172,14 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
     fn load_constant(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         constant: F,
     ) -> Result<Self::Num, Error> {
         let config = self.config();
 
         layouter.assign_region(
             || "load constant",
-            |mut region| {
+            |region| {
                 region
                     .assign_advice_from_constant(|| "constant value", config.advice[0], 0, constant)
                     .map(Number)
@@ -189,7 +189,7 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
     fn mul(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         a: Self::Num,
         b: Self::Num,
     ) -> Result<Self::Num, Error> {
@@ -230,7 +230,7 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
     fn expose_public(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         num: Self::Num,
         row: usize,
     ) -> Result<(), Error> {
@@ -279,7 +279,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     fn synthesize(
         &self,
         config: Self::Config,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
         let field_chip = FieldChip::<F>::construct(config);
 
