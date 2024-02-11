@@ -194,7 +194,7 @@ impl<F: FieldExt> AddInstructions<F> for AddChip<F> {
 
     fn add(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         a: Self::Num,
         b: Self::Num,
     ) -> Result<Self::Num, Error> {
@@ -202,18 +202,18 @@ impl<F: FieldExt> AddInstructions<F> for AddChip<F> {
 
         layouter.assign_region(
             || "add",
-            |mut region: Region<'_, F>| {
+            |region: &Region<F>| {
                 // We only want to use a single addition gate in this region,
                 // so we enable it at region offset 0; this means it will constrain
                 // cells at offsets 0 and 1.
-                config.s_add.enable(&mut region, 0)?;
+                config.s_add.enable(region, 0)?;
 
                 // The inputs we've been given could be located anywhere in the circuit,
                 // but we can only rely on relative offsets inside this region. So we
                 // assign new cells inside the region and constrain them to have the
                 // same values as the inputs.
-                a.0.copy_advice(|| "lhs", &mut region, config.advice[0], 0)?;
-                b.0.copy_advice(|| "rhs", &mut region, config.advice[1], 0)?;
+                a.0.copy_advice(|| "lhs", region, config.advice[0], 0)?;
+                b.0.copy_advice(|| "rhs", region, config.advice[1], 0)?;
 
                 // Now we can compute the addition result, which is to be assigned
                 // into the output position.
@@ -320,7 +320,7 @@ impl<F: FieldExt> MulInstructions<F> for MulChip<F> {
 
     fn mul(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         a: Self::Num,
         b: Self::Num,
     ) -> Result<Self::Num, Error> {
@@ -328,18 +328,18 @@ impl<F: FieldExt> MulInstructions<F> for MulChip<F> {
 
         layouter.assign_region(
             || "mul",
-            |mut region: Region<'_, F>| {
+            |region: &Region<F>| {
                 // We only want to use a single multiplication gate in this region,
                 // so we enable it at region offset 0; this means it will constrain
                 // cells at offsets 0 and 1.
-                config.s_mul.enable(&mut region, 0)?;
+                config.s_mul.enable(region, 0)?;
 
                 // The inputs we've been given could be located anywhere in the circuit,
                 // but we can only rely on relative offsets inside this region. So we
                 // assign new cells inside the region and constrain them to have the
                 // same values as the inputs.
-                a.0.copy_advice(|| "lhs", &mut region, config.advice[0], 0)?;
-                b.0.copy_advice(|| "rhs", &mut region, config.advice[1], 0)?;
+                a.0.copy_advice(|| "lhs", region, config.advice[0], 0)?;
+                b.0.copy_advice(|| "rhs", region, config.advice[1], 0)?;
 
                 // Now we can compute the multiplication result, which is to be assigned
                 // into the output position.
@@ -411,14 +411,14 @@ impl<F: FieldExt> FieldInstructions<F> for FieldChip<F> {
 
     fn load_private(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         value: Option<F>,
     ) -> Result<<Self as FieldInstructions<F>>::Num, Error> {
         let config = self.config();
 
         layouter.assign_region(
             || "load private",
-            |mut region| {
+            |region| {
                 region
                     .assign_advice(
                         || "private input",
@@ -445,7 +445,7 @@ impl<F: FieldExt> FieldInstructions<F> for FieldChip<F> {
 
     fn expose_public(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         num: <Self as FieldInstructions<F>>::Num,
         row: usize,
     ) -> Result<(), Error> {

@@ -52,6 +52,11 @@ impl<F: Field> Assignment<F> for Assembly {
     fn is_in_prove_mode(&self) -> bool {
         false
     }
+
+    fn get_protect_lock(&self) -> Option<Arc<Mutex<()>>> {
+        None
+    }
+
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

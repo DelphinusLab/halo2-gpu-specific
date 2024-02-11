@@ -106,16 +106,17 @@ fn plonk_api() {
         where
             F: FnMut() -> Result<(FF, FF, FF), Error>,
         {
+            let v = f()?;
             layouter.assign_region(
                 || "raw_multiply",
-                |mut region| {
+                |region| {
                     let mut value = None;
                     let lhs = region.assign_advice(
                         || "lhs",
                         self.config.a,
                         0,
                         || {
-                            value = Some(f()?);
+                            value = Some(v);
                             Ok(value.ok_or(Error::Synthesis)?.0)
                         },
                     )?;
@@ -160,16 +161,17 @@ fn plonk_api() {
         where
             F: FnMut() -> Result<(FF, FF, FF), Error>,
         {
+            let v = f()?;
             layouter.assign_region(
                 || "raw_add",
-                |mut region| {
+                |region| {
                     let mut value = None;
                     let lhs = region.assign_advice(
                         || "lhs",
                         self.config.a,
                         0,
                         || {
-                            value = Some(f()?);
+                            value = Some(v);
                             Ok(value.ok_or(Error::Synthesis)?.0)
                         },
                     )?;
@@ -214,7 +216,7 @@ fn plonk_api() {
         ) -> Result<(), Error> {
             layouter.assign_region(
                 || "copy",
-                |mut region| {
+                |region| {
                     region.constrain_equal(left, right)?;
                     region.constrain_equal(left, right)
                 },
@@ -224,10 +226,11 @@ fn plonk_api() {
         where
             F: FnMut() -> Result<FF, Error>,
         {
+            let v = f()?;
             layouter.assign_region(
                 || "public_input",
-                |mut region| {
-                    let value = region.assign_advice(|| "value", self.config.a, 0, &mut f)?;
+                |region| {
+                    let value = region.assign_advice(|| "value", self.config.a, 0, || Ok(v))?;
                     region.assign_fixed(|| "public", self.config.sp, 0, || Ok(FF::one()))?;
 
                     Ok(value.cell())
@@ -241,7 +244,7 @@ fn plonk_api() {
         ) -> Result<(), Error> {
             layouter.assign_table(
                 || "",
-                |mut table| {
+                |table| {
                     for (index, &value) in values.iter().enumerate() {
                         table.assign_cell(|| "table col", self.config.sl, index, || Ok(value))?;
                     }

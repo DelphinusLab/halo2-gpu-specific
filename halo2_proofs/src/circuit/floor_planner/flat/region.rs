@@ -83,7 +83,9 @@ impl<F: Field> RegionLayouter<F> for SharedRegion<RegionSetup<F>> {
         constant: Assigned<F>,
     ) -> Result<Cell, Error> {
         // The rest is identical to witnessing an advice cell.
-        self.assign_advice(annotation, column, offset, &mut || Ok(constant))
+        let advice = self.assign_advice(annotation, column, offset, &mut || Ok(constant))?;
+        self.constrain_constant(advice, constant)?;
+        Ok(advice)
     }
 
     fn assign_advice_from_instance<'v>(

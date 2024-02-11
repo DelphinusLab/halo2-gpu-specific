@@ -197,18 +197,18 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
         layouter.assign_region(
             || "mul",
-            |mut region: Region<'_, F>| {
+            |region: &Region<F>| {
                 // We only want to use a single multiplication gate in this region,
                 // so we enable it at region offset 0; this means it will constrain
                 // cells at offsets 0 and 1.
-                config.s_mul.enable(&mut region, 0)?;
+                config.s_mul.enable(region, 0)?;
 
                 // The inputs we've been given could be located anywhere in the circuit,
                 // but we can only rely on relative offsets inside this region. So we
                 // assign new cells inside the region and constrain them to have the
                 // same values as the inputs.
-                a.0.copy_advice(|| "lhs", &mut region, config.advice[0], 0)?;
-                b.0.copy_advice(|| "rhs", &mut region, config.advice[1], 0)?;
+                a.0.copy_advice(|| "lhs", region, config.advice[0], 0)?;
+                b.0.copy_advice(|| "rhs", region, config.advice[1], 0)?;
 
                 // Now we can assign the multiplication result, which is to be assigned
                 // into the output position.

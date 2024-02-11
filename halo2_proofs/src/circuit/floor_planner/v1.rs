@@ -181,7 +181,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -249,7 +249,7 @@ impl MeasurementPass {
 
     fn assign_region<F: Field, A, AR>(&self, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
     {
         let region_index = self.regions.lock().unwrap().len();
 
@@ -257,7 +257,7 @@ impl MeasurementPass {
         let shape = SharedRegion(Arc::new(Mutex::new(RegionShape::new(region_index.into()))));
         let result = {
             let region: &dyn RegionLayouter<F> = &shape;
-            assignment(region.into())
+            assignment(&region.into())
         }?;
         self.regions.lock().unwrap().push(shape);
 
@@ -283,7 +283,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -297,16 +297,16 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         let region = V1Region::new(self.plan, index.into());
         let result = {
             let region: &dyn RegionLayouter<F> = &region;
-            assignment(region.into())
+            assignment(&region.into())
         }?;
         self.plan.cs.exit_region();
 
         Ok(result)
     }
 
-    fn assign_table<A, AR, N, NR>(&self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_table<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<AR, Error>,
+        A: Fn(Table<F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -315,9 +315,9 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         // Assign table cells.
         self.plan.cs.enter_region(name);
         let mut dynamic = self.plan.dynamic.lock().unwrap();
-        let mut table = SimpleTableLayouter::new(self.plan.cs, &dynamic.table_columns);
+        let table = SimpleTableLayouter::new(self.plan.cs, &dynamic.table_columns);
         let result = {
-            let table: &mut dyn TableLayouter<F> = &mut table;
+            let table: &dyn TableLayouter<F> = &table;
             assignment(table.into())
         }?;
         let default_and_assigned = table.default_and_assigned.lock().unwrap();
@@ -541,11 +541,11 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl crate::circuit::Layouter<Scalar>,
+                layouter: impl crate::circuit::Layouter<Scalar>,
             ) -> Result<(), crate::plonk::Error> {
                 layouter.assign_region(
                     || "assign constant",
-                    |mut region| {
+                    |region| {
                         region.assign_advice_from_constant(|| "one", config, 0, Scalar::one())
                     },
                 )?;

@@ -300,6 +300,12 @@ pub trait Assignment<F: Field>: Clone {
     /// If it is in proving mode, we could avoid assign fixed and
     /// copy constraints
     fn is_in_prove_mode(&self) -> bool;
+
+
+    /// Indicator whether this assignment needs to be protected within
+    /// enter and leave region
+    fn get_protect_lock(&self) -> Option<Arc<Mutex<()>>>;
+
     /// Creates a new region and enters into it.
     ///
     /// Panics if we are currently in a region (if `exit_region` was not called).

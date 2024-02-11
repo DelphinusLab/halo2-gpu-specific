@@ -177,6 +177,11 @@ impl<'a, F: Field> Assignment<F> for ProofWitnessCollection<'a, F> {
     fn is_in_prove_mode(&self) -> bool {
          true
     }
+
+    fn get_protect_lock(&self) -> Option<Arc<Mutex<()>>> {
+        None
+    }
+
     fn enter_region<NR, N>(&self, _: N)
         where
             NR: Into<String>,

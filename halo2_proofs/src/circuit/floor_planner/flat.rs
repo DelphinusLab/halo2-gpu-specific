@@ -12,7 +12,7 @@ use ff::Field;
 
 use crate::{
     circuit::{
-        layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter, SharedRegion},
+        layouter::{RegionColumn, RegionLayouter, TableLayouter, SharedRegion},
         Cell, Layouter, Region, RegionIndex, RegionStart, Table,
     },
     plonk::{
@@ -141,9 +141,9 @@ impl<'a, F: Field, CS: Assignment<F>> FlatShapeLayouter<'a, F, CS> {
 impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a, F, CS> {
     type Root = Self;
 
-    fn assign_region<A, AR, N, NR>(&self, _name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -152,80 +152,110 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
         dynamic.nb_regions += 1;
         drop(dynamic);
 
-        let phase1_timer = start_timer!(|| "phase 1 timer");
+        let name = name().into();
 
-        // Get shape of the region.
-        let shape = region::RegionSetup::new(region_index.into());
-        let shared_region = SharedRegion(Arc::new(Mutex::new(shape)));
+        let f = || {
+            let phase1_timer = start_timer!(|| "phase 1 timer");
+            self.cs.enter_region(||name.clone());
 
-        let region: &dyn RegionLayouter<F> = &shared_region;
-        let result = assignment(region.into())?;
+            // Get shape of the region.
+            let shape = region::RegionSetup::new(region_index.into());
+            let shared_region = SharedRegion(Arc::new(Mutex::new(shape)));
 
-        let mut shape = Arc::try_unwrap(shared_region.0).unwrap().into_inner().unwrap();
+            let region: &dyn RegionLayouter<F> = &shared_region;
+            let result = assignment(&region.into())?;
+
+            let mut shape = Arc::try_unwrap(shared_region.0).unwrap().into_inner().unwrap();
 
 
-        let mut dynamic = self.dynamic.lock().unwrap();
-        dynamic.constants_to_assign.append(&mut shape.constants);
-        self.cs.exit_region();
-        end_timer!(phase1_timer);
+            let mut dynamic = self.dynamic.lock().unwrap();
+            println!("shape constants {}", shape.constants.len());
+            dynamic.constants_to_assign.append(&mut shape.constants);
+            self.cs.exit_region();
+            end_timer!(phase1_timer);
+            Ok(result)
+        };
 
-        Ok(result)
+        // use protect_lock to prevent region parallel for dev (mock)
+        self.cs.get_protect_lock().map_or_else(
+            || {
+                f()
+            },
+            |lock| {
+                let _data = lock.lock().unwrap();
+                f()
+            })
     }
 
-    fn assign_table<A, N, NR>(&self, name: N, mut assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
         // Maintenance hazard: there is near-duplicate code in `v1::AssignmentPass::assign_table`.
         // Assign table cells.
-        let mut dynamic = self.dynamic.lock().unwrap();
-        self.cs.enter_region(name);
-        let mut table = SimpleTableLayouter::new(self.cs, &dynamic.table_columns);
-        {
-            let table: &mut dyn TableLayouter<F> = &mut table;
-            assignment(table.into())
-        }?;
+        let name = name().into();
 
-        let default_and_assigned = table.default_and_assigned.lock().unwrap().clone();
-        self.cs.exit_region();
+        let f = || {
+            let mut dynamic = self.dynamic.lock().unwrap();
+            self.cs.enter_region(||name.clone());
+            let table = SimpleTableLayouter::new(self.cs, &dynamic.table_columns);
+            {
+                let table: &dyn TableLayouter<F> = &table;
+                assignment(table.into())
+            }?;
 
-        // Check that all table columns have the same length `first_unused`,
-        // and all cells up to that length are assigned.
-        let first_unused = {
-            match default_and_assigned
-                .values()
-                .map(|(_, assigned)| {
-                    if assigned.iter().all(|b| *b) {
-                        Some(assigned.len())
-                    } else {
-                        None
-                    }
-                })
+            let default_and_assigned = table.default_and_assigned.lock().unwrap().clone();
+            self.cs.exit_region();
+
+            // Check that all table columns have the same length `first_unused`,
+            // and all cells up to that length are assigned.
+            let first_unused = {
+                match default_and_assigned
+                    .values()
+                    .map(|(_, assigned)| {
+                        if assigned.iter().all(|b| *b) {
+                            Some(assigned.len())
+                        } else {
+                            None
+                        }
+                    })
                 .reduce(|acc, item| match (acc, item) {
                     (Some(a), Some(b)) if a == b => Some(a),
                     _ => None,
                 }) {
-                Some(Some(len)) => len,
-                _ => return Err(Error::Synthesis), // TODO better error
+                    Some(Some(len)) => len,
+                    _ => return Err(Error::Synthesis), // TODO better error
+                }
+            };
+
+            // Record these columns so that we can prevent them from being used again.
+            for column in default_and_assigned.keys() {
+                dynamic.table_columns.push(*column);
             }
+
+            for (col, (default_val, _)) in default_and_assigned.iter() {
+                // default_val must be Some because we must have assigned
+                // at least one cell in each column, and in that case we checked
+                // that all cells up to first_unused were assigned.
+                self.cs
+                    .fill_from_row(col.inner(), first_unused, default_val.unwrap())?;
+            }
+
+            Ok(())
         };
 
-        // Record these columns so that we can prevent them from being used again.
-        for column in default_and_assigned.keys() {
-            dynamic.table_columns.push(*column);
-        }
-
-        for (col, (default_val, _)) in default_and_assigned.iter() {
-            // default_val must be Some because we must have assigned
-            // at least one cell in each column, and in that case we checked
-            // that all cells up to first_unused were assigned.
-            self.cs
-                .fill_from_row(col.inner(), first_unused, default_val.unwrap())?;
-        }
-
-        Ok(())
+        self.cs.get_protect_lock().map_or_else(
+            || {
+                // no protect_lock, free to do parallel
+                f()
+            },
+            |lock| {
+                // use protect_lock to prevent region parallel for dev (mock)
+                let _data = lock.lock().unwrap();
+                f()
+            })
     }
 
     // Flat layouter does not arrange region that overlaps
@@ -288,14 +318,14 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatChipLayouter<'a, 
 
     fn assign_region<A, AR, N, NR>(&self, _name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
         let region = FlatChipLayouterRegion::new(self.cs);
         let result = {
             let region: &dyn RegionLayouter<F> = &region;
-            assignment(region.into())
+            assignment(&region.into())
         }?;
         Ok(result)
     }
@@ -499,11 +529,11 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl crate::circuit::Layouter<Scalar>,
+                layouter: impl crate::circuit::Layouter<Scalar>,
             ) -> Result<(), crate::plonk::Error> {
                 layouter.assign_region(
                     || "assign constant",
-                    |mut region| {
+                    |region| {
                         region.assign_advice_from_constant(|| "one", config, 0, Scalar::one())
                     },
                 )?;

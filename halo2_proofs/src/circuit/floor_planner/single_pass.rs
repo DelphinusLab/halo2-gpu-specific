@@ -92,7 +92,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -104,7 +104,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         let shared_region = SharedRegion(Arc::new(Mutex::new(shape)));
 
         let region: &dyn RegionLayouter<F> = &shared_region;
-        assignment(region.into())?;
+        assignment(&region.into())?;
 
         let shape = Arc::try_unwrap(shared_region.0).unwrap().into_inner().unwrap();
 
@@ -129,7 +129,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         let region = SingleChipLayouterRegion::new(self, region_index.into());
         let result = {
             let region: &dyn RegionLayouter<F> = &region;
-            assignment(region.into())
+            assignment(&region.into())
         }?;
 
         let constants_to_assign = Arc::try_unwrap(region.constants).unwrap().into_inner().unwrap();
@@ -172,9 +172,9 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         Ok(result)
     }
 
-    fn assign_table<A, N, NR>(&self, name: N, mut assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -182,9 +182,9 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for SingleChipLayouter<'a
         // Assign table cells.
         let mut dynamic = self.dynamic.lock().unwrap();
         self.cs.enter_region(name);
-        let mut table = SimpleTableLayouter::new(self.cs, &dynamic.table_columns);
+        let table = SimpleTableLayouter::new(self.cs, &dynamic.table_columns);
         {
-            let table: &mut dyn TableLayouter<F> = &mut table;
+            let table: &dyn TableLayouter<F> = &table;
             assignment(table.into())
         }?;
 
@@ -516,11 +516,11 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl crate::circuit::Layouter<Scalar>,
+                layouter: impl crate::circuit::Layouter<Scalar>,
             ) -> Result<(), crate::plonk::Error> {
                 layouter.assign_region(
                     || "assign constant",
-                    |mut region| {
+                    |region| {
                         region.assign_advice_from_constant(|| "one", config, 0, Scalar::one())
                     },
                 )?;

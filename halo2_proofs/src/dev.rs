@@ -496,6 +496,9 @@ pub struct MockProver<F: Group + Field> {
     /// synthesized.
     current_region: Option<Region>,
 
+    /// a lock that protect the current assignment
+    protect_lock: Arc<Mutex<()>>,
+
     // The fixed cells in the circuit, arranged as [column][row].
     fixed: Vec<Vec<CellValue<F>>>,
     // The advice cells in the circuit, arranged as [column][row].
@@ -518,6 +521,10 @@ impl<F: Field + Group> Assignment<F> for SharedMockProver<F> {
     fn is_in_prove_mode(&self) -> bool {
         false
     }
+    fn get_protect_lock(&self) -> Option<Arc<Mutex<()>>> {
+        Some(self.0.lock().unwrap().protect_lock.clone())
+    }
+
     fn enter_region<NR, N>(&self, name: N)
     where
         NR: Into<String>,
@@ -751,6 +758,7 @@ impl<F: FieldExt> MockProver<F> {
             n: n as u32,
             cs,
             regions: vec![],
+            protect_lock: Arc::new(Mutex::new(())),
             current_region: None,
             fixed,
             advice,
@@ -1148,7 +1156,7 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl Layouter<Fp>,
+                layouter: impl Layouter<Fp>,
             ) -> Result<(), Error> {
                 layouter.assign_region(
                     || "Faulty synthesis",
@@ -1223,11 +1231,11 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl Layouter<Fp>,
+                layouter: impl Layouter<Fp>,
             ) -> Result<(), Error> {
                 layouter.assign_table(
                     || "Doubling table",
-                    |mut table| {
+                    |table| {
                         (1..(1 << (K - 1)))
                             .map(|i| {
                                 table.assign_cell(
@@ -1243,10 +1251,10 @@ mod tests {
 
                 layouter.assign_region(
                     || "Good synthesis",
-                    |mut region| {
+                    |region| {
                         // Enable the lookup on rows 0 and 1.
-                        config.q.enable(&mut region, 0)?;
-                        config.q.enable(&mut region, 1)?;
+                        config.q.enable(region, 0)?;
+                        config.q.enable(region, 1)?;
 
                         // Assign a = 2 and a = 6.
                         region.assign_advice(|| "a = 2", config.a, 0, || Ok(Fp::from(2)))?;
@@ -1258,10 +1266,10 @@ mod tests {
 
                 layouter.assign_region(
                     || "Faulty synthesis",
-                    |mut region| {
+                    |region| {
                         // Enable the lookup on rows 0 and 1.
-                        config.q.enable(&mut region, 0)?;
-                        config.q.enable(&mut region, 1)?;
+                        config.q.enable(region, 0)?;
+                        config.q.enable(region, 1)?;
 
                         // Assign a = 4.
                         region.assign_advice(|| "a = 4", config.a, 0, || Ok(Fp::from(4)))?;

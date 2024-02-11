@@ -134,7 +134,7 @@ where
     pub fn copy_advice<A, AR>(
         &self,
         annotation: A,
-        region: &mut Region<'_, F>,
+        region: &Region<F>,
         column: Column<Advice>,
         offset: usize,
     ) -> Result<Self, Error>
@@ -344,11 +344,11 @@ impl<'r, F: Field> Region<'r, F> {
 /// A lookup table in the circuit.
 #[derive(Debug)]
 pub struct Table<'r, F: Field> {
-    table: &'r mut dyn layouter::TableLayouter<F>,
+    table: &'r dyn layouter::TableLayouter<F>,
 }
 
-impl<'r, F: Field> From<&'r mut dyn layouter::TableLayouter<F>> for Table<'r, F> {
-    fn from(table: &'r mut dyn layouter::TableLayouter<F>) -> Self {
+impl<'r, F: Field> From<&'r dyn layouter::TableLayouter<F>> for Table<'r, F> {
+    fn from(table: &'r dyn layouter::TableLayouter<F>) -> Self {
         Table { table }
     }
 }
@@ -403,7 +403,7 @@ pub trait Layouter<F: Field>: Clone + Send {
     /// ```
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
@@ -474,7 +474,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: Fn(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {

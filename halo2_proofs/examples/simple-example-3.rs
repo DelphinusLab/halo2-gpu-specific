@@ -145,15 +145,14 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
     fn load_private(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         value: Option<F>,
     ) -> Result<Self::Num, Error> {
         let config = self.config();
 
-        let mut num = None;
-        layouter.assign_region(
+        let num = layouter.assign_region(
             || "load private",
-            |mut region| {
+            |region| {
                 let cell = region
                     .assign_advice(
                         || "private input",
@@ -162,24 +161,22 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
                         || value.ok_or(Error::Synthesis),
                     )?
                     .cell();
-                num = Some(Number { cell, value });
-                Ok(())
+                Ok(Number { cell, value })
             },
         )?;
-        Ok(num.unwrap())
+        Ok(num)
     }
 
     fn load_constant(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         constant: F,
     ) -> Result<Self::Num, Error> {
         let config = self.config();
 
-        let mut num = None;
-        layouter.assign_region(
+        let num = layouter.assign_region(
             || "load constant",
-            |mut region| {
+            |region| {
                 let cell = region
                     .assign_advice_from_constant(
                         || "constant value",
@@ -188,32 +185,29 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
                         constant,
                     )?
                     .cell();
-                num = Some(Number {
+                Ok (Number {
                     cell,
                     value: Some(constant),
-                });
-                Ok(())
+                })
             },
         )?;
-        Ok(num.unwrap())
+        Ok(num)
     }
 
     fn mul(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         a: Self::Num,
         b: Self::Num,
     ) -> Result<Self::Num, Error> {
         let config = self.config();
-
-        let mut out = None;
-        layouter.assign_region(
+        let out = layouter.assign_region(
             || "mul",
-            |mut region: Region<'_, F>| {
+            |region: &Region<F>| {
                 // We only want to use a single multiplication gate in this region,
                 // so we enable it at region offset 0; this means it will constrain
                 // cells at offsets 0 and 1.
-                config.s_mul.enable(&mut region, 0)?;
+                config.s_mul.enable(region, 0)?;
 
                 // The inputs we've been given could be located anywhere in the circuit,
                 // but we can only rely on relative offsets inside this region. So we
@@ -251,17 +245,16 @@ impl<F: FieldExt> NumericInstructions<F> for FieldChip<F> {
 
                 // Finally, we return a variable representing the output,
                 // to be used in another part of the circuit.
-                out = Some(Number { cell, value });
-                Ok(())
+                Ok(Number { cell, value })
             },
         )?;
 
-        Ok(out.unwrap())
+        Ok(out)
     }
 
     fn expose_public(
         &self,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
         num: Self::Num,
         row: usize,
     ) -> Result<(), Error> {
@@ -308,7 +301,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     fn synthesize(
         &self,
         config: Self::Config,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
         let field_chip = FieldChip::<F>::construct(config);
 

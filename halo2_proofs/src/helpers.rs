@@ -669,6 +669,11 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
     fn is_in_prove_mode(&self) -> bool {
          true
     }
+
+    fn get_protect_lock(&self) -> Option<Arc<Mutex<()>>> {
+        None
+    }
+
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

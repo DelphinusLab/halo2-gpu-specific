@@ -69,16 +69,17 @@ impl<FF: FieldExt> StandardCs<FF> for StandardPlonk<FF> {
     where
         F: FnMut() -> Result<(FF, FF, FF), Error>,
     {
+        let value = f()?;
         layouter.assign_region(
             || "mul",
-            |mut region| {
+            |region| {
                 let mut values = None;
                 let lhs = region.assign_advice(
                     || "lhs",
                     self.config.a,
                     0,
                     || {
-                        values = Some(f()?);
+                        values = Some(value);
                         Ok(values.ok_or(Error::Synthesis)?.0)
                     },
                 )?;
@@ -114,16 +115,15 @@ impl<FF: FieldExt> StandardCs<FF> for StandardPlonk<FF> {
     where
         F: FnMut() -> Result<(FF, FF, FF), Error>,
     {
+        let values = Some(f()?);
         layouter.assign_region(
             || "mul",
-            |mut region| {
-                let mut values = None;
+            |region| {
                 let lhs = region.assign_advice(
                     || "lhs",
                     self.config.a,
                     0,
                     || {
-                        values = Some(f()?);
                         Ok(values.ok_or(Error::Synthesis)?.0)
                     },
                 )?;
@@ -154,7 +154,7 @@ impl<FF: FieldExt> StandardCs<FF> for StandardPlonk<FF> {
     fn copy(&self, layouter: &mut impl Layouter<FF>, left: Cell, right: Cell) -> Result<(), Error> {
         layouter.assign_region(
             || "copy",
-            |mut region| {
+            |region| {
                 region.constrain_equal(left, right)?;
                 region.constrain_equal(left, right)
             },

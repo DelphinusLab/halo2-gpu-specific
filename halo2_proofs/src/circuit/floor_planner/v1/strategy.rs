@@ -1,7 +1,7 @@
 use std::{
     cmp,
     collections::{BTreeSet, HashMap},
-    ops::Range,
+    ops::Range, sync::{Arc, Mutex},
 };
 
 use super::{RegionColumn, RegionShape, SharedRegion};
@@ -257,7 +257,7 @@ fn test_slot_in() {
         },
     ];
     assert_eq!(
-        slot_in(regions)
+        slot_in(regions.into_iter().map(|c| SharedRegion(Arc::new(Mutex::new(c)))).collect::<Vec<_>>())
             .0
             .into_iter()
             .map(|(i, _)| i)
