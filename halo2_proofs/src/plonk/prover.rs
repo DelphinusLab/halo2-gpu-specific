@@ -174,6 +174,9 @@ struct ProofWitnessCollection<'a, F: Field> {
 }
 
 impl<'a, F: Field> Assignment<F> for ProofWitnessCollection<'a, F> {
+    fn is_in_prove_mode(&self) -> bool {
+         true
+    }
     fn enter_region<NR, N>(&self, _: N)
         where
             NR: Into<String>,

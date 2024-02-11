@@ -1028,6 +1028,7 @@ fn test_fft_performance() {
 
     let timer = start_timer!(|| "gpu fft");
     buffer.par_iter_mut().for_each(|buffer| {
+        #[cfg(feature = "cuda")]
         gpu_fft(&mut buffer[..], omega, 18);
     });
     end_timer!(timer);

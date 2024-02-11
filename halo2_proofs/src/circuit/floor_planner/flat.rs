@@ -36,6 +36,7 @@ impl FloorPlanner for FlatFloorPlanner {
         config: C::Config,
         constants: Vec<Column<Fixed>>,
     ) -> Result<(), Error> {
+        if !cs.is_in_prove_mode() {
         let layouter = FlatShapeLayouter::new(cs)?;
         circuit.synthesize(config.clone(), layouter.clone())?;
 
@@ -83,6 +84,7 @@ impl FloorPlanner for FlatFloorPlanner {
             }
             Ok(())
         }?;
+        }
 
         let layouter = FlatChipLayouter::new(cs)?;
         circuit.synthesize(config, layouter)?;

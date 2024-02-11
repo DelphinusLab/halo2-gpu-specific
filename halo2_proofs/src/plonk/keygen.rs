@@ -68,6 +68,9 @@ struct Assembly<F: Field> {
 }
 
 impl<F: Field> Assignment<F> for Assembly<F> {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

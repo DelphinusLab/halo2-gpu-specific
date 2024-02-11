@@ -515,6 +515,9 @@ pub struct MockProver<F: Group + Field> {
 pub struct SharedMockProver<F: Group + Field> (Arc<Mutex<MockProver<F>>>);
 
 impl<F: Field + Group> Assignment<F> for SharedMockProver<F> {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
     fn enter_region<NR, N>(&self, name: N)
     where
         NR: Into<String>,
