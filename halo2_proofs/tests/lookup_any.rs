@@ -61,7 +61,7 @@ fn lookup_any() {
 
         fn witness_even(
             &self,
-            mut layouter: impl Layouter<F>,
+            layouter: impl Layouter<F>,
             value: Option<F>,
         ) -> Result<(), Error> {
             layouter.assign_region(
@@ -83,7 +83,7 @@ fn lookup_any() {
 
         fn witness_odd(
             &self,
-            mut layouter: impl Layouter<F>,
+            layouter: impl Layouter<F>,
             value: Option<F>,
         ) -> Result<(), Error> {
             layouter.assign_region(
@@ -105,12 +105,12 @@ fn lookup_any() {
 
         fn load_even_lookup(
             &self,
-            mut layouter: impl Layouter<F>,
+            layouter: impl Layouter<F>,
             values: &[F],
         ) -> Result<(), Error> {
             layouter.assign_region(
                 || "load values for even lookup table",
-                |mut region| {
+                |region| {
                     for (offset, value) in values.iter().enumerate() {
                         region.assign_advice(
                             || "even table value",
@@ -149,7 +149,7 @@ fn lookup_any() {
         fn synthesize(
             &self,
             config: Self::Config,
-            mut layouter: impl Layouter<F>,
+            layouter: impl Layouter<F>,
         ) -> Result<(), Error> {
             // Load allowed values for even lookup table
             config.load_even_lookup(
