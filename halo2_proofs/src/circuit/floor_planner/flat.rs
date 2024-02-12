@@ -169,7 +169,6 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
 
 
             let mut dynamic = self.dynamic.lock().unwrap();
-            println!("shape constants {}", shape.constants.len());
             dynamic.constants_to_assign.append(&mut shape.constants);
             self.cs.exit_region();
             end_timer!(phase1_timer);
