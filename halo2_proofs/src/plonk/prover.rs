@@ -545,9 +545,9 @@ pub fn create_proof<
                         (
                             c,
                             lookup::prover::Committed {
-                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1),
-                                product_poly,
+                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0).into(),
+                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1).into(),
+                                product_poly: product_poly.into(),
                             },
                         )
                     })
@@ -1035,9 +1035,9 @@ pub fn create_proof_from_witness<
                         (
                             c,
                             lookup::prover::Committed {
-                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1),
-                                product_poly,
+                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0).into(),
+                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1).into(),
+                                product_poly: product_poly.into(),
                             },
                         )
                     })

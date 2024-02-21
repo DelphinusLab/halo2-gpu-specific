@@ -35,6 +35,7 @@ use std::{
     iter,
     ops::{Mul, MulAssign},
 };
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Permuted<C: CurveAffine> {
@@ -46,9 +47,9 @@ pub(in crate::plonk) struct Permuted<C: CurveAffine> {
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
-    pub(in crate::plonk) permuted_input_poly: Polynomial<C::Scalar, Coeff>,
-    pub(in crate::plonk) permuted_table_poly: Polynomial<C::Scalar, Coeff>,
-    pub(in crate::plonk) product_poly: Polynomial<C::Scalar, Coeff>,
+    pub(in crate::plonk) permuted_input_poly: Arc<Polynomial<C::Scalar, Coeff>>,
+    pub(in crate::plonk) permuted_table_poly: Arc<Polynomial<C::Scalar, Coeff>>,
+    pub(in crate::plonk) product_poly: Arc<Polynomial<C::Scalar, Coeff>>,
 }
 
 pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
