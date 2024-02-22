@@ -890,6 +890,42 @@ impl<C: CurveAffine> Evaluator<C> {
         let l_active_row = &pk.l_active_row;
         let p = &pk.vk.cs.permutation;
 
+        {
+            println!("FIND_ME    {}", stringify!(evaluate_h));
+            println!("INSTANCE_POLY {:?}", advice_poly[0][24].len());
+            println!("FIXED_POLY {:?}", fixed[16].len());
+
+            use std::fs::File;
+            use std::io::Write;
+
+
+            let mut advice_file = match File::create("advice_poly_24.txt") {
+                Ok(file) => file,
+                Err(e) => {
+                    panic!("Failed to create file: {}", e);
+                }
+            };
+            let advice_data = format!("{:?}",advice_poly[0][24]);
+            match advice_file.write_all(advice_data.as_bytes()) {
+                Ok(_) => println!("Data has been written to the file."),
+                Err(e) => println!("Error occurred while writing to the file: {}", e),
+            }
+
+            let mut fixed_file = match File::create("fixed_poly_16.txt") {
+                Ok(file) => file,
+                Err(e) => {
+                    panic!("Failed to create file: {}", e);
+                }
+            };
+            let fixed_data = format!("{:?}",fixed[16]);
+            match fixed_file.write_all(fixed_data.as_bytes()) {
+                Ok(_) => println!("Data has been written to the file."),
+                Err(e) => println!("Error occurred while writing to the file: {}", e),
+            }
+        }
+
+        
+
         let timer = ark_std::start_timer!(|| "permutations");
         // Permutations
         let permutation = &permutations[0];
@@ -1201,6 +1237,9 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )
                                     .unwrap()
                                     .0;
+
+                                println!("FIND_ME table_buf");
+                                println!("{:?}", table_buf);
 
                                 end_timer!(timer);
 

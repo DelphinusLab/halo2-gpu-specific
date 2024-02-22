@@ -89,6 +89,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
         allocator: &mut LinkedList<Buffer<F>>,
         helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Rc<Buffer<F>>, i32)> {
+        println!("FIND_ME {}", stringify!(_eval_gpu));
+        println!("{}", self.to_string());
+
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
@@ -463,6 +466,26 @@ impl<F: FieldExt> ProveExpression<F> {
                 &mut helper,
             )?;
             program.read_into_buffer(&values_buf.0.unwrap().0, input)?;
+
+
+            {
+                use std::fs::File;
+                use std::io::Write;
+
+
+                let mut f = match File::create("input.txt") {
+                    Ok(file) => file,
+                    Err(e) => {
+                        panic!("Failed to create file: {}", e);
+                    }
+                };
+                let dd = format!("{:?}", input);
+                match f.write_all(dd.as_bytes()) {
+                    Ok(_) => println!("Data has been written to the file."),
+                    Err(e) => println!("Error occurred while writing to the file: {}", e),
+                }
+            }
+
             println!("cache: {:?}", unit_cache.data.keys().collect::<Vec<_>>().into_iter().map(|x| ProveExpressionUnit::key_to_string(*x)).collect::<Vec<_>>());
 
             Ok(unit_cache.data)
@@ -479,6 +502,7 @@ impl<F: FieldExt> ProveExpression<F> {
             FftKernel::<pairing::bn256::Fr>::create(programs).expect("Cannot initialize kernel!");
 
         let gpu_idx = group_idx % kern.kernels.len();
+        println!("GPU IDX = {:?}", gpu_idx);
         let data = kern.kernels[gpu_idx]
             .program
             .run(closures, &mut values.values[..])
@@ -626,6 +650,10 @@ impl<F: FieldExt> ProveExpression<F> {
         allocator: &mut LinkedList<Buffer<F>>,
         helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
+        if self.to_string() == "(Smix(u(a24-3)) * u(f16-0))".to_string() {
+            println!("FIND_ME ProveExpression");
+            println!("{}", self.to_string());
+        }
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
@@ -736,6 +764,37 @@ impl<F: FieldExt> ProveExpression<F> {
                         }
                     };
                     //end_timer!(timer);
+                    //
+                    if self.to_string() == "(Smix(u(a24-3)) * u(f16-0))".to_string() {
+                        println!("FIND_ME ProveExpression::Op");
+                        println!("{:?}", res);
+
+                        let bb = res.as_ref().unwrap().0.as_ref().unwrap().0.as_ref();
+                        let d = 1048576;
+
+                        let mut xx = vec![F::zero(); d];
+                        let mut yy = xx.as_mut_slice();
+
+                        program.read_into_buffer(&bb, &mut yy)?;
+
+                        {
+                            use std::fs::File;
+                            use std::io::Write;
+
+                            let mut f = match File::create("a24_mul_f16.txt") {
+                                Ok(file) => file,
+                                Err(e) => {
+                                    panic!("Failed to create file: {}", e);
+                                }
+                            };
+                            let dd = format!("{:?}", yy);
+                            match f.write_all(dd.as_bytes()) {
+                                Ok(_) => println!("Data has been written to the file."),
+                                Err(e) => println!("Error occurred while writing to the file: {}", e),
+                            }
+                        }
+
+                    }
 
                     res
                 }
