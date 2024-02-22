@@ -1,11 +1,11 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
-use crate::plonk::symbol::ProveExpression;
-use crate::plonk::symbol::ProveExpressionUnit;
-use crate::plonk::symbol;
 use crate::plonk::evaluation_gpu::LookupProveExpression;
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
+use crate::plonk::symbol;
+use crate::plonk::symbol::ProveExpression;
+use crate::plonk::symbol::ProveExpressionUnit;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
 use crate::poly::Basis;
 use crate::{
@@ -30,13 +30,13 @@ use std::convert::TryInto;
 use std::iter::FromIterator;
 use std::num::ParseIntError;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::{cmp, slice};
 use std::{
     collections::BTreeMap,
     iter,
     ops::{Index, Mul, MulAssign},
 };
-use std::sync::{Arc, Mutex};
 
 #[cfg(not(feature = "cuda"))]
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
@@ -323,7 +323,6 @@ impl<C: CurveAffine> Evaluator<C> {
                 .push(Calculation::LcBeta(compressed_input_coset, right_gamma));
         }
 
-        
         let mut lookup_set: HashSet<usize> = HashSet::new();
 
         // Lookups in GPU
@@ -834,7 +833,10 @@ impl<C: CurveAffine> Evaluator<C> {
         lookups: &[Vec<lookup::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        use ec_gpu_gen::{fft::FftKernel, rust_gpu_tools::Device, rust_gpu_tools::LocalBuffer,rust_gpu_tools::cuda::Program};
+        use ec_gpu_gen::{
+            fft::FftKernel, rust_gpu_tools::cuda::Program, rust_gpu_tools::Device,
+            rust_gpu_tools::LocalBuffer,
+        };
         use ff::PrimeField;
         use group::ff::Field;
         use pairing::bn256::Fr;
@@ -845,10 +847,13 @@ impl<C: CurveAffine> Evaluator<C> {
             },
             slice::ParallelSlice,
         };
-        use std::{collections::LinkedList, marker::PhantomData};
         use std::rc::Rc;
+        use std::{collections::LinkedList, marker::PhantomData};
 
-        use crate::plonk::evaluation_gpu::{do_extended_fft, do_extended_fft_lookup, do_extended_fft_buffer_copy_async,gen_do_extended_fft_lookup,gen_do_extended_fft};
+        use crate::plonk::evaluation_gpu::{
+            do_extended_fft, do_extended_fft_buffer_copy_async, do_extended_fft_lookup,
+            gen_do_extended_fft, gen_do_extended_fft_lookup,
+        };
 
         assert!(advice_poly.len() == 1);
         let timer = start_timer!(|| "expressions gpu eval");
@@ -1117,32 +1122,35 @@ impl<C: CurveAffine> Evaluator<C> {
         }
         end_timer!(timer);
 
+        let poly_value_copy_async =
+            |poly_value: Arc<Polynomial<C::ScalarExt, Coeff>>,
+             register_buffer: Arc<Mutex<Vec<C::ScalarExt>>>| {
+                let handle = std::thread::spawn(move || {
+                    let src = poly_value;
+                    let mut dest = register_buffer.lock().unwrap();
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), src.len());
+                    }
+                });
+                handle
+            };
 
         let lookups = &lookups[0];
         let timer = start_timer!(|| "lookups_register");
         let devices = Device::all();
-        let inner_value = Arc::new(Mutex::new(vec![
+        let register_buffer = Arc::new(Mutex::new(vec![
             C::ScalarExt::zero();
             lookups[0].product_poly.values.len()
         ]));
-        let inner_value_swap = Arc::new(Mutex::new(vec![
+        let register_buffer_swap = Arc::new(Mutex::new(vec![
             C::ScalarExt::zero();
             lookups[0].product_poly.values.len()
         ]));
-        Program::set_context_hook(&devices[0].cuda_device().unwrap(),||{
-            Program::register_slice(&inner_value.lock().unwrap()).unwrap();
-            Program::register_slice(&inner_value_swap.lock().unwrap()).unwrap();
-        }).unwrap();
-        // lookups.iter().for_each(|c|{
-        //     Program::set_context_hook(&devices[0].cuda_device().unwrap(),||{
-        //         let timer = start_timer!(|| "init poly");
-        //         Program::register_slice(&c.permuted_input_poly.values).unwrap();
-        //         Program::register_slice(&c.permuted_table_poly.values).unwrap();
-        //         Program::register_slice(&c.product_poly.values).unwrap();
-        //         end_timer!(timer);
-        //     }).unwrap();
-        //
-        // });
+        Program::set_context_hook(&devices[0].cuda_device().unwrap(), || {
+            Program::register_slice(&register_buffer.lock().unwrap()).unwrap();
+            Program::register_slice(&register_buffer_swap.lock().unwrap()).unwrap();
+        })
+        .unwrap();
         end_timer!(timer);
 
         let n_gpu = *crate::plonk::N_GPU;
@@ -1199,17 +1207,6 @@ impl<C: CurveAffine> Evaluator<C> {
                                 do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
                             create_buffer_from!(l_active_row_buf, &l_active_row[..]);
 
-                            let poly_value_copy_async = |poly_value: Arc<Polynomial<C::ScalarExt, Coeff>>,
-                                              inner_value: Arc<Mutex<Vec<C::ScalarExt>>>| {
-                                let handle = std::thread::spawn(move || {
-                                    let src = poly_value;
-                                    let mut dest = inner_value.lock().unwrap();
-                                    unsafe {
-                                        std::ptr::copy_nonoverlapping(src.as_ptr(), dest.as_mut_ptr(), src.len());
-                                    }
-                                });
-                                handle
-                            };
                             /*
                             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
                                 .unwrap_or("5".to_owned());
@@ -1219,9 +1216,12 @@ impl<C: CurveAffine> Evaluator<C> {
                             */
                             for (lookup_idx, lookup) in lookups.iter().enumerate() {
                                 let mut ys = vec![C::ScalarExt::one(), y];
-                                println!("lookup: {}", pk.ev.gpu_lookup_expr
-                                    [lookup_idx + group_idx * group_expr_len]
-                                    .to_string());
+                                println!(
+                                    "lookup: idx={},{}",
+                                    lookup_idx,
+                                    pk.ev.gpu_lookup_expr[lookup_idx + group_idx * group_expr_len]
+                                        .to_string()
+                                );
                                 let timer = start_timer!(|| "eval lookup expr");
                                 let table_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
@@ -1241,95 +1241,281 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )
                                     .unwrap()
                                     .0;
-
                                 end_timer!(timer);
 
                                 let timer = start_timer!(|| "3 fft");
-                                let timer_first_buffer = start_timer!(||"first buffer");
-                                do_extended_fft_buffer_copy_async(
+
+                                if lookup_idx == 0 {
+                                    let timer_first_buffer = start_timer!(|| "first buffer");
+                                    do_extended_fft_buffer_copy_async(
                                         program,
                                         &lookup.permuted_input_poly.values,
-                                        Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                //async copy next round's register buffer in advance
-                                let handle = poly_value_copy_async(Arc::clone(&lookup.permuted_table_poly), Arc::clone(&inner_value_swap));
-                                handle.join().unwrap();
-                                program.stream_2_wait()?;
-                                end_timer!(timer_first_buffer);
+                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
+                                        Rc::get_mut(
+                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
+                                        )
+                                        .unwrap(),
+                                    )?;
+                                    //async copy next round's register buffer in advance
+                                    let handle = poly_value_copy_async(
+                                        Arc::clone(&lookup.permuted_table_poly),
+                                        Arc::clone(&register_buffer_swap),
+                                    );
+                                    handle.join().unwrap();
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_first_buffer);
+                                }
 
-                                let timer_fft = start_timer!(|| "buff+fft");
-                                do_extended_fft_buffer_copy_async(
+                                if lookup_idx % 2 == 0 {
+                                    let timer_fft = start_timer!(|| "buff+fft");
+                                    do_extended_fft_buffer_copy_async(
                                         program,
-                                        &inner_value_swap.lock().unwrap(),
-                                        Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap())?;
-                                //  do_extended_fft_buffer_copy_async(
-                                //     program,
-                                //     &lookup.permuted_table_poly.values,
-                                //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
-                                // );
-                                let handle = poly_value_copy_async(Arc::clone(&lookup.product_poly), Arc::clone(&inner_value));
-                                let permuted_input_coset_buf = do_extended_fft_lookup(
-                                    pk,
-                                    program,
-                                    &mut allocator,
-                                    &mut helper,
-                                    true,
-                                )?;
-                                handle.join().unwrap();
-                                program.stream_2_wait()?;
-                                end_timer!(timer_fft);
-
-
-                                let timer_fft = start_timer!(|| " buff+fft");
-                                do_extended_fft_buffer_copy_async(
+                                        &register_buffer_swap.lock().unwrap(),
+                                        Rc::get_mut(
+                                            helper.origin_value_buffer_swap.as_mut().unwrap(),
+                                        )
+                                        .unwrap(),
+                                    )?;
+                                    //  do_extended_fft_buffer_copy_async(
+                                    //     program,
+                                    //     &lookup.permuted_table_poly.values,
+                                    //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
+                                    // )?;
+                                    let handle = poly_value_copy_async(
+                                        Arc::clone(&lookup.product_poly),
+                                        Arc::clone(&register_buffer),
+                                    );
+                                    let permuted_input_coset_buf = do_extended_fft_lookup(
+                                        pk,
                                         program,
-                                        &inner_value.lock().unwrap(),
-                                        Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                // do_extended_fft_buffer_copy_async(
-                                //     program,
-                                //     &lookup.product_poly.values,
-                                //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
-                                // );
-                                let permuted_table_coset_buf = do_extended_fft_lookup(
-                                    pk,
-                                    program,
-                                    &mut allocator,
-                                    &mut helper,
+                                        &mut allocator,
+                                        &mut helper,
+                                        true,
+                                    )?;
+                                    handle.join().unwrap();
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
+
+                                    let timer_fft = start_timer!(|| "buff+fft");
+                                    do_extended_fft_buffer_copy_async(
+                                        program,
+                                        &register_buffer.lock().unwrap(),
+                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
+                                        Rc::get_mut(
+                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
+                                        )
+                                        .unwrap(),
+                                    )?;
+                                    // do_extended_fft_buffer_copy_async(
+                                    //     program,
+                                    //     &lookup.product_poly.values,
+                                    //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
+                                    // )?;
+
+                                    let handle = if lookup_idx < lookups.len() - 1 {
+                                        Some(poly_value_copy_async(
+                                            Arc::clone(
+                                                &lookups[lookup_idx + 1].permuted_input_poly,
+                                            ),
+                                            Arc::clone(&register_buffer_swap),
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                    let permuted_table_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &mut allocator,
+                                        &mut helper,
                                         false,
-                                )?;
-                                program.stream_2_wait()?;
-                                end_timer!(timer_fft);
+                                    )?;
+                                    handle.map(|x| x.join().unwrap());
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
 
-                                let product_coset_buf = do_extended_fft_lookup(
-                                    pk,
-                                    program,
-                                    &mut allocator,
-                                    &mut helper,
-                                        true
-                                )?;
+                                    let timer_fft = start_timer!(|| "buff+fft");
+                                    let handle = if lookup_idx < lookups.len() - 1 {
+                                        do_extended_fft_buffer_copy_async(
+                                            program,
+                                            &register_buffer_swap.lock().unwrap(),
+                                            Rc::get_mut(
+                                                helper.origin_value_buffer_swap.as_mut().unwrap(),
+                                            )
+                                            .unwrap(),
+                                        )?;
+                                        // do_extended_fft_buffer_copy_async(
+                                        //     program,
+                                        //     &lookups[lookup_idx+1].permuted_input_poly.values,
+                                        //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
+                                        // )?;
+                                        Some(poly_value_copy_async(
+                                            Arc::clone(
+                                                &lookups[lookup_idx + 1].permuted_table_poly,
+                                            ),
+                                            Arc::clone(&register_buffer),
+                                        ))
+                                    } else {
+                                        None
+                                    };
+
+                                    let product_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &mut allocator,
+                                        &mut helper,
+                                        true,
+                                    )?;
+                                    handle.map(|x| x.join().unwrap());
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
+
+                                    let local_work_size = 128;
+                                    let global_work_size = size / local_work_size;
+                                    let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(&values_buf)
+                                        .arg(table_buf.as_ref())
+                                        .arg(&permuted_input_coset_buf)
+                                        .arg(&permuted_table_coset_buf)
+                                        .arg(&product_coset_buf)
+                                        .arg(&l0_buf)
+                                        .arg(&l_last_buf)
+                                        .arg(&l_active_row_buf)
+                                        .arg(&y_beta_gamma_buf)
+                                        .arg(&(rot_scale as u32))
+                                        .arg(&(size as u32))
+                                        .run()?;
+                                } else {
+                                    let timer_fft = start_timer!(|| "buff+fft");
+                                    do_extended_fft_buffer_copy_async(
+                                        program,
+                                        &register_buffer.lock().unwrap(),
+                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
+                                        Rc::get_mut(
+                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
+                                        )
+                                        .unwrap(),
+                                    )?;
+                                    //  do_extended_fft_buffer_copy_async(
+                                    //     program,
+                                    //     &lookup.permuted_table_poly.values,
+                                    //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
+                                    // );
+                                    let handle = poly_value_copy_async(
+                                        Arc::clone(&lookup.product_poly),
+                                        Arc::clone(&register_buffer_swap),
+                                    );
+                                    let permuted_input_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &mut allocator,
+                                        &mut helper,
+                                        false,
+                                    )?;
+                                    handle.join().unwrap();
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
+
+                                    let timer_fft = start_timer!(|| " buff+fft");
+                                    do_extended_fft_buffer_copy_async(
+                                        program,
+                                        &register_buffer_swap.lock().unwrap(),
+                                        Rc::get_mut(
+                                            helper.origin_value_buffer_swap.as_mut().unwrap(),
+                                        )
+                                        .unwrap(),
+                                    )?;
+                                    // do_extended_fft_buffer_copy_async(
+                                    //     program,
+                                    //     &lookup.product_poly.values,
+                                    //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
+                                    // );
+                                    let handle = if lookup_idx < lookups.len() - 1 {
+                                        Some(poly_value_copy_async(
+                                            Arc::clone(
+                                                &lookups[lookup_idx + 1].permuted_input_poly,
+                                            ),
+                                            Arc::clone(&register_buffer),
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                    let permuted_table_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &mut allocator,
+                                        &mut helper,
+                                        true,
+                                    )?;
+                                    handle.map(|x| x.join().unwrap());
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
+
+                                    let timer_fft = start_timer!(|| "buff+fft");
+                                    let handle = if lookup_idx < lookups.len() - 1 {
+                                        do_extended_fft_buffer_copy_async(
+                                            program,
+                                            &register_buffer.lock().unwrap(),
+                                            // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
+                                            Rc::get_mut(
+                                                helper.origin_value_buffer_ping.as_mut().unwrap(),
+                                            )
+                                            .unwrap(),
+                                        )?;
+                                        // do_extended_fft_buffer_copy_async(
+                                        //     program,
+                                        //     &lookups[lookup_idx+1].permuted_input_poly.values,
+                                        //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
+                                        // )?;
+                                        Some(poly_value_copy_async(
+                                            Arc::clone(
+                                                &lookups[lookup_idx + 1].permuted_table_poly,
+                                            ),
+                                            Arc::clone(&register_buffer_swap),
+                                        ))
+                                    } else {
+                                        None
+                                    };
+                                    let product_coset_buf = do_extended_fft_lookup(
+                                        pk,
+                                        program,
+                                        &mut allocator,
+                                        &mut helper,
+                                        false,
+                                    )?;
+                                    handle.map(|x| x.join().unwrap());
+                                    program.stream_2_wait()?;
+                                    end_timer!(timer_fft);
+
+                                    let local_work_size = 128;
+                                    let global_work_size = size / local_work_size;
+                                    let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(&values_buf)
+                                        .arg(table_buf.as_ref())
+                                        .arg(&permuted_input_coset_buf)
+                                        .arg(&permuted_table_coset_buf)
+                                        .arg(&product_coset_buf)
+                                        .arg(&l0_buf)
+                                        .arg(&l_last_buf)
+                                        .arg(&l_active_row_buf)
+                                        .arg(&y_beta_gamma_buf)
+                                        .arg(&(rot_scale as u32))
+                                        .arg(&(size as u32))
+                                        .run()?;
+                                }
 
                                 end_timer!(timer);
-
-                                let local_work_size = 128;
-                                let global_work_size = size / local_work_size;
-                                let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
-                                let kernel = program.create_kernel(
-                                    &kernel_name,
-                                    global_work_size as usize,
-                                    local_work_size as usize,
-                                )?;
-                                kernel
-                                    .arg(&values_buf)
-                                    .arg(table_buf.as_ref())
-                                    .arg(&permuted_input_coset_buf)
-                                    .arg(&permuted_table_coset_buf)
-                                    .arg(&product_coset_buf)
-                                    .arg(&l0_buf)
-                                    .arg(&l_last_buf)
-                                    .arg(&l_active_row_buf)
-                                    .arg(&y_beta_gamma_buf)
-                                    .arg(&(rot_scale as u32))
-                                    .arg(&(size as u32))
-                                    .run()?;
                             }
 
                             program.read_into_buffer(&values_buf, input)?;
@@ -1357,20 +1543,11 @@ impl<C: CurveAffine> Evaluator<C> {
                     acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
                 });
         }
-        Program::set_context_hook(&devices[0].cuda_device().unwrap(),|| {
-            Program::unregister_slice(&inner_value.lock().unwrap()).unwrap();
-            Program::unregister_slice(&inner_value_swap.lock().unwrap()).unwrap();
-        }).unwrap();
-        // lookups.iter().for_each(|c|{
-        //     Program::set_context_hook(&devices[0].cuda_device().unwrap(),||{
-        //         let timer = start_timer!(|| "unregiester poly");
-        //         Program::unregister_slice(&c.permuted_input_poly.values).unwrap();
-        //         Program::unregister_slice(&c.permuted_table_poly.values).unwrap();
-        //         Program::unregister_slice(&c.product_poly.values).unwrap();
-        //         end_timer!(timer);
-        //     }).unwrap();
-        //
-        // });
+        Program::set_context_hook(&devices[0].cuda_device().unwrap(), || {
+            Program::unregister_slice(&register_buffer.lock().unwrap()).unwrap();
+            Program::unregister_slice(&register_buffer_swap.lock().unwrap()).unwrap();
+        })
+        .unwrap();
         end_timer!(timer);
 
         values
