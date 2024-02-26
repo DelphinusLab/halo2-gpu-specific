@@ -638,60 +638,72 @@ impl<F: FieldExt> ProveExpression<F> {
         }
     }
 
-    fn dump_equation_data(&self, buffer: &Buffer<F>, program: &Program,
-                          advice: &Vec<Polynomial<F, Coeff>>,
-                          fixed: &Vec<Polynomial<F, Coeff>>,
-                          lhs_idx : usize, rhs_idx : usize ) {
+    fn read_buffer_and_store(&self, buffer: &Buffer<F>, program: &Program, 
+                             buffer_len : usize,
+                             file_name : String,
+                             ) {
         use std::fs::File;
         use std::io::Write;
 
-        // extract from gpu buffer
-        let d = 2usize.pow(20);
-        let mut t = vec![F::zero(); d];
+        let mut t = vec![F::zero(); buffer_len];
         let mut tbuf = t.as_mut_slice();
         let ret = program.read_into_buffer(&buffer, &mut tbuf);
         assert!(ret.is_ok());
 
-        // store in data file with compressed binary format
-        let op_result = Polynomial::new(tbuf.to_vec());
-        let fstr = format!("a{}_op_with_a{}.data", lhs_idx.to_string(), rhs_idx.to_string()); 
-        let mut g = File::create(fstr).unwrap();
-        let ret = <Polynomial<F,Coeff> as Serializable>::store(&op_result, &mut g);
+        let mut g = File::create(format!("{}.data", file_name)).unwrap();
+        let ret = <Polynomial<F,Coeff> as Serializable>::store(&Polynomial::new(tbuf.to_vec()), &mut g);
         assert!(ret.is_ok());
+    }
 
-        //// store printed version for verifying binary correctly decoded
-        //let dd = format!("{:?}", yy);
-        //let mut f = File::create("a24_mul_f16.txt").unwrap();
-        //let ret = f.write_all(dd.as_bytes());
-        //assert!(ret.is_ok());
+    fn prove_expr_to_string(&self, expr_type : ProveExpressionUnit) -> &str {
+        match expr_type {
+            ProveExpressionUnit::Fixed { column_index : _, rotation : _ } => "f",
+            ProveExpressionUnit::Advice { column_index : _, rotation  : _} => "a",
+            ProveExpressionUnit::Instance { column_index : _, rotation  : _} => unimplemented!(),
+        }
+    }
+
+    fn dump_equation_data(&self,
+                          buffer: &Buffer<F>,
+                          program: &Program,
+                          _advice: &Vec<Polynomial<F, Coeff>>,
+                          _fixed: &Vec<Polynomial<F, Coeff>>,
+                          lhs : (usize, ProveExpressionUnit),
+                          rhs : (usize, ProveExpressionUnit),
+                          op : &Bop,
+                          lhs_buffer : &Buffer<F>,
+                          rhs_buffer : &Buffer<F>,
+                          ) {
+
+        let (lhs_idx, lhs_type) = lhs;
+        let (rhs_idx, rhs_type) = rhs;
+
+        println!("lhs_buffer = {:?}", lhs_buffer);
+        println!("rhs_buffer = {:?}", rhs_buffer);
+        println!("result_buffer = {:?}", buffer);
+
+        const D : usize = 2usize.pow(20);
+
+        let op_name_str = match op { Bop::Sum => "sum", Bop::Product => "mul", };
+        let lhs_type_str = self.prove_expr_to_string(lhs_type);
+        let rhs_type_str = self.prove_expr_to_string(rhs_type);
 
 
-        // store in data file with compressed binary format
-        let lhs = &advice[lhs_idx];
-        let fstr = format!("advice_poly_{}.data", lhs_idx.to_string()); 
-        let mut g = File::create(fstr).unwrap();
-        let ret = <Polynomial<F,Coeff> as Serializable>::store(&lhs, &mut g);
-        assert!(ret.is_ok());
+        // Note: all the data from the buffer will be in eval form, while advice/fixed tables store
+        // polys in coeff form
 
-        // store printed version for verifying binary correctly decoded
-        //let advice_data = format!("{:?}",advice_poly_24);
-        //let mut advice_file = File::create("advice_poly_24.txt").unwrap();
-        //let ret = advice_file.write_all(advice_data.as_bytes());
-        //assert!(ret.is_ok());
-        
-        // store in data file with compressed binary format
-        let rhs = &advice[rhs_idx];
-        let fstr = format!("advice_poly_{}.data", rhs_idx.to_string()); 
-        let mut g = File::create(fstr).unwrap();
-        let ret = <Polynomial<F,Coeff> as Serializable>::store(&rhs, &mut g);
-        assert!(ret.is_ok());
+        // Result gpu buffer grab
+        self.read_buffer_and_store(buffer, program, D, 
+                                   format!("{}{}_{}_{}{}", lhs_type_str, lhs_idx.to_string(), 
+                                           op_name_str, rhs_type_str, rhs_idx.to_string())); 
 
-        // store printed version for verifying binary correctly decoded
-        //let fixed_data = format!("{:?}",fixed_poly_16);
-        //let mut fixed_file = File::create("fixed_poly_16.txt").unwrap();
-        //let ret = fixed_file.write_all(fixed_data.as_bytes());
-        //assert!(ret.is_ok());
+        // LHS operand gpu buffer grab
+        self.read_buffer_and_store(lhs_buffer, program, D, 
+                                   format!("{}{}", lhs_type_str, lhs_idx.to_string())); 
 
+        // RHS operand gpu buffer grab
+        self.read_buffer_and_store(rhs_buffer, program, D, 
+                                   format!("{}{}", rhs_type_str, rhs_idx.to_string())); 
     }
 
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
@@ -733,6 +745,8 @@ impl<F: FieldExt> ProveExpression<F> {
                         pk, program, memory_cache,
                         advice, instance, y, unit_cache, allocator, helper,
                     )?;
+                    let lbuf = l.clone();
+                    let rbuf = r.clone();
                     //let timer = start_timer!(|| format!("gpu eval sum {} {:?} {:?}", size, l.0, r.0));
                     let res = match (l.0, r.0) {
                         (Some(l), Some(r)) => {
@@ -818,13 +832,25 @@ impl<F: FieldExt> ProveExpression<F> {
                     //end_timer!(timer);
                     //
 
-                    if self.to_string() == "(u(a20-2) * u(a40-1))".to_string() {
+                    // S((u(f9-0) * u(a8-0)))
+                    if self.to_string() == "(u(f9-0) * u(a8-0))".to_string() {
                         println!("FIND_ME !!!!!!!!!!!!!!!!!!!!");
-                        println!("{:?}", res);
+
+                        println!("result = {:?}", res);
+                        println!("lbuf = {:?}", lbuf);
+                        println!("rbuf = {:?}", rbuf);
 
                         //let fixed_poly_16 = &pk.fixed_polys[16];
-                        let bb = res.as_ref().unwrap().0.as_ref().unwrap().0.as_ref();
-                        self.dump_equation_data(bb, program, advice, &pk.fixed_polys, 20, 40); 
+                        self.dump_equation_data(res.as_ref().unwrap().0.as_ref().unwrap().0.as_ref(),
+                                                program,
+                                                advice,
+                                                &pk.fixed_polys, 
+                                                (9, ProveExpressionUnit::Fixed{column_index: 0, rotation: Rotation(0)}),
+                                                (8, ProveExpressionUnit::Advice{column_index: 0, rotation: Rotation(0)}),
+                                                op,
+                                                lbuf.0.as_ref().unwrap().0.as_ref(),
+                                                rbuf.0.as_ref().unwrap().0.as_ref()
+                                                ); 
                     }
 
                     res
