@@ -1,5 +1,6 @@
 use super::Expression;
 use crate::multicore;
+use crate::helpers::Serializable;
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -637,6 +638,61 @@ impl<F: FieldExt> ProveExpression<F> {
         }
     }
 
+    fn dump_equation_data(&self, buffer: &Buffer<F>, program: &Program,
+                          advice: &Vec<Polynomial<F, Coeff>>,
+                          fixed: &Vec<Polynomial<F, Coeff>>,
+                          lhs_idx : usize, rhs_idx : usize ) {
+        use std::fs::File;
+        use std::io::Write;
+
+        // extract from gpu buffer
+        let d = 2usize.pow(20);
+        let mut t = vec![F::zero(); d];
+        let mut tbuf = t.as_mut_slice();
+        let ret = program.read_into_buffer(&buffer, &mut tbuf);
+        assert!(ret.is_ok());
+
+        // store in data file with compressed binary format
+        let op_result = Polynomial::new(tbuf.to_vec());
+        let fstr = format!("a{}_op_with_a{}.data", lhs_idx.to_string(), rhs_idx.to_string()); 
+        let mut g = File::create(fstr).unwrap();
+        let ret = <Polynomial<F,Coeff> as Serializable>::store(&op_result, &mut g);
+        assert!(ret.is_ok());
+
+        //// store printed version for verifying binary correctly decoded
+        //let dd = format!("{:?}", yy);
+        //let mut f = File::create("a24_mul_f16.txt").unwrap();
+        //let ret = f.write_all(dd.as_bytes());
+        //assert!(ret.is_ok());
+
+
+        // store in data file with compressed binary format
+        let lhs = &advice[lhs_idx];
+        let fstr = format!("advice_poly_{}.data", lhs_idx.to_string()); 
+        let mut g = File::create(fstr).unwrap();
+        let ret = <Polynomial<F,Coeff> as Serializable>::store(&lhs, &mut g);
+        assert!(ret.is_ok());
+
+        // store printed version for verifying binary correctly decoded
+        //let advice_data = format!("{:?}",advice_poly_24);
+        //let mut advice_file = File::create("advice_poly_24.txt").unwrap();
+        //let ret = advice_file.write_all(advice_data.as_bytes());
+        //assert!(ret.is_ok());
+        
+        // store in data file with compressed binary format
+        let rhs = &advice[rhs_idx];
+        let fstr = format!("advice_poly_{}.data", rhs_idx.to_string()); 
+        let mut g = File::create(fstr).unwrap();
+        let ret = <Polynomial<F,Coeff> as Serializable>::store(&rhs, &mut g);
+        assert!(ret.is_ok());
+
+        // store printed version for verifying binary correctly decoded
+        //let fixed_data = format!("{:?}",fixed_poly_16);
+        //let mut fixed_file = File::create("fixed_poly_16.txt").unwrap();
+        //let ret = fixed_file.write_all(fixed_data.as_bytes());
+        //assert!(ret.is_ok());
+
+    }
 
     pub(crate) fn _eval_gpu<C: CurveAffine<ScalarExt = F>>(
         &self,
@@ -650,10 +706,6 @@ impl<F: FieldExt> ProveExpression<F> {
         allocator: &mut LinkedList<Buffer<F>>,
         helper: &mut ExtendedFFTHelper<F>,
     ) -> EcResult<(Option<(Rc<Buffer<F>>, i32)>, Option<F>)> {
-        if self.to_string() == "(Smix(u(a24-3)) * u(f16-0))".to_string() {
-            println!("FIND_ME ProveExpression");
-            println!("{}", self.to_string());
-        }
         let size = 1u32 << pk.vk.domain.extended_k();
         let local_work_size = 128;
         let global_work_size = size / local_work_size;
@@ -765,35 +817,14 @@ impl<F: FieldExt> ProveExpression<F> {
                     };
                     //end_timer!(timer);
                     //
-                    if self.to_string() == "(Smix(u(a24-3)) * u(f16-0))".to_string() {
-                        println!("FIND_ME ProveExpression::Op");
+
+                    if self.to_string() == "(u(a20-2) * u(a40-1))".to_string() {
+                        println!("FIND_ME !!!!!!!!!!!!!!!!!!!!");
                         println!("{:?}", res);
 
+                        //let fixed_poly_16 = &pk.fixed_polys[16];
                         let bb = res.as_ref().unwrap().0.as_ref().unwrap().0.as_ref();
-                        let d = 1048576;
-
-                        let mut xx = vec![F::zero(); d];
-                        let mut yy = xx.as_mut_slice();
-
-                        program.read_into_buffer(&bb, &mut yy)?;
-
-                        {
-                            use std::fs::File;
-                            use std::io::Write;
-
-                            let mut f = match File::create("a24_mul_f16.txt") {
-                                Ok(file) => file,
-                                Err(e) => {
-                                    panic!("Failed to create file: {}", e);
-                                }
-                            };
-                            let dd = format!("{:?}", yy);
-                            match f.write_all(dd.as_bytes()) {
-                                Ok(_) => println!("Data has been written to the file."),
-                                Err(e) => println!("Error occurred while writing to the file: {}", e),
-                            }
-                        }
-
+                        self.dump_equation_data(bb, program, advice, &pk.fixed_polys, 20, 40); 
                     }
 
                     res
