@@ -97,9 +97,9 @@ impl<C: CurveAffine> VerifyingKey<C> {
 
 /// The proving key for a single permutation argument.
 #[derive(Debug)]
-pub(crate) struct ProvingKey<C: CurveAffine> {
-    permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub(super) polys: Vec<Polynomial<C::Scalar, Coeff>>,
+pub struct ProvingKey<C: CurveAffine> {
+    pub permutations: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub polys: Vec<Polynomial<C::Scalar, Coeff>>,
 
     #[cfg(not(feature = "cuda"))]
     pub(super) cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,

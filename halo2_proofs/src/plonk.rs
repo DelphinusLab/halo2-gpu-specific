@@ -15,11 +15,12 @@ use crate::poly::{
 };
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript};
 
+pub mod circuit;
+pub mod evaluation_gpu;
+
 mod assigned;
-pub(crate) mod circuit;
 mod error;
 mod evaluation;
-mod evaluation_gpu;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod permutation;
@@ -215,9 +216,9 @@ pub struct PinnedVerificationKey<'a, C: CurveAffine> {
 /// particular circuit.
 #[derive(Debug)]
 pub struct ProvingKey<C: CurveAffine> {
-    vk: VerifyingKey<C>,
+    pub vk: VerifyingKey<C>,
 
-    l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
+    pub l_active_row: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
 
     #[cfg(not(feature = "cuda"))]
     l0: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
@@ -225,17 +226,17 @@ pub struct ProvingKey<C: CurveAffine> {
     l_last: Polynomial<C::Scalar, ExtendedLagrangeCoeff>,
 
     #[cfg(feature = "cuda")]
-    l0: Polynomial<C::Scalar, Coeff>,
+    pub l0: Polynomial<C::Scalar, Coeff>,
     #[cfg(feature = "cuda")]
-    l_last: Polynomial<C::Scalar, Coeff>,
+    pub l_last: Polynomial<C::Scalar, Coeff>,
 
-    fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
+    pub fixed_values: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    pub fixed_polys: Vec<Polynomial<C::Scalar, Coeff>>,
 
     #[cfg(not(feature = "cuda"))]
     fixed_cosets: Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>,
-    permutation: permutation::ProvingKey<C>,
-    ev: Evaluator<C>,
+    pub permutation: permutation::ProvingKey<C>,
+    pub ev: Evaluator<C>,
 }
 
 impl<C: CurveAffine> ProvingKey<C> {

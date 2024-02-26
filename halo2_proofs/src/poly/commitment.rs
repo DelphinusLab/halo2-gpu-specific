@@ -23,8 +23,8 @@ use std::io;
 pub struct Params<C: CurveAffine> {
     pub(crate) k: u32,
     pub(crate) n: u64,
-    pub(crate) g: Vec<C>,
-    pub(crate) g_lagrange: Vec<C>,
+    pub g: Vec<C>,
+    pub g_lagrange: Vec<C>,
     pub(crate) additional_data: Vec<u8>,
 }
 
