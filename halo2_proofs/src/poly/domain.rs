@@ -21,19 +21,19 @@ use std::marker::PhantomData;
 /// domain of size $2^{k} * j$ with $j \neq 0$.
 #[derive(Debug, PartialEq, Clone)]
 pub struct EvaluationDomain<G: Group> {
-    n: u64,
-    k: u32,
-    extended_k: u32,
-    omega: G::Scalar,
-    omega_inv: G::Scalar,
-    extended_omega: G::Scalar,
-    extended_omega_inv: G::Scalar,
-    pub(crate) g_coset: G::Scalar,
-    pub(crate) g_coset_inv: G::Scalar,
-    quotient_poly_degree: u64,
-    pub(crate) ifft_divisor: G::Scalar,
-    extended_ifft_divisor: G::Scalar,
-    t_evaluations: Vec<G::Scalar>,
+    pub n: u64,
+    pub k: u32,
+    pub extended_k: u32,
+    pub omega: G::Scalar,
+    pub omega_inv: G::Scalar,
+    pub extended_omega: G::Scalar,
+    pub extended_omega_inv: G::Scalar,
+    pub g_coset: G::Scalar,
+    pub g_coset_inv: G::Scalar,
+    pub quotient_poly_degree: u64,
+    pub ifft_divisor: G::Scalar,
+    pub extended_ifft_divisor: G::Scalar,
+    pub t_evaluations: Vec<G::Scalar>,
     barycentric_weight: G::Scalar,
 }
 

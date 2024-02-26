@@ -57,7 +57,7 @@ pub enum ProveExpressionUnit {
 }
 
 impl ProveExpressionUnit {
-    fn get_group(&self) -> usize {
+    pub fn get_group(&self) -> usize {
         match self {
             ProveExpressionUnit::Fixed { column_index, .. } => column_index << 2,
             ProveExpressionUnit::Advice { column_index, .. } => (column_index << 2) + 1,
@@ -994,7 +994,7 @@ impl<F: FieldExt> ProveExpression<F> {
         ProveExpression::Y(BTreeMap::from_iter(vec![(0, F::zero())].into_iter()))
     }
 
-    pub(crate) fn from_expr(e: &Expression<F>) -> Self {
+    pub fn from_expr(e: &Expression<F>) -> Self {
         match e {
             Expression::Constant(x) => {
                 ProveExpression::Y(BTreeMap::from_iter(vec![(0, *x)].into_iter()))
@@ -1305,7 +1305,7 @@ impl<F: FieldExt> ProveExpression<F> {
     }
 
     // u32 is order of y
-    pub(crate) fn flatten(self) -> BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>> {
+    pub fn flatten(self) -> BTreeMap<Vec<ProveExpressionUnit>, BTreeMap<u32, F>> {
         match self {
             ProveExpression::Unit(u) => BTreeMap::from_iter(
                 vec![(
@@ -1348,7 +1348,10 @@ impl<F: FieldExt> ProveExpression<F> {
                 res
             }
             ProveExpression::Y(ys) => BTreeMap::from_iter(vec![(vec![], ys)].into_iter()),
-            ProveExpression::Scale(_, _) => unreachable!(),
+            ProveExpression::Scale(x, ys) => {
+                // as Product
+                ProveExpression::Op(x, Box::new(ProveExpression::Y(ys)), Bop::Product).flatten()
+            }
         }
     }
 }
