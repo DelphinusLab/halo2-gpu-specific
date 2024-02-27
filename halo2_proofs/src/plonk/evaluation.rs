@@ -852,7 +852,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
         use crate::plonk::evaluation_gpu::{
             do_extended_fft, do_extended_fft_buffer_copy_async, do_extended_fft_lookup,
-            gen_do_extended_fft, gen_do_extended_fft_lookup,
+            gen_do_extended_fft,
         };
 
         assert!(advice_poly.len() == 1);
@@ -1146,11 +1146,17 @@ impl<C: CurveAffine> Evaluator<C> {
             C::ScalarExt::zero();
             lookups[0].product_poly.values.len()
         ]));
-        Program::set_context_hook(&devices[0].cuda_device().unwrap(), || {
-            Program::register_slice(&register_buffer.lock().unwrap()).unwrap();
-            Program::register_slice(&register_buffer_swap.lock().unwrap()).unwrap();
-        })
+        Program::register_host_buffer(
+            &devices[0].cuda_device().unwrap(),
+            &register_buffer.lock().unwrap(),
+        )
         .unwrap();
+        Program::register_host_buffer(
+            &devices[0].cuda_device().unwrap(),
+            &register_buffer_swap.lock().unwrap(),
+        )
+        .unwrap();
+
         end_timer!(timer);
 
         let n_gpu = *crate::plonk::N_GPU;
@@ -1198,7 +1204,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 unsafe { program.create_buffer(domain.extended_len())? };
                             create_buffer_from!(y_beta_gamma_buf, &y_beta_gamma[..]);
 
-                            let mut helper = gen_do_extended_fft_lookup(pk, program)?;
+                            let mut helper = gen_do_extended_fft(pk, program)?;
                             let mut allocator = LinkedList::new();
 
                             let l0_buf =
@@ -1206,7 +1212,10 @@ impl<C: CurveAffine> Evaluator<C> {
                             let l_last_buf =
                                 do_extended_fft(pk, program, &l_last, &mut allocator, &mut helper)?;
                             create_buffer_from!(l_active_row_buf, &l_active_row[..]);
-
+                            let mut origin_value_buffer =
+                                unsafe { program.create_buffer(1 << domain.k())? };
+                            let mut origin_value_buffer_swap =
+                                unsafe { program.create_buffer(1 << domain.k())? };
                             /*
                             let cache_size = std::env::var("HALO2_PROOF_GPU_EVAL_CACHE")
                                 .unwrap_or("5".to_owned());
@@ -1250,11 +1259,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     do_extended_fft_buffer_copy_async(
                                         program,
                                         &lookup.permuted_input_poly.values,
-                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                        Rc::get_mut(
-                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
-                                        )
-                                        .unwrap(),
+                                        &mut origin_value_buffer,
                                     )?;
                                     //async copy next round's register buffer in advance
                                     let handle = poly_value_copy_async(
@@ -1271,16 +1276,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     do_extended_fft_buffer_copy_async(
                                         program,
                                         &register_buffer_swap.lock().unwrap(),
-                                        Rc::get_mut(
-                                            helper.origin_value_buffer_swap.as_mut().unwrap(),
-                                        )
-                                        .unwrap(),
+                                        &mut origin_value_buffer_swap,
                                     )?;
-                                    //  do_extended_fft_buffer_copy_async(
-                                    //     program,
-                                    //     &lookup.permuted_table_poly.values,
-                                    //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
-                                    // )?;
                                     let handle = poly_value_copy_async(
                                         Arc::clone(&lookup.product_poly),
                                         Arc::clone(&register_buffer),
@@ -1290,7 +1287,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        true,
+                                        &mut origin_value_buffer,
                                     )?;
                                     handle.join().unwrap();
                                     program.stream_2_wait()?;
@@ -1300,17 +1297,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     do_extended_fft_buffer_copy_async(
                                         program,
                                         &register_buffer.lock().unwrap(),
-                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                        Rc::get_mut(
-                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
-                                        )
-                                        .unwrap(),
+                                        &mut origin_value_buffer,
                                     )?;
-                                    // do_extended_fft_buffer_copy_async(
-                                    //     program,
-                                    //     &lookup.product_poly.values,
-                                    //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
-                                    // )?;
 
                                     let handle = if lookup_idx < lookups.len() - 1 {
                                         Some(poly_value_copy_async(
@@ -1327,7 +1315,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        false,
+                                        &mut origin_value_buffer_swap,
                                     )?;
                                     handle.map(|x| x.join().unwrap());
                                     program.stream_2_wait()?;
@@ -1338,16 +1326,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                         do_extended_fft_buffer_copy_async(
                                             program,
                                             &register_buffer_swap.lock().unwrap(),
-                                            Rc::get_mut(
-                                                helper.origin_value_buffer_swap.as_mut().unwrap(),
-                                            )
-                                            .unwrap(),
+                                            &mut origin_value_buffer_swap,
                                         )?;
-                                        // do_extended_fft_buffer_copy_async(
-                                        //     program,
-                                        //     &lookups[lookup_idx+1].permuted_input_poly.values,
-                                        //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
-                                        // )?;
                                         Some(poly_value_copy_async(
                                             Arc::clone(
                                                 &lookups[lookup_idx + 1].permuted_table_poly,
@@ -1363,7 +1343,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        true,
+                                        &mut origin_value_buffer,
                                     )?;
                                     handle.map(|x| x.join().unwrap());
                                     program.stream_2_wait()?;
@@ -1395,17 +1375,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     do_extended_fft_buffer_copy_async(
                                         program,
                                         &register_buffer.lock().unwrap(),
-                                        // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                        Rc::get_mut(
-                                            helper.origin_value_buffer_ping.as_mut().unwrap(),
-                                        )
-                                        .unwrap(),
+                                        &mut origin_value_buffer,
                                     )?;
-                                    //  do_extended_fft_buffer_copy_async(
-                                    //     program,
-                                    //     &lookup.permuted_table_poly.values,
-                                    //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
-                                    // );
                                     let handle = poly_value_copy_async(
                                         Arc::clone(&lookup.product_poly),
                                         Arc::clone(&register_buffer_swap),
@@ -1415,7 +1386,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        false,
+                                        &mut origin_value_buffer_swap,
                                     )?;
                                     handle.join().unwrap();
                                     program.stream_2_wait()?;
@@ -1425,16 +1396,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     do_extended_fft_buffer_copy_async(
                                         program,
                                         &register_buffer_swap.lock().unwrap(),
-                                        Rc::get_mut(
-                                            helper.origin_value_buffer_swap.as_mut().unwrap(),
-                                        )
-                                        .unwrap(),
+                                        &mut origin_value_buffer_swap,
                                     )?;
-                                    // do_extended_fft_buffer_copy_async(
-                                    //     program,
-                                    //     &lookup.product_poly.values,
-                                    //     Rc::get_mut(helper.origin_value_buffer_swap.as_mut().unwrap()).unwrap()
-                                    // );
                                     let handle = if lookup_idx < lookups.len() - 1 {
                                         Some(poly_value_copy_async(
                                             Arc::clone(
@@ -1450,7 +1413,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        true,
+                                        &mut origin_value_buffer,
                                     )?;
                                     handle.map(|x| x.join().unwrap());
                                     program.stream_2_wait()?;
@@ -1461,17 +1424,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                         do_extended_fft_buffer_copy_async(
                                             program,
                                             &register_buffer.lock().unwrap(),
-                                            // Rc::get_mut(&mut helper.origin_value_buffer).unwrap())?;
-                                            Rc::get_mut(
-                                                helper.origin_value_buffer_ping.as_mut().unwrap(),
-                                            )
-                                            .unwrap(),
+                                            &mut origin_value_buffer,
                                         )?;
-                                        // do_extended_fft_buffer_copy_async(
-                                        //     program,
-                                        //     &lookups[lookup_idx+1].permuted_input_poly.values,
-                                        //     Rc::get_mut(&mut helper.origin_value_buffer).unwrap()
-                                        // )?;
                                         Some(poly_value_copy_async(
                                             Arc::clone(
                                                 &lookups[lookup_idx + 1].permuted_table_poly,
@@ -1486,7 +1440,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         program,
                                         &mut allocator,
                                         &mut helper,
-                                        false,
+                                        &mut origin_value_buffer_swap,
                                     )?;
                                     handle.map(|x| x.join().unwrap());
                                     program.stream_2_wait()?;
@@ -1543,10 +1497,15 @@ impl<C: CurveAffine> Evaluator<C> {
                     acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
                 });
         }
-        Program::set_context_hook(&devices[0].cuda_device().unwrap(), || {
-            Program::unregister_slice(&register_buffer.lock().unwrap()).unwrap();
-            Program::unregister_slice(&register_buffer_swap.lock().unwrap()).unwrap();
-        })
+        Program::unregister_host_buffer(
+            &devices[0].cuda_device().unwrap(),
+            &register_buffer.lock().unwrap(),
+        )
+        .unwrap();
+        Program::unregister_host_buffer(
+            &devices[0].cuda_device().unwrap(),
+            &register_buffer_swap.lock().unwrap(),
+        )
         .unwrap();
         end_timer!(timer);
 
