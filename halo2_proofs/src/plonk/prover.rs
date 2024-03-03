@@ -1295,7 +1295,7 @@ pub fn create_proof_with_shplonk<
         .chain(vanishing.open(x));
 
     let res =
-        multiopen::gwc::create_proof(params, transcript, instances).map_err(|_| Error::Opening);
+        multiopen::shplonk::create_proof(params, transcript, instances).map_err(|_| Error::Opening);
     end_timer!(timer);
 
     res
