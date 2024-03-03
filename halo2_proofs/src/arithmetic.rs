@@ -902,7 +902,7 @@ pub fn lagrange_interpolate<F: FieldExt>(points: &[F], evals: &[F]) -> Vec<F> {
     }
 }
 
-pub(crate) fn _evaluate_vanishing_polynomial<F: FieldExt>(roots: &[F], z: F) -> F {
+pub(crate) fn evaluate_vanishing_polynomial<F: FieldExt>(roots: &[F], z: F) -> F {
     fn evaluate<F: FieldExt>(roots: &[F], z: F) -> F {
         roots.iter().fold(F::one(), |acc, point| (z - point) * acc)
     }
@@ -1006,30 +1006,4 @@ pub fn best_fft_cpu_st<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
         chunk *= 2;
         twiddle_chunk /= 2;
     }
-}
-
-#[test]
-fn test_fft_performance() {
-    let r = pairing::bls12_381::Fr::rand();
-    let omega = pairing::bls12_381::Fr::rand();
-    let mut buffer = vec![vec![r; 1 << 18]; 40];
-
-    let timer = start_timer!(|| "cpu fft");
-    buffer.iter_mut().for_each(|buffer| {
-        best_fft_cpu_st(&mut buffer[..], omega, 18);
-    });
-    //parallelize(&mut buffer, |buffer, start| {
-    //    for buffer in buffer {
-    //        best_fft_cpu_st(&mut buffer[..], omega, 18);
-    //    }
-    //});
-    //best_fft_cpu_st(&mut buffer[0][..], omega, 18);
-    end_timer!(timer);
-
-    let timer = start_timer!(|| "gpu fft");
-    buffer.par_iter_mut().for_each(|buffer| {
-        #[cfg(feature = "cuda")]
-        gpu_fft(&mut buffer[..], omega, 18);
-    });
-    end_timer!(timer);
 }

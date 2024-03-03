@@ -171,32 +171,3 @@ where
 
     Ok(())
 }
-
-#[doc(hidden)]
-#[derive(Copy, Clone, Debug)]
-pub struct PolynomialPointer<'a, C: CurveAffine> {
-    poly: &'a Polynomial<C::Scalar, Coeff>,
-}
-
-impl<'a, C: CurveAffine> PartialEq for PolynomialPointer<'a, C> {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.poly, other.poly)
-    }
-}
-
-impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
-    type Commitment = PolynomialPointer<'a, C>;
-
-    fn get_point(&self) -> C::Scalar {
-        self.point
-    }
-    fn get_rotation(&self) -> Rotation {
-        self.rotation
-    }
-    fn get_eval(&self) -> C::Scalar {
-        eval_polynomial_st(self.poly, self.get_point())
-    }
-    fn get_commitment(&self) -> Self::Commitment {
-        PolynomialPointer { poly: self.poly }
-    }
-}

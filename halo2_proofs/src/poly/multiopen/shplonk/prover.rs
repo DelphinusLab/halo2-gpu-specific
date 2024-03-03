@@ -5,6 +5,7 @@ use crate::arithmetic::{
     eval_polynomial, evaluate_vanishing_polynomial, kate_division, lagrange_interpolate,
     CurveAffine, FieldExt,
 };
+use crate::poly::multiopen::PolynomialPointer;
 use crate::poly::multiopen::ProverQuery;
 use crate::poly::{commitment::Params, Coeff, Error, Polynomial, Rotation};
 use crate::transcript::{ChallengeScalar, EncodedChallenge, Transcript, TranscriptWrite};
@@ -230,33 +231,4 @@ where
     transcript.write_point(h)?;
 
     Ok(())
-}
-
-#[doc(hidden)]
-#[derive(Copy, Clone, Debug)]
-pub struct PolynomialPointer<'a, C: CurveAffine> {
-    poly: &'a Polynomial<C::Scalar, Coeff>,
-}
-
-impl<'a, C: CurveAffine> PartialEq for PolynomialPointer<'a, C> {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self.poly, other.poly)
-    }
-}
-
-impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
-    type Commitment = PolynomialPointer<'a, C>;
-
-    fn get_rotation(&self) -> Rotation {
-        self.rotation
-    }
-    fn get_point(&self) -> C::Scalar {
-        self.point
-    }
-    fn get_eval(&self) -> C::Scalar {
-        eval_polynomial(self.poly, self.get_point())
-    }
-    fn get_commitment(&self) -> Self::Commitment {
-        PolynomialPointer { poly: self.poly }
-    }
 }
