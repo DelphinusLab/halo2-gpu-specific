@@ -161,7 +161,7 @@ mod tests {
     use crate::poly::multiopen::shplonk::{IntermediateSets, RotationSet};
     use crate::poly::{
         commitment::{Params, ParamsVerifier},
-        multiopen::{create_proof, verify_proof},
+        multiopen::shplonk::{create_proof, verify_proof},
         multiopen::{ProverQuery, Query, VerifierQuery},
         Coeff, Polynomial, Rotation,
     };

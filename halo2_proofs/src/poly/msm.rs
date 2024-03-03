@@ -100,14 +100,12 @@ impl<C: CurveAffine> PairMSM<C> {
     }
 }
 
-#[cfg(feature = "shplonk")]
 #[derive(Debug, Clone)]
 pub struct ProjectiveMSM<E: Engine> {
     scalars: Vec<E::Scalar>,
     bases: Vec<E::G1>,
 }
 
-#[cfg(feature = "shplonk")]
 impl<'a, E: Engine> ProjectiveMSM<E> {
     /// Create a new, empty MSM using the provided parameters.
     pub fn new() -> Self {
@@ -148,13 +146,11 @@ impl<'a, E: Engine> ProjectiveMSM<E> {
 }
 
 /// A projective point collector
-#[cfg(feature = "shplonk")]
 #[derive(Debug, Clone)]
 pub struct PreMSM<E: Engine> {
     projectives_msms: Vec<ProjectiveMSM<E>>,
 }
 
-#[cfg(feature = "shplonk")]
 impl<'a, E: Engine> PreMSM<E> {
     pub fn new() -> Self {
         PreMSM {

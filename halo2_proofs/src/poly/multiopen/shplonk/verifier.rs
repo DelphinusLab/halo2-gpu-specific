@@ -102,20 +102,3 @@ where
 
     Ok(PairMSM::with(left, right))
 }
-
-impl<'a, 'b, C: CurveAffine> Query<C::Scalar> for VerifierQuery<'a, C> {
-    type Commitment = CommitmentReference<'a, C>;
-
-    fn get_rotation(&self) -> Rotation {
-        self.rotation
-    }
-    fn get_point(&self) -> C::Scalar {
-        self.point
-    }
-    fn get_eval(&self) -> C::Scalar {
-        self.eval
-    }
-    fn get_commitment(&self) -> Self::Commitment {
-        self.commitment
-    }
-}

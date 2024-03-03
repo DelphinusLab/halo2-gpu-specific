@@ -21,15 +21,8 @@ use std::{
 };
 use subtle::Choice;
 
-cfg_if::cfg_if! {
-    if #[cfg(feature = "shplonk")] {
-        mod shplonk;
-        pub use shplonk::*;
-    } else {
-        mod gwc;
-        pub use gwc::*;
-    }
-}
+pub mod gwc;
+pub mod shplonk;
 
 /// Decider performs final pairing check with given verifier params and two channel linear combination
 #[derive(Debug)]
@@ -138,6 +131,52 @@ trait Query<F: FieldExt>: Sized + Clone {
     fn get_commitment(&self) -> Self::Commitment;
 }
 
+#[doc(hidden)]
+#[derive(Copy, Clone, Debug)]
+pub struct PolynomialPointer<'a, C: CurveAffine> {
+    poly: &'a Polynomial<C::Scalar, Coeff>,
+}
+
+impl<'a, C: CurveAffine> PartialEq for PolynomialPointer<'a, C> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.poly, other.poly)
+    }
+}
+
+impl<'a, C: CurveAffine> Query<C::Scalar> for ProverQuery<'a, C> {
+    type Commitment = PolynomialPointer<'a, C>;
+
+    fn get_point(&self) -> C::Scalar {
+        self.point
+    }
+    fn get_rotation(&self) -> Rotation {
+        self.rotation
+    }
+    fn get_eval(&self) -> C::Scalar {
+        eval_polynomial(self.poly, self.get_point())
+    }
+    fn get_commitment(&self) -> Self::Commitment {
+        PolynomialPointer { poly: self.poly }
+    }
+}
+
+impl<'a, 'b, C: CurveAffine> Query<C::Scalar> for VerifierQuery<'a, C> {
+    type Commitment = CommitmentReference<'a, C>;
+
+    fn get_point(&self) -> C::Scalar {
+        self.point
+    }
+    fn get_rotation(&self) -> Rotation {
+        self.rotation
+    }
+    fn get_eval(&self) -> C::Scalar {
+        self.eval
+    }
+    fn get_commitment(&self) -> Self::Commitment {
+        self.commitment
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
@@ -145,7 +184,8 @@ mod tests {
     use crate::pairing::bn256::{Bn256, Fr, G1Affine};
     use crate::poly::{
         commitment::{Params, ParamsVerifier},
-        multiopen::{create_proof, verify_proof, Decider, ProverQuery, Query, VerifierQuery},
+        multiopen::gwc::{create_proof, verify_proof},
+        multiopen::{Decider, ProverQuery, Query, VerifierQuery},
         Coeff, Polynomial, Rotation,
     };
     use crate::transcript::{
