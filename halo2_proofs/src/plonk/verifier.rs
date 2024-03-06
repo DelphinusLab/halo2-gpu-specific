@@ -224,6 +224,7 @@ pub fn verify_proof_ext<
             // Hash each lookup permuted commitment
             vk.cs
                 .shuffles
+                .group(vk.cs.degree())
                 .iter()
                 .map(|argument| argument.read_product_commitment(transcript))
                 .collect::<Result<Vec<_>, _>>()
@@ -295,6 +296,7 @@ pub fn verify_proof_ext<
             .fold(C::Scalar::zero(), |acc, eval| acc + eval);
         let l_0 = l_evals[1 + blinding_factors];
 
+        let shuffle_groups = vk.cs.shuffles.group(vk.cs.degree());
         // Compute the expected value of h(x)
         let expressions = advice_evals
             .iter()
@@ -358,7 +360,7 @@ pub fn verify_proof_ext<
                                 })
                                 .into_iter(),
                         )
-                        .chain(shuffles.iter().zip(vk.cs.shuffles.iter()).flat_map(
+                        .chain(shuffles.iter().zip(shuffle_groups.iter()).flat_map(
                             move |(s, argument)| {
                                 s.expressions(
                                     l_0,
