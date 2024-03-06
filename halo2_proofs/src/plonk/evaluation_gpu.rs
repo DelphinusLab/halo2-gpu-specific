@@ -83,8 +83,17 @@ pub enum ProveExpression<F> {
 #[derive(Clone, Debug)]
 pub enum LookupProveExpression<F> {
     Expression(ProveExpression<F>),
-    LcTheta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
+    //theta^i + b
+    LcTheta(
+        Box<LookupProveExpression<F>>,
+        Box<LookupProveExpression<F>>,
+        usize,
+    ),
+    //(a+beta)*b
     LcBeta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
+    //TODO: replace by new product(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>)?
+    //(a+gamma)*b
+    LcGamma(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
     AddGamma(Box<LookupProveExpression<F>>),
 }
 
@@ -112,7 +121,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
             LookupProveExpression::Expression(e) => e._eval_gpu_buffer(
                 pk, program, advice, instance, y, unit_cache, allocator, helper,
             ),
-            LookupProveExpression::LcTheta(l, r) => {
+            LookupProveExpression::LcTheta(l, r, p) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
@@ -130,7 +139,8 @@ impl<F: FieldExt> LookupProveExpression<F> {
                         program.create_buffer::<F>(size as usize).unwrap()
                     }))
                 };
-                let theta = program.create_buffer_from_slice(&vec![theta])?;
+                let theta_pow = theta.pow(&[p as u64, 0, 0, 0]);
+                let theta = program.create_buffer_from_slice(&vec![theta_pow])?;
                 let kernel_name = format!("{}_eval_lctheta", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(
@@ -178,6 +188,52 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     }))
                 };
                 let beta = program.create_buffer_from_slice(&vec![beta])?;
+                let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
+                //let timer = start_timer!(|| kernel_name.clone());
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+                kernel
+                    .arg(res.as_ref())
+                    .arg(l.0.as_ref())
+                    .arg(r.0.as_ref())
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .arg(&beta)
+                    .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
+
+                if Rc::strong_count(&r.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(r.0).unwrap())
+                }
+                //end_timer!(timer);
+                Ok((res, 0))
+            }
+            LookupProveExpression::LcGamma(l, r) => {
+                let l = l._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
+                )?;
+                let r = r._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
+                )?;
+                let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
+                    r.0.clone()
+                } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
+                    l.0.clone()
+                } else {
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
+                };
+                let beta = program.create_buffer_from_slice(&vec![gamma])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(

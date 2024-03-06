@@ -2,7 +2,7 @@ use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
     ProvingKey,
 };
-use super::Argument;
+use super::ArgumentGroup;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
 use crate::plonk::evaluation::{evaluate, evaluate_with_theta};
 use crate::poly::Basis;
@@ -38,8 +38,8 @@ use std::{
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Compressed<C: CurveAffine> {
-    input_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    shuffle_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    input_expressions_group: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
+    shuffle_expressions_group: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
 }
 
 #[derive(Debug)]
@@ -51,7 +51,7 @@ pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
     constructed: Committed<C>,
 }
 
-impl<F: FieldExt> Argument<F> {
+impl<F: FieldExt> ArgumentGroup<F> {
     /// Given a Shuffle with input expressions [A_0, A_1, ..., A_{m-1}] and table expressions
     /// [S_0, S_1, ..., S_{m-1}], this method
     /// - constructs A_compressed = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
@@ -70,7 +70,7 @@ impl<F: FieldExt> Argument<F> {
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
         // Closure to get values of expressions and compress them
-        let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+        let compress_expressions = |expressions: &[Expression<C::Scalar>], pow| {
             pk.vk.domain.lagrange_from_vec(evaluate_with_theta(
                 expressions,
                 params.n as usize,
@@ -78,18 +78,30 @@ impl<F: FieldExt> Argument<F> {
                 fixed_values,
                 advice_values,
                 instance_values,
-                *theta,
+                theta.pow(&[pow as u64, 0, 0, 0]),
             ))
         };
 
-        // Get values of input expressions involved in the shuffle and compress them
-        let input_expression = compress_expressions(&self.input_expressions);
+        //TODO: if it is ok to challenge different group by theta^i
+        let (input_expressions_group, shuffle_expressions_group) = self
+            .0
+            .iter()
+            .enumerate()
+            .map(|(idx, v)| {
+                // Get values of input expressions involved in the shuffle and compress them
+                let input_expression = compress_expressions(&v.input_expressions, idx + 1);
 
-        // Get values of table expressions involved in the shuffle and compress them
-        let shuffle_expression = compress_expressions(&self.shuffle_expressions);
+                // Get values of table expressions involved in the shuffle and compress them
+                let shuffle_expression = compress_expressions(&v.shuffle_expressions, idx + 1);
+                (input_expression, shuffle_expression)
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .unzip();
+
         Ok(Compressed {
-            input_expression,
-            shuffle_expression,
+            input_expressions_group,
+            shuffle_expressions_group,
         })
     }
 }
@@ -107,19 +119,28 @@ impl<C: CurveAffine> Compressed<C> {
     ) -> Result<Vec<C::Scalar>, Error> {
         let blinding_factors = pk.vk.cs.blinding_factors();
 
-        let mut shuffle_product = vec![C::Scalar::zero(); params.n as usize];
+        let mut shuffle_product = vec![C::Scalar::one(); params.n as usize];
+
         // #[cfg(not(feature = "cuda"))]
         {
-            // Denominator uses table expression
-            parallelize(&mut shuffle_product, |shuffle_product, start| {
-                for (shuffle_product, shuffle_value) in shuffle_product
-                    .iter_mut()
-                    .zip(self.shuffle_expression[start..].iter())
-                {
-                    *shuffle_product = *gamma + shuffle_value;
-                }
-            });
+            let expression_group_product =
+                |expression_group: &[Polynomial<C::Scalar, LagrangeCoeff>],
+                 products: &mut [C::Scalar]| {
+                    for expression in expression_group.iter() {
+                        parallelize(products, |product, start| {
+                            for (product_value, expression_value) in
+                                product.iter_mut().zip(expression[start..].iter())
+                            {
+                                *product_value *= &(*gamma + expression_value);
+                            }
+                        });
+                    }
+                };
+            let mut input_product = vec![C::Scalar::one(); params.n as usize];
+            expression_group_product(&self.input_expressions_group, &mut input_product);
+            expression_group_product(&self.shuffle_expressions_group, &mut shuffle_product);
 
+            // Denominator uses table expression
             // Batch invert to obtain the denominators for the product polynomials
             batch_invert(&mut shuffle_product);
 
@@ -127,7 +148,7 @@ impl<C: CurveAffine> Compressed<C> {
             parallelize(&mut shuffle_product, |product, start| {
                 for (i, product) in product.iter_mut().enumerate() {
                     let i = i + start;
-                    *product *= &(self.input_expression[i] + &*gamma);
+                    *product *= input_product[i];
                 }
             });
         }
@@ -152,13 +173,21 @@ impl<C: CurveAffine> Compressed<C> {
             // z(\omega X) (s'(X) + \gamma) - z(X)(a'(X)  + \gamma) =0
             for i in 0..u {
                 let mut left = z[i + 1];
-                let mut table_term = self.shuffle_expression[i];
-                table_term += &(*gamma);
+                let table_term = self
+                    .shuffle_expressions_group
+                    .iter()
+                    .map(|poly| poly[i] + *gamma)
+                    .reduce(|acc, v| acc * v)
+                    .unwrap();
                 left *= &(table_term);
 
                 let mut right = z[i];
-                let mut input_term = self.input_expression[i];
-                input_term += &(*gamma);
+                let input_term = self
+                    .input_expressions_group
+                    .iter()
+                    .map(|poly| poly[i] + *gamma)
+                    .reduce(|acc, v| acc * v)
+                    .unwrap();
                 right *= &(input_term);
 
                 assert_eq!(left, right);

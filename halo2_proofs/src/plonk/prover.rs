@@ -313,14 +313,17 @@ pub fn create_proof_ext<
     });
     end_timer!(timer);
 
-    let timer = start_timer!(|| format!("shuffles {}", pk.vk.cs.shuffles.len()));
+    let shuffle_groups = pk.vk.cs.shuffles.group(pk.vk.cs.degree());
+    let timer = start_timer!(|| format!(
+        "total shuffles {},groups:{}",
+        pk.vk.cs.shuffles.0.len(),
+        shuffle_groups.len()
+    ));
     let shuffles: Vec<Vec<shuffle::prover::Compressed<C>>> = instance
         .iter()
         .zip(advice.iter())
         .map(|(instance, advice)| -> Vec<_> {
-            pk.vk
-                .cs
-                .shuffles
+            shuffle_groups
                 .par_iter()
                 .map(|shuffle| {
                     shuffle
@@ -965,14 +968,17 @@ pub fn create_proof_from_witness<
     });
     end_timer!(timer);
 
-    let timer = start_timer!(|| format!("shuffles {}", pk.vk.cs.shuffles.len()));
+    let shuffle_groups = pk.vk.cs.shuffles.group(pk.vk.cs.degree());
+    let timer = start_timer!(|| format!(
+        "total shuffles {}, groups {}",
+        pk.vk.cs.shuffles.0.len(),
+        shuffle_groups.len()
+    ));
     let shuffles: Vec<Vec<shuffle::prover::Compressed<C>>> = instance
         .iter()
         .zip(advice.iter())
         .map(|(instance, advice)| -> Vec<_> {
-            pk.vk
-                .cs
-                .shuffles
+            shuffle_groups
                 .par_iter()
                 .map(|shuffle| {
                     shuffle

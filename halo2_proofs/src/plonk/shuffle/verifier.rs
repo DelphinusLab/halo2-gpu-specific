@@ -3,9 +3,9 @@ use std::iter;
 use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
-use super::Argument;
+use super::ArgumentGroup;
 use crate::{
-    arithmetic::{CurveAffine, FieldExt},
+    arithmetic::{BaseExt, CurveAffine, FieldExt},
     plonk::{Error, VerifyingKey},
     poly::{multiopen::VerifierQuery, Rotation},
     transcript::{EncodedChallenge, TranscriptRead},
@@ -24,7 +24,7 @@ pub struct Evaluated<C: CurveAffine> {
     pub product_next_eval: C::Scalar,
 }
 
-impl<F: FieldExt> Argument<F> {
+impl<F: FieldExt> ArgumentGroup<F> {
     pub fn read_product_commitment<
         C: CurveAffine,
         E: EncodedChallenge<C>,
@@ -61,7 +61,7 @@ impl<C: CurveAffine> Evaluated<C> {
         l_0: C::Scalar,
         l_last: C::Scalar,
         l_blind: C::Scalar,
-        argument: &'a Argument<C::Scalar>,
+        argument: &'a ArgumentGroup<C::Scalar>,
         theta: ChallengeTheta<C>,
         gamma: ChallengeGamma<C>,
         advice_evals: &[C::Scalar],
@@ -72,28 +72,47 @@ impl<C: CurveAffine> Evaluated<C> {
         let product_expression = || {
             // z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \gamma)
-            let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
-                expressions
-                    .iter()
-                    .map(|expression| {
-                        expression.evaluate(
-                            &|scalar| scalar,
-                            &|_| panic!("virtual selectors are removed during optimization"),
-                            &|index, _, _| fixed_evals[index],
-                            &|index, _, _| advice_evals[index],
-                            &|index, _, _| instance_evals[index],
-                            &|a| -a,
-                            &|a, b| a + &b,
-                            &|a, b| a() * &b(),
-                            &|a, scalar| a * &scalar,
-                        )
-                    })
-                    .fold(C::Scalar::zero(), |acc, eval| acc * &*theta + &eval)
-            };
-            let left = self.product_next_eval
-                * &(compress_expressions(&argument.shuffle_expressions) + &*gamma);
-            let right =
-                self.product_eval * &(compress_expressions(&argument.input_expressions) + &*gamma);
+            let compress_expressions =
+                |expressions: &[Expression<C::Scalar>], theta_pow: C::Scalar| {
+                    expressions
+                        .iter()
+                        .map(|expression| {
+                            expression.evaluate(
+                                &|scalar| scalar,
+                                &|_| panic!("virtual selectors are removed during optimization"),
+                                &|index, _, _| fixed_evals[index],
+                                &|index, _, _| advice_evals[index],
+                                &|index, _, _| instance_evals[index],
+                                &|a| -a,
+                                &|a, b| a + &b,
+                                &|a, b| a() * &b(),
+                                &|a, scalar| a * &scalar,
+                            )
+                        })
+                        .fold(C::Scalar::zero(), |acc, eval| acc * &theta_pow + &eval)
+                };
+
+            let (product_shuffle, product_input) = argument
+                .0
+                .iter()
+                .enumerate()
+                .map(|(idx, argument)| {
+                    (
+                        compress_expressions(
+                            &argument.shuffle_expressions,
+                            theta.pow(&[1 + idx as u64, 0, 0, 0]),
+                        ) + &*gamma,
+                        compress_expressions(
+                            &argument.input_expressions,
+                            theta.pow(&[1 + idx as u64, 0, 0, 0]),
+                        ) + &*gamma,
+                    )
+                })
+                .fold((C::Scalar::one(), C::Scalar::one()), |acc, v| {
+                    (acc.0 * v.0, acc.1 * v.1)
+                });
+            let left = self.product_next_eval * &product_shuffle;
+            let right = self.product_eval * &product_input;
             (left - &right) * &active_rows
         };
 
