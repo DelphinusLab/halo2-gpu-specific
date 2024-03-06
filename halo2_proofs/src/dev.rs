@@ -1028,6 +1028,7 @@ impl<F: FieldExt> MockProver<F> {
         let shuffle_errors =
             self.cs
                 .shuffles
+                .0
                 .iter()
                 .enumerate()
                 .flat_map(|(shuffle_index, shuffle)| {

@@ -97,8 +97,8 @@ pub enum Calculation {
     Negate(ValueSource),
     /// This is `(a + beta) * b`
     LcBeta(ValueSource, ValueSource),
-    /// This is `a * theta + b`
-    LcTheta(ValueSource, ValueSource),
+    /// This is `a * theta^pow + b`
+    LcTheta(ValueSource, ValueSource, usize),
     /// This is `a + gamma`
     AddGamma(ValueSource),
     /// This is a simple assignment
@@ -205,7 +205,7 @@ impl Calculation {
                 );
                 (a + beta) * b
             }
-            Calculation::LcTheta(a, b) => {
+            Calculation::LcTheta(a, b, p) => {
                 let a = a.get(
                     rotations,
                     constants,
@@ -222,7 +222,7 @@ impl Calculation {
                     advice_values,
                     instance_values,
                 );
-                a * theta + b
+                a * theta.pow_vartime([*p as u64, 0, 0, 0]) + b
             }
             Calculation::AddGamma(v) => {
                 v.get(
@@ -331,7 +331,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect::<Vec<_>>();
                 let mut lc = parts[0];
                 for part in parts.iter().skip(1) {
-                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part));
+                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part, 1));
                 }
                 lc
             };
@@ -354,7 +354,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect::<Vec<_>>();
                 let mut lc = parts[0].clone();
                 for part in parts.into_iter().skip(1) {
-                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part), 1);
                 }
                 lc
             };
@@ -371,52 +371,95 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         // Shuffles
-        for shuffle in cs.shuffles.iter() {
-            let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>| {
+        for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
+            let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>, pow| {
                 let parts = expressions
                     .iter()
                     .map(|expr| ev.add_expression(expr))
                     .collect::<Vec<_>>();
                 let mut lc = parts[0];
                 for part in parts.iter().skip(1) {
-                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part));
+                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part, pow));
                 }
-                lc
+                Calculation::AddGamma(lc)
             };
-            // Input coset
-            let input_coset = evaluate_lc(&mut ev, &shuffle.input_expressions);
-            // shuffle coset
-            let shuffle_coset = evaluate_lc(&mut ev, &shuffle.shuffle_expressions);
-            // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
-            ev.shuffle_results.push((
-                Calculation::AddGamma(input_coset),
-                Calculation::AddGamma(shuffle_coset),
-            ));
+
+            let (inputs, shuffles): (Vec<Calculation>, Vec<Calculation>) = shuffle_group
+                .0
+                .iter()
+                .enumerate()
+                .map(|(idx, argument)| {
+                    //Input coset and shuffle coset
+                    (
+                        evaluate_lc(&mut ev, &argument.input_expressions, idx + 1),
+                        evaluate_lc(&mut ev, &argument.shuffle_expressions, idx + 1),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .unzip();
+
+            // z(\omega X) ((s1(X) + \gamma) * (s2(X) + \gamma) * (s3(X) + \gamma))
+            // - z(x) ((a1(X) + \gamma) * (a2(X) + \gamma) * (a3(X) + \gamma))
+            let mut product_inputs = inputs[0].clone();
+            for part in inputs.into_iter().skip(1) {
+                product_inputs =
+                    Calculation::Mul(ev.add_calculation(product_inputs), ev.add_calculation(part))
+            }
+            let mut product_shuffles = shuffles[0].clone();
+            for part in shuffles.into_iter().skip(1) {
+                product_shuffles = Calculation::Mul(
+                    ev.add_calculation(product_shuffles),
+                    ev.add_calculation(part),
+                )
+            }
+
+            ev.shuffle_results.push((product_inputs, product_shuffles));
         }
 
         // Lookups in GPU
-        for shuffle in cs.shuffles.iter() {
-            let evaluate_lc = |expressions: &Vec<Expression<_>>| {
+        for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
+            let evaluate_lc = |expressions: &Vec<Expression<_>>, pow| {
                 let parts = expressions
                     .iter()
                     .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
                     .collect::<Vec<_>>();
                 let mut lc = parts[0].clone();
                 for part in parts.into_iter().skip(1) {
-                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part), pow);
                 }
                 lc
             };
-            // Input coset
-            let compressed_input_coset = evaluate_lc(&shuffle.input_expressions);
-            // shuffle coset
-            let compressed_shuffle_coset = evaluate_lc(&shuffle.shuffle_expressions);
-            // z(\omega X) (s(X) + \gamma) - z(x) (a(X) + \gamma)
 
-            ev.gpu_shuffle_expr.push((
-                LookupProveExpression::AddGamma(Box::new(compressed_input_coset)),
-                LookupProveExpression::AddGamma(Box::new(compressed_shuffle_coset)),
-            ));
+            let (inputs, shuffles): (
+                Vec<LookupProveExpression<C::Scalar>>,
+                Vec<LookupProveExpression<C::Scalar>>,
+            ) = shuffle_group
+                .0
+                .iter()
+                .enumerate()
+                .map(|(idx, argument)| {
+                    (
+                        evaluate_lc(&argument.input_expressions, idx + 1),
+                        evaluate_lc(&argument.shuffle_expressions, idx + 1),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .unzip();
+
+            let mut product_input = LookupProveExpression::AddGamma(Box::new(inputs[0].clone()));
+            for part in inputs.into_iter().skip(1) {
+                product_input =
+                    LookupProveExpression::LcGamma(Box::new(part), Box::new(product_input));
+            }
+            let mut product_shuffle =
+                LookupProveExpression::AddGamma(Box::new(shuffles[0].clone()));
+            for part in shuffles.into_iter().skip(1) {
+                product_shuffle =
+                    LookupProveExpression::LcGamma(Box::new(part), Box::new(product_shuffle));
+            }
+            ev.gpu_shuffle_expr.push((product_input, product_shuffle));
         }
 
         ev
@@ -597,7 +640,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let fixed = &pk.fixed_cosets[..];
         let extended_omega = domain.get_extended_omega();
         let num_lookups = pk.vk.cs.lookups.len();
-        let num_shuffles = pk.vk.cs.shuffles.len();
+        let num_shuffles = pk.vk.cs.shuffles.group(pk.vk.cs.degree()).len();
         let isize = size as i32;
         let one = C::ScalarExt::one();
         let l0 = &pk.l0;
