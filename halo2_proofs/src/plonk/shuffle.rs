@@ -12,19 +12,53 @@ impl<F: Field> Argument<F> {
         Argument(vec![])
     }
 
-    //TODO: implement optimal algorithm to find minimum group sets
     pub fn group(&self, degree: usize) -> Vec<ArgumentGroup<F>> {
         assert!(degree > 2, "Invalid degree");
         //(1 - (l_last + l_blind)) * z(\omega X) has 2 degree
-        let (low, high): (Vec<ArgumentElement<F>>, Vec<ArgumentElement<F>>) =
+        let reserve_degree = 2;
+
+        let (mut low, mut high): (Vec<ArgumentElement<F>>, Vec<ArgumentElement<F>>) =
             self.0.iter().cloned().partition(|s| s.degree() == 1);
-        let mut group: Vec<ArgumentGroup<F>> = low
-            .chunks(degree - 2)
-            .map(|v| ArgumentGroup(v.to_vec()))
-            .collect();
-        group.extend(high.into_iter().map(|v| ArgumentGroup(vec![v])));
+
+        //get all degree list, and put the bigger degree in advance for algorithm
+        let mut degree_set = high.iter().map(|s| s.degree()).collect::<Vec<usize>>();
+        degree_set.extend(vec![1; low.len()]);
+        let buckets = min_buckets(&degree_set, degree - reserve_degree);
+        let mut group: Vec<ArgumentGroup<F>> = Vec::new();
+        for bucket in buckets.into_iter() {
+            let mut argument = vec![];
+            bucket.into_iter().for_each(|num| {
+                if num == 1 {
+                    argument.push(low.pop().unwrap());
+                } else {
+                    let i = high.iter().position(|h| h.degree() == num).unwrap();
+                    argument.push(high.remove(i));
+                }
+            });
+            group.push(ArgumentGroup(argument));
+        }
         group
     }
+}
+
+fn min_buckets(sets: &[usize], volume: usize) -> Vec<Vec<usize>> {
+    let mut buckets: Vec<Vec<usize>> = Vec::new();
+
+    for &num in sets {
+        let mut placed = false;
+
+        for bucket in buckets.iter_mut() {
+            if bucket.iter().sum::<usize>() + num <= volume {
+                bucket.push(num);
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            buckets.push(vec![num]);
+        }
+    }
+    buckets
 }
 
 #[derive(Clone, Debug)]
