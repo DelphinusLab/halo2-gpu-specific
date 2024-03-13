@@ -84,6 +84,13 @@ impl ValueSource {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum LcChallenge {
+    Beta,
+    Gamma,
+    Delta,
+}
+
 /// Calculation
 #[derive(Clone, Debug, PartialEq)]
 pub enum Calculation {
@@ -98,9 +105,9 @@ pub enum Calculation {
     /// This is `(a + beta) * b`
     LcBeta(ValueSource, ValueSource),
     /// This is `a * theta^pow + b`
-    LcTheta(ValueSource, ValueSource, usize),
+    LcTheta(ValueSource, ValueSource),
     /// This is `a + gamma`
-    AddGamma(ValueSource),
+    AddChallenge(ValueSource, LcChallenge),
     /// This is a simple assignment
     Store(ValueSource),
 }
@@ -118,6 +125,7 @@ impl Calculation {
         instance_values: &[Polynomial<F, B>],
         beta: &F,
         gamma: &F,
+        delta: &F,
         theta: &F,
     ) -> F {
         match self {
@@ -205,7 +213,7 @@ impl Calculation {
                 );
                 (a + beta) * b
             }
-            Calculation::LcTheta(a, b, p) => {
+            Calculation::LcTheta(a, b) => {
                 let a = a.get(
                     rotations,
                     constants,
@@ -222,9 +230,14 @@ impl Calculation {
                     advice_values,
                     instance_values,
                 );
-                a * theta.pow_vartime([*p as u64, 0, 0, 0]) + b
+                a * theta + b
             }
-            Calculation::AddGamma(v) => {
+            Calculation::AddChallenge(v, x) => {
+                let challenge = match x {
+                    LcChallenge::Beta => beta,
+                    LcChallenge::Gamma => gamma,
+                    LcChallenge::Delta => delta,
+                };
                 v.get(
                     rotations,
                     constants,
@@ -232,7 +245,7 @@ impl Calculation {
                     fixed_values,
                     advice_values,
                     instance_values,
-                ) + gamma
+                ) + challenge
             }
             Calculation::Store(v) => v.get(
                 rotations,
@@ -331,7 +344,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect::<Vec<_>>();
                 let mut lc = parts[0];
                 for part in parts.iter().skip(1) {
-                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part, 1));
+                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part));
                 }
                 lc
             };
@@ -340,7 +353,8 @@ impl<C: CurveAffine> Evaluator<C> {
             // table coset
             let compressed_table_coset = evaluate_lc(&mut ev, &lookup.table_expressions);
             // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            let right_gamma = ev.add_calculation(Calculation::AddGamma(compressed_table_coset));
+            let right_gamma =
+                ev.add_calculation(Calculation::AddChallenge(compressed_table_coset, LcChallenge::Gamma));
             ev.lookup_results
                 .push(Calculation::LcBeta(compressed_input_coset, right_gamma));
         }
@@ -354,7 +368,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect::<Vec<_>>();
                 let mut lc = parts[0].clone();
                 for part in parts.into_iter().skip(1) {
-                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part), 1);
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
                 }
                 lc
             };
@@ -363,44 +377,47 @@ impl<C: CurveAffine> Evaluator<C> {
             // table coset
             let compressed_table_coset = evaluate_lc(&lookup.table_expressions);
             // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            let right_gamma = LookupProveExpression::AddGamma(Box::new(compressed_table_coset));
-            ev.gpu_lookup_expr.push(LookupProveExpression::LcBeta(
+            let right_gamma =
+                LookupProveExpression::AddChallenge(Box::new(compressed_table_coset), LcChallenge::Gamma);
+            ev.gpu_lookup_expr.push(LookupProveExpression::LcChallenge(
                 Box::new(compressed_input_coset),
                 Box::new(right_gamma),
+                LcChallenge::Beta,
             ));
         }
 
         // Shuffles
+        let lc_values = [LcChallenge::Beta, LcChallenge::Gamma, LcChallenge::Delta];
         for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
-            let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>, pow| {
+            let evaluate_lc = |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>, x: LcChallenge| {
                 let parts = expressions
                     .iter()
                     .map(|expr| ev.add_expression(expr))
                     .collect::<Vec<_>>();
                 let mut lc = parts[0];
                 for part in parts.iter().skip(1) {
-                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part, pow));
+                    lc = ev.add_calculation(Calculation::LcTheta(lc, *part));
                 }
-                Calculation::AddGamma(lc)
+                Calculation::AddChallenge(lc, x)
             };
 
             let (inputs, shuffles): (Vec<Calculation>, Vec<Calculation>) = shuffle_group
                 .0
                 .iter()
-                .enumerate()
-                .map(|(idx, argument)| {
+                .zip(lc_values.iter())
+                .map(|(argument, lcx)| {
                     //Input coset and shuffle coset
                     (
-                        evaluate_lc(&mut ev, &argument.input_expressions, idx + 1),
-                        evaluate_lc(&mut ev, &argument.shuffle_expressions, idx + 1),
+                        evaluate_lc(&mut ev, &argument.input_expressions, lcx.clone()),
+                        evaluate_lc(&mut ev, &argument.shuffle_expressions, lcx.clone()),
                     )
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .unzip();
 
-            // z(\omega X) ((s1(X) + \gamma) * (s2(X) + \gamma) * (s3(X) + \gamma))
-            // - z(x) ((a1(X) + \gamma) * (a2(X) + \gamma) * (a3(X) + \gamma))
+            // z(\omega X) ((s1(X) + \beta) * (s2(X) + \gamma) * (s3(X) + \delta))
+            // - z(x) ((a1(X) + \beta) * (a2(X) + \gamma) * (a3(X) + \delta))
             let mut product_inputs = inputs[0].clone();
             for part in inputs.into_iter().skip(1) {
                 product_inputs =
@@ -419,14 +436,14 @@ impl<C: CurveAffine> Evaluator<C> {
 
         // Lookups in GPU
         for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
-            let evaluate_lc = |expressions: &Vec<Expression<_>>, pow| {
+            let evaluate_lc = |expressions: &Vec<Expression<_>>| {
                 let parts = expressions
                     .iter()
                     .map(|expr| LookupProveExpression::Expression(ProveExpression::from_expr(expr)))
                     .collect::<Vec<_>>();
                 let mut lc = parts[0].clone();
                 for part in parts.into_iter().skip(1) {
-                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part), pow);
+                    lc = LookupProveExpression::LcTheta(Box::new(lc), Box::new(part));
                 }
                 lc
             };
@@ -437,27 +454,33 @@ impl<C: CurveAffine> Evaluator<C> {
             ) = shuffle_group
                 .0
                 .iter()
-                .enumerate()
-                .map(|(idx, argument)| {
+                .map(|argument| {
                     (
-                        evaluate_lc(&argument.input_expressions, idx + 1),
-                        evaluate_lc(&argument.shuffle_expressions, idx + 1),
+                        evaluate_lc(&argument.input_expressions),
+                        evaluate_lc(&argument.shuffle_expressions),
                     )
                 })
                 .collect::<Vec<_>>()
                 .into_iter()
                 .unzip();
 
-            let mut product_input = LookupProveExpression::AddGamma(Box::new(inputs[0].clone()));
-            for part in inputs.into_iter().skip(1) {
-                product_input =
-                    LookupProveExpression::LcGamma(Box::new(part), Box::new(product_input));
+            let mut product_input =
+                LookupProveExpression::AddChallenge(Box::new(inputs[0].clone()), LcChallenge::Beta);
+            for (part, lcx) in inputs.into_iter().zip(lc_values.iter()).skip(1) {
+                product_input = LookupProveExpression::LcChallenge(
+                    Box::new(part),
+                    Box::new(product_input),
+                    lcx.clone(),
+                );
             }
             let mut product_shuffle =
-                LookupProveExpression::AddGamma(Box::new(shuffles[0].clone()));
-            for part in shuffles.into_iter().skip(1) {
-                product_shuffle =
-                    LookupProveExpression::LcGamma(Box::new(part), Box::new(product_shuffle));
+                LookupProveExpression::AddChallenge(Box::new(shuffles[0].clone()), LcChallenge::Beta);
+            for (part, lcx) in shuffles.into_iter().zip(lc_values.iter()).skip(1) {
+                product_shuffle = LookupProveExpression::LcChallenge(
+                    Box::new(part),
+                    Box::new(product_shuffle),
+                    lcx.clone(),
+                );
             }
             ev.gpu_shuffle_expr.push((product_input, product_shuffle));
         }
@@ -629,6 +652,7 @@ impl<C: CurveAffine> Evaluator<C> {
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
+        delta: C::ScalarExt,
         theta: C::ScalarExt,
         lookups: &[Vec<lookup::prover::Committed<C>>],
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
@@ -697,6 +721,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     instance,
                                     &beta,
                                     &gamma,
+                                    &delta,
                                     &theta,
                                 );
                             }
@@ -725,6 +750,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     instance,
                                     &beta,
                                     &gamma,
+                                    &delta,
                                     &theta,
                                 );
                             }
@@ -740,6 +766,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     instance,
                                     &beta,
                                     &gamma,
+                                    &delta,
                                     &theta,
                                 );
                                 shuffle_table_values[i * size + idx] = shuffle_result.1.evaluate(
@@ -751,6 +778,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     instance,
                                     &beta,
                                     &gamma,
+                                    &delta,
                                     &theta,
                                 );
                             }
@@ -959,6 +987,7 @@ impl<C: CurveAffine> Evaluator<C> {
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
+        delta: C::ScalarExt,
         theta: C::ScalarExt,
         lookups: &[Vec<lookup::prover::Committed<C>>],
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
@@ -1306,6 +1335,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         beta,
                                         theta,
                                         gamma,
+                                        delta,
                                         &mut unit_cache,
                                         &mut allocator,
                                         &mut helper,
@@ -1460,6 +1490,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         beta,
                                         theta,
                                         gamma,
+                                        delta,
                                         &mut unit_cache,
                                         &mut allocator,
                                         &mut helper,
@@ -1478,6 +1509,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         beta,
                                         theta,
                                         gamma,
+                                        delta,
                                         &mut unit_cache,
                                         &mut allocator,
                                         &mut helper,

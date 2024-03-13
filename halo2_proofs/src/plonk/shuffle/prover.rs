@@ -5,6 +5,7 @@ use super::super::{
 use super::ArgumentGroup;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
 use crate::plonk::evaluation::{evaluate, evaluate_with_theta};
+use crate::plonk::ChallengeDelta;
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -70,7 +71,7 @@ impl<F: FieldExt> ArgumentGroup<F> {
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
         // Closure to get values of expressions and compress them
-        let compress_expressions = |expressions: &[Expression<C::Scalar>], pow| {
+        let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
             pk.vk.domain.lagrange_from_vec(evaluate_with_theta(
                 expressions,
                 params.n as usize,
@@ -78,21 +79,19 @@ impl<F: FieldExt> ArgumentGroup<F> {
                 fixed_values,
                 advice_values,
                 instance_values,
-                theta.pow(&[pow as u64, 0, 0, 0]),
+                *theta,
             ))
         };
 
-        //TODO: if it is ok to challenge different group by theta^i
         let (input_expressions_group, shuffle_expressions_group) = self
             .0
             .iter()
-            .enumerate()
-            .map(|(idx, v)| {
+            .map(|v| {
                 // Get values of input expressions involved in the shuffle and compress them
-                let input_expression = compress_expressions(&v.input_expressions, idx + 1);
+                let input_expression = compress_expressions(&v.input_expressions);
 
                 // Get values of table expressions involved in the shuffle and compress them
-                let shuffle_expression = compress_expressions(&v.shuffle_expressions, idx + 1);
+                let shuffle_expression = compress_expressions(&v.shuffle_expressions);
                 (input_expression, shuffle_expression)
             })
             .collect::<Vec<_>>()
@@ -115,10 +114,12 @@ impl<C: CurveAffine> Compressed<C> {
         self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
+        beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
+        delta: ChallengeDelta<C>,
     ) -> Result<Vec<C::Scalar>, Error> {
         let blinding_factors = pk.vk.cs.blinding_factors();
-
+        let challenges: Vec<C::Scalar> = vec![*beta, *gamma, *delta];
         let mut shuffle_product = vec![C::Scalar::one(); params.n as usize];
 
         // #[cfg(not(feature = "cuda"))]
@@ -126,31 +127,23 @@ impl<C: CurveAffine> Compressed<C> {
             let expression_group_product =
                 |expression_group: &[Polynomial<C::Scalar, LagrangeCoeff>],
                  products: &mut [C::Scalar]| {
-                    for expression in expression_group.iter() {
+                    for (expression, challenge) in expression_group.iter().zip(challenges.iter()) {
                         parallelize(products, |product, start| {
                             for (product_value, expression_value) in
                                 product.iter_mut().zip(expression[start..].iter())
                             {
-                                *product_value *= &(*gamma + expression_value);
+                                *product_value *= &(*challenge + expression_value);
                             }
                         });
                     }
                 };
-            let mut input_product = vec![C::Scalar::one(); params.n as usize];
-            expression_group_product(&self.input_expressions_group, &mut input_product);
             expression_group_product(&self.shuffle_expressions_group, &mut shuffle_product);
 
             // Denominator uses table expression
             // Batch invert to obtain the denominators for the product polynomials
             batch_invert(&mut shuffle_product);
-
             // Finish the computation of the entire fraction by computing the numerators of input expressions
-            parallelize(&mut shuffle_product, |product, start| {
-                for (i, product) in product.iter_mut().enumerate() {
-                    let i = i + start;
-                    *product *= input_product[i];
-                }
-            });
+            expression_group_product(&self.input_expressions_group, &mut shuffle_product);
         }
 
         let z = iter::once(C::Scalar::one())
@@ -170,13 +163,14 @@ impl<C: CurveAffine> Compressed<C> {
             let u = (params.n as usize) - (blinding_factors + 1);
             // l_0(X) * (1 - z(X)) = 0
             assert_eq!(z[0], C::Scalar::one());
-            // z(\omega X) (s'(X) + \gamma) - z(X)(a'(X)  + \gamma) =0
+            // z(\omega X) (s1(X)+\beta)(s2(X)+\gamma) - z(X)(a1(X)+\beta)(a2(X)+\gamma) =0
             for i in 0..u {
                 let mut left = z[i + 1];
                 let table_term = self
                     .shuffle_expressions_group
                     .iter()
-                    .map(|poly| poly[i] + *gamma)
+                    .zip(challenges.iter())
+                    .map(|(poly, challenge)| poly[i] + *challenge)
                     .reduce(|acc, v| acc * v)
                     .unwrap();
                 left *= &(table_term);
@@ -185,7 +179,8 @@ impl<C: CurveAffine> Compressed<C> {
                 let input_term = self
                     .input_expressions_group
                     .iter()
-                    .map(|poly| poly[i] + *gamma)
+                    .zip(challenges.iter())
+                    .map(|(poly, challenge)| poly[i] + *challenge)
                     .reduce(|acc, v| acc * v)
                     .unwrap();
                 right *= &(input_term);

@@ -267,6 +267,10 @@ struct Gamma;
 type ChallengeGamma<F> = ChallengeScalar<F, Gamma>;
 
 #[derive(Clone, Copy, Debug)]
+struct Delta;
+type ChallengeDelta<F> = ChallengeScalar<F, Delta>;
+
+#[derive(Clone, Copy, Debug)]
 struct Y;
 type ChallengeY<F> = ChallengeScalar<F, Y>;
 

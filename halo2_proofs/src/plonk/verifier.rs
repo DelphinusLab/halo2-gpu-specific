@@ -6,8 +6,8 @@ use std::marker::PhantomData;
 use std::ops::Mul;
 
 use super::{
-    vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
-    VerifyingKey,
+    vanishing, ChallengeBeta, ChallengeDelta, ChallengeGamma, ChallengeTheta, ChallengeX,
+    ChallengeY, Error, VerifyingKey,
 };
 use crate::arithmetic::{BaseExt, CurveAffine, FieldExt, MultiMillerLoop};
 
@@ -201,6 +201,9 @@ pub fn verify_proof_ext<
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
+    // Sample delta challenge
+    let delta: ChallengeDelta<_> = transcript.squeeze_challenge_scalar();
+
     let permutations_committed = (0..num_proofs)
         .map(|_| {
             // Hash each permutation product commitment
@@ -368,7 +371,9 @@ pub fn verify_proof_ext<
                                     l_blind,
                                     argument,
                                     theta,
+                                    beta,
                                     gamma,
+                                    delta,
                                     advice_evals,
                                     fixed_evals,
                                     instance_evals,

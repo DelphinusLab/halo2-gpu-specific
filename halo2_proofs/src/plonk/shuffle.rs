@@ -1,6 +1,6 @@
 use super::circuit::Expression;
 use ff::Field;
-
+use std::collections::BTreeMap;
 pub(crate) mod prover;
 pub(crate) mod verifier;
 
@@ -16,27 +16,33 @@ impl<F: Field> Argument<F> {
         assert!(degree > 2, "Invalid degree");
         //(1 - (l_last + l_blind)) * z(\omega X) has 2 degree
         let reserve_degree = 2;
+        let mut degree_arguments: BTreeMap<usize, Vec<ArgumentElement<F>>> = BTreeMap::default();
 
-        let (mut low, mut high): (Vec<ArgumentElement<F>>, Vec<ArgumentElement<F>>) =
-            self.0.iter().cloned().partition(|s| s.degree() == 1);
+        self.0.iter().for_each(|v| {
+            degree_arguments
+                .entry(v.degree())
+                .or_default()
+                .push(v.clone())
+        });
 
-        //get all degree list, and put the bigger degree in advance for algorithm
-        let mut degree_set = high.iter().map(|s| s.degree()).collect::<Vec<usize>>();
-        degree_set.extend(vec![1; low.len()]);
+        let mut degree_set = vec![];
+        degree_arguments
+            .iter()
+            .for_each(|(k, v)| degree_set.extend(vec![*k; v.len()]));
+        degree_set.reverse();
+
         let buckets = min_buckets(&degree_set, degree - reserve_degree);
         let mut group: Vec<ArgumentGroup<F>> = Vec::new();
         for bucket in buckets.into_iter() {
             let mut argument = vec![];
-            bucket.into_iter().for_each(|num| {
-                if num == 1 {
-                    argument.push(low.pop().unwrap());
-                } else {
-                    let i = high.iter().position(|h| h.degree() == num).unwrap();
-                    argument.push(high.remove(i));
-                }
+            bucket.into_iter().for_each(|k| {
+                argument.push(degree_arguments.get_mut(&k).unwrap().pop().unwrap());
             });
             group.push(ArgumentGroup(argument));
         }
+        degree_arguments
+            .keys()
+            .for_each(|k| assert!(degree_arguments.get(k).unwrap().is_empty()));
         group
     }
 }
