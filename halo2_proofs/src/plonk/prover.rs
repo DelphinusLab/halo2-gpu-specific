@@ -737,6 +737,7 @@ pub fn create_proof_from_witness<
     mut rng: R,
     transcript: &mut T,
     fd: &mut File,
+    use_gwc: bool
 ) -> Result<(), Error> {
     let meta = &pk.vk.cs;
     let domain = &pk.vk.domain;
@@ -1192,8 +1193,11 @@ pub fn create_proof_from_witness<
         // We query the h(X) polynomial at x
         .chain(vanishing.open(x));
 
-    let res =
-        multiopen::gwc::create_proof(params, transcript, instances).map_err(|_| Error::Opening);
+    let res = if use_gwc {
+        multiopen::gwc::create_proof(params, transcript, instances).map_err(|_| Error::Opening)
+    } else {
+        multiopen::shplonk::create_proof(params, transcript, instances).map_err(|_| Error::Opening)
+    };
     end_timer!(timer);
     res
 }
