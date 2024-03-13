@@ -32,6 +32,7 @@ use super::{
 };
 use crate::arithmetic::eval_polynomial_st;
 use crate::plonk::lookup::prover::Permuted;
+use crate::plonk::ChallengeDelta;
 use crate::{
     arithmetic::{eval_polynomial, BaseExt, CurveAffine, FieldExt},
     plonk::Assigned,
@@ -347,6 +348,8 @@ pub fn create_proof_ext<
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
+    // Sample delta challenge
+    let delta: ChallengeDelta<_> = transcript.squeeze_challenge_scalar();
 
     let (lookups, shuffles, permutations) = std::thread::scope(|s| {
         let permutations = s.spawn(|| {
@@ -435,7 +438,11 @@ pub fn create_proof_ext<
             .map(|shuffles| {
                 shuffles
                     .into_par_iter()
-                    .map(|shuffle| shuffle.commit_product(pk, params, gamma.clone()).unwrap())
+                    .map(|shuffle| {
+                        shuffle
+                            .commit_product(pk, params, beta, gamma, delta)
+                            .unwrap()
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -594,6 +601,7 @@ pub fn create_proof_ext<
         *y,
         *beta,
         *gamma,
+        *delta,
         *theta,
         &lookups,
         &shuffles,
@@ -608,6 +616,7 @@ pub fn create_proof_ext<
         *y,
         *beta,
         *gamma,
+        *delta,
         *theta,
         &lookups,
         &shuffles,
@@ -1002,6 +1011,8 @@ pub fn create_proof_from_witness<
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
+    // Sample delta challenge
+    let delta: ChallengeDelta<_> = transcript.squeeze_challenge_scalar();
 
     let (lookups, shuffles, permutations) = std::thread::scope(|s| {
         let permutations = s.spawn(|| {
@@ -1090,7 +1101,11 @@ pub fn create_proof_from_witness<
             .map(|shuffles| {
                 shuffles
                     .into_par_iter()
-                    .map(|shuffle| shuffle.commit_product(pk, params, gamma.clone()).unwrap())
+                    .map(|shuffle| {
+                        shuffle
+                            .commit_product(pk, params, beta, gamma, delta)
+                            .unwrap()
+                    })
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -1249,6 +1264,7 @@ pub fn create_proof_from_witness<
         *y,
         *beta,
         *gamma,
+        *delta,
         *theta,
         &lookups,
         &shuffles,
@@ -1263,6 +1279,7 @@ pub fn create_proof_from_witness<
         *y,
         *beta,
         *gamma,
+        *delta,
         *theta,
         &lookups,
         &shuffles,
