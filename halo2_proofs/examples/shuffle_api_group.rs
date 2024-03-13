@@ -55,6 +55,14 @@ impl<F: FieldExt> ShuffleChip<F> {
         s_inputs: &[Column<Fixed>],
         s_shuffles: &[Column<Fixed>],
     ) -> ShuffleConfig {
+        //need at least one gate or GPU will panic
+        meta.create_gate("", |meta| {
+            let input_0 = meta.query_advice(inputs[0], Rotation::cur());
+            let input_1 = meta.query_advice(inputs[1], Rotation::cur());
+            let s_input = meta.query_fixed(s_inputs[0], Rotation::cur());
+            vec![s_input * (input_0 - input_1)]
+        });
+
         meta.shuffle("shuffle1", |meta| {
             let input_0 = meta.query_advice(inputs[0], Rotation::cur());
             let shuffle_0 = meta.query_advice(shuffles[0], Rotation::cur());
@@ -65,27 +73,29 @@ impl<F: FieldExt> ShuffleChip<F> {
         });
 
         meta.shuffle("shuffle2", |meta| {
-            let input_0 = meta.query_advice(inputs[2], Rotation::cur());
-            let shuffle_0 = meta.query_advice(shuffles[2], Rotation::cur());
-            [(input_0, shuffle_0)].to_vec()
+            let input = meta.query_advice(inputs[2], Rotation::cur());
+            let shuffle = meta.query_advice(shuffles[2], Rotation::cur());
+            [(input, shuffle)].to_vec()
         });
 
         meta.shuffle("shuffle3", |meta| {
-            let input_0 = meta.query_advice(inputs[3], Rotation::cur());
-            let shuffle_0 = meta.query_advice(shuffles[3], Rotation::cur());
-            [(input_0, shuffle_0)].to_vec()
+            let input = meta.query_advice(inputs[3], Rotation::cur());
+            let shuffle = meta.query_advice(shuffles[3], Rotation::cur());
+            let s_input = meta.query_fixed(s_inputs[0], Rotation::cur());
+            let s_shuffle = meta.query_fixed(s_shuffles[0], Rotation::cur());
+            [(input * s_input, shuffle * s_shuffle)].to_vec()
         });
 
         meta.shuffle("shuffle4", |meta| {
-            let input_0 = meta.query_advice(inputs[4], Rotation::cur());
-            let shuffle_0 = meta.query_advice(shuffles[4], Rotation::cur());
+            let input = meta.query_advice(inputs[4], Rotation::cur());
+            let shuffle = meta.query_advice(shuffles[4], Rotation::cur());
             let s_input0 = meta.query_fixed(s_inputs[0], Rotation::cur());
             let s_shuffle0 = meta.query_fixed(s_shuffles[0], Rotation::cur());
             let s_input1 = meta.query_fixed(s_inputs[1], Rotation::cur());
             let s_shuffle1 = meta.query_fixed(s_shuffles[1], Rotation::cur());
             [(
-                input_0 * s_input0 * s_input1,
-                shuffle_0 * s_shuffle0 * s_shuffle1,
+                input * s_input0 * s_input1,
+                shuffle * s_shuffle0 * s_shuffle1,
             )]
             .to_vec()
         });

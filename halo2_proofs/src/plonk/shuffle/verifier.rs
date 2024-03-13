@@ -4,6 +4,7 @@ use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
 use super::ArgumentGroup;
+use crate::plonk::ChallengeDelta;
 use crate::{
     arithmetic::{BaseExt, CurveAffine, FieldExt},
     plonk::{Error, VerifyingKey},
@@ -63,7 +64,9 @@ impl<C: CurveAffine> Evaluated<C> {
         l_blind: C::Scalar,
         argument: &'a ArgumentGroup<C::Scalar>,
         theta: ChallengeTheta<C>,
+        beta: ChallengeBeta<C>,
         gamma: ChallengeGamma<C>,
+        delta: ChallengeDelta<C>,
         advice_evals: &[C::Scalar],
         fixed_evals: &[C::Scalar],
         instance_evals: &[C::Scalar],
@@ -72,40 +75,33 @@ impl<C: CurveAffine> Evaluated<C> {
         let product_expression = || {
             // z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
             // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \gamma)
-            let compress_expressions =
-                |expressions: &[Expression<C::Scalar>], theta_pow: C::Scalar| {
-                    expressions
-                        .iter()
-                        .map(|expression| {
-                            expression.evaluate(
-                                &|scalar| scalar,
-                                &|_| panic!("virtual selectors are removed during optimization"),
-                                &|index, _, _| fixed_evals[index],
-                                &|index, _, _| advice_evals[index],
-                                &|index, _, _| instance_evals[index],
-                                &|a| -a,
-                                &|a, b| a + &b,
-                                &|a, b| a() * &b(),
-                                &|a, scalar| a * &scalar,
-                            )
-                        })
-                        .fold(C::Scalar::zero(), |acc, eval| acc * &theta_pow + &eval)
-                };
+            let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
+                expressions
+                    .iter()
+                    .map(|expression| {
+                        expression.evaluate(
+                            &|scalar| scalar,
+                            &|_| panic!("virtual selectors are removed during optimization"),
+                            &|index, _, _| fixed_evals[index],
+                            &|index, _, _| advice_evals[index],
+                            &|index, _, _| instance_evals[index],
+                            &|a| -a,
+                            &|a, b| a + &b,
+                            &|a, b| a() * &b(),
+                            &|a, scalar| a * &scalar,
+                        )
+                    })
+                    .fold(C::Scalar::zero(), |acc, eval| acc * &*theta + &eval)
+            };
 
             let (product_shuffle, product_input) = argument
                 .0
                 .iter()
-                .enumerate()
-                .map(|(idx, argument)| {
+                .zip([*beta, *gamma, *delta])
+                .map(|(argument, lcx)| {
                     (
-                        compress_expressions(
-                            &argument.shuffle_expressions,
-                            theta.pow(&[1 + idx as u64, 0, 0, 0]),
-                        ) + &*gamma,
-                        compress_expressions(
-                            &argument.input_expressions,
-                            theta.pow(&[1 + idx as u64, 0, 0, 0]),
-                        ) + &*gamma,
+                        compress_expressions(&argument.shuffle_expressions) + &lcx,
+                        compress_expressions(&argument.input_expressions) + &lcx,
                     )
                 })
                 .fold((C::Scalar::one(), C::Scalar::one()), |acc, v| {
@@ -126,7 +122,8 @@ impl<C: CurveAffine> Evaluated<C> {
                 Some(l_last * &(self.product_eval.square() - &self.product_eval)),
             )
             .chain(
-                // (1 - (l_last(X) + l_blind(X))) * ( z(\omega X) (s(X) + \gamma) - z(X) (a(X) + \gamma))
+                // (1 - (l_last(X) + l_blind(X))) *
+                //( z(\omega X) (s1(X)+\beta)(s2(X)+\gamma) - z(X) (a1(X)+\beta)(a2(X)+\gamma))
                 Some(product_expression()),
             )
     }

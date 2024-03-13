@@ -59,6 +59,14 @@ impl<F: FieldExt> ShuffleChip<F> {
         s_input: Column<Fixed>,
         s_shuffle: Column<Fixed>,
     ) -> ShuffleConfig {
+        //need at least one gate or GPU will panic
+        meta.create_gate("", |meta| {
+            let input_0 = meta.query_advice(input_0, Rotation::cur());
+            let input_1 = meta.query_advice(input_1, Rotation::cur());
+            let s_input = meta.query_fixed(s_input, Rotation::cur());
+            vec![s_input * (input_0 * F::from(10) - input_1)]
+        });
+
         meta.shuffle("shuffle", |meta| {
             let input_0 = meta.query_advice(input_0, Rotation::cur());
             let shuffle_0 = meta.query_advice(shuffle_0, Rotation::cur());
