@@ -122,12 +122,12 @@ impl<F: FieldExt> LookupProveExpression<F> {
             ),
             LookupProveExpression::LcTheta(l, r) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
-                    helper,
+                    pk, program, advice, instance, y, beta, theta, gamma, delta, unit_cache,
+                    allocator, helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
-                    helper,
+                    pk, program, advice, instance, y, beta, theta, gamma, delta, unit_cache,
+                    allocator, helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
@@ -169,12 +169,12 @@ impl<F: FieldExt> LookupProveExpression<F> {
             }
             LookupProveExpression::LcChallenge(l, r, lcx) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
-                    helper,
+                    pk, program, advice, instance, y, beta, theta, gamma, delta, unit_cache,
+                    allocator, helper,
                 )?;
                 let r = r._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
-                    helper,
+                    pk, program, advice, instance, y, beta, theta, gamma, delta, unit_cache,
+                    allocator, helper,
                 )?;
                 let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
                     r.0.clone()
@@ -186,9 +186,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     }))
                 };
                 let x = match lcx {
-                    LcX::Beta => beta,
-                    LcX::Gamma => gamma,
-                    LcX::Delta => delta,
+                    LcChallenge::Beta => beta,
+                    LcChallenge::Gamma => gamma,
+                    LcChallenge::Delta => delta,
                 };
                 let beta = program.create_buffer_from_slice(&vec![x])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
@@ -220,8 +220,8 @@ impl<F: FieldExt> LookupProveExpression<F> {
             }
             LookupProveExpression::AddChallenge(l, lcx) => {
                 let l = l._eval_gpu(
-                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
-                    helper,
+                    pk, program, advice, instance, y, beta, theta, gamma, delta, unit_cache,
+                    allocator, helper,
                 )?;
                 let res = if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
                     l.0.clone()
@@ -231,9 +231,9 @@ impl<F: FieldExt> LookupProveExpression<F> {
                     }))
                 };
                 let x = match lcx {
-                    LcX::Beta => beta,
-                    LcX::Gamma => gamma,
-                    LcX::Delta => delta,
+                    LcChallenge::Beta => beta,
+                    LcChallenge::Gamma => gamma,
+                    LcChallenge::Delta => delta,
                 };
                 let gamma = program.create_buffer_from_slice(&vec![x])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
