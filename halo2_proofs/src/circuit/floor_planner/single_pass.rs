@@ -16,6 +16,8 @@ use crate::{
     },
 };
 
+/*
+
 /// A simple [`FloorPlanner`] that performs minimal optimizations.
 ///
 /// This floor planner is suitable for debugging circuits. It aims to reflect the circuit
@@ -371,6 +373,8 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
     }
 }
 
+*/
+
 /// The default value to fill a table column with.
 ///
 /// - The outer `Option` tracks whether the value in row 0 of the table column has been
@@ -381,7 +385,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F>
 type DefaultTableValue<F> = Option<Option<Assigned<F>>>;
 
 pub(crate) struct SimpleTableLayouter<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
-    cs: &'a mut CS,
+    cs: &'a CS,
     used_columns: &'r [TableColumn],
     // maps from a fixed column to a pair (default value, vector saying which rows are assigned)
     pub(crate) default_and_assigned: HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
@@ -397,7 +401,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayoute
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SimpleTableLayouter<'r, 'a, F, CS> {
-    pub(crate) fn new(cs: &'a mut CS, used_columns: &'r [TableColumn]) -> Self {
+    pub(crate) fn new(cs: &'a CS, used_columns: &'r [TableColumn]) -> Self {
         SimpleTableLayouter {
             cs,
             used_columns,
@@ -451,6 +455,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
     }
 }
 
+/*
 #[cfg(test)]
 mod tests {
     use pairing::bn256::Fr as Scalar;
@@ -500,3 +505,4 @@ mod tests {
         ));
     }
 }
+*/

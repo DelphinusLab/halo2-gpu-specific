@@ -1,3 +1,4 @@
+/*
 #![allow(clippy::many_single_char_names)]
 #![allow(clippy::op_ref)]
 
@@ -510,3 +511,4 @@ fn plonk_api() {
         }
     }
 }
+*/

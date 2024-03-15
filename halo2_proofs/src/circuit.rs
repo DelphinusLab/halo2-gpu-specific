@@ -10,7 +10,7 @@ use crate::{
 };
 
 pub mod floor_planner;
-pub use floor_planner::single_pass::SimpleFloorPlanner;
+// pub use floor_planner::single_pass::SimpleFloorPlanner;
 
 pub mod layouter;
 
@@ -379,7 +379,7 @@ impl<'r, F: Field> Table<'r, F> {
 ///
 /// This abstracts over the circuit assignments, handling row indices etc.
 ///
-pub trait Layouter<F: Field> {
+pub trait Layouter<F: Field>: Clone + Send {
     /// Represents the type of the "root" of this layouter, so that nested namespaces
     /// can minimize indirection.
     type Root: Layouter<F>;
@@ -396,7 +396,7 @@ pub trait Layouter<F: Field> {
     ///     region.assign_advice(config.a, offset, || { Some(value)});
     /// });
     /// ```
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
         A: FnMut(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
@@ -410,7 +410,7 @@ pub trait Layouter<F: Field> {
     ///     table.assign_fixed(config.a, offset, || { Some(value)});
     /// });
     /// ```
-    fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
         A: FnMut(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
@@ -419,7 +419,7 @@ pub trait Layouter<F: Field> {
     /// Constrains a [`Cell`] to equal an instance column's row value at an
     /// absolute position.
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         column: Column<Instance>,
         row: usize,
@@ -428,12 +428,12 @@ pub trait Layouter<F: Field> {
     /// Gets the "root" of this assignment, bypassing the namespacing.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn get_root(&mut self) -> &mut Self::Root;
+    fn get_root(&self) -> &Self::Root;
 
     /// Creates a new (sub)namespace and enters into it.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn push_namespace<NR, N>(&mut self, name_fn: N)
+    fn push_namespace<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR;
@@ -441,7 +441,7 @@ pub trait Layouter<F: Field> {
     /// Exits out of the existing namespace.
     ///
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
-    fn pop_namespace(&mut self, gadget_name: Option<String>);
+    fn pop_namespace(&self, gadget_name: Option<String>);
 
     /// Enters into a namespace.
     fn namespace<NR, N>(&mut self, name_fn: N) -> NamespacedLayouter<'_, F, Self::Root>
@@ -457,13 +457,17 @@ pub trait Layouter<F: Field> {
 
 /// This is a "namespaced" layouter which borrows a `Layouter` (pushing a namespace
 /// context) and, when dropped, pops out of the namespace context.
-#[derive(Debug)]
-pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a mut L, PhantomData<F>);
+#[derive(Clone, Debug)]
+pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a L, PhantomData<F>);
+
+unsafe impl<'a, F: Field, L: Layouter<F> + 'a> Send for NamespacedLayouter<'a, F, L> {
+    // empty.
+}
 
 impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F, L> {
     type Root = L::Root;
 
-    fn assign_region<A, AR, N, NR>(&mut self, name: N, assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
         A: FnMut(Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
@@ -472,7 +476,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         self.0.assign_region(name, assignment)
     }
 
-    fn assign_table<A, N, NR>(&mut self, name: N, assignment: A) -> Result<(), Error>
+    fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
         A: FnMut(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
@@ -482,7 +486,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
     }
 
     fn constrain_instance(
-        &mut self,
+        &self,
         cell: Cell,
         column: Column<Instance>,
         row: usize,
@@ -490,11 +494,11 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         self.0.constrain_instance(cell, column, row)
     }
 
-    fn get_root(&mut self) -> &mut Self::Root {
+    fn get_root(&self) -> &Self::Root {
         self.0.get_root()
     }
 
-    fn push_namespace<NR, N>(&mut self, _name_fn: N)
+    fn push_namespace<NR, N>(&self, _name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -502,7 +506,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
         panic!("Only the root's push_namespace should be called");
     }
 
-    fn pop_namespace(&mut self, _gadget_name: Option<String>) {
+    fn pop_namespace(&self, _gadget_name: Option<String>) {
         panic!("Only the root's pop_namespace should be called");
     }
 }

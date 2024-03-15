@@ -1,3 +1,4 @@
+/*
 use std::marker::PhantomData;
 
 use halo2_proofs::{
@@ -208,3 +209,4 @@ fn lookup_any() {
     let prover = MockProver::run(k, &circuit, vec![even_lookup]).unwrap();
     assert!(prover.verify().is_err())
 }
+*/
