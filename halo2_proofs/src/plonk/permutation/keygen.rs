@@ -70,48 +70,42 @@ impl ParallelAssembly {
             }
         }
 
-        let cycle = Rc::new(RefCell::new(BTreeSet::new()));
+        let left_cycle = left_cycle.unwrap_or_else(|| {
+            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
+                left_column as u32,
+                left_row as u32,
+            )])));
 
-        if let Some(left_cycle) = left_cycle.as_ref() {
-            self.cycles.remove(left_cycle);
-
-            for (col, row) in left_cycle.borrow().iter() {
-                self.aux[*col as usize][*row as usize] = Some(cycle.clone());
-            }
-        } else {
             self.aux[left_column][left_row] = Some(cycle.clone());
-        }
+            cycle
+        });
+        let right_cycle = right_cycle.unwrap_or_else(|| {
+            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
+                right_column as u32,
+                right_row as u32,
+            )])));
 
-        if let Some(right_cycle) = right_cycle.as_ref() {
-            self.cycles.remove(right_cycle);
-
-            for (col, row) in right_cycle.borrow().iter() {
-                self.aux[*col as usize][*row as usize] = Some(cycle.clone());
-            }
-        } else {
             self.aux[right_column][right_row] = Some(cycle.clone());
-        }
-
-        if let Some(left_cycle) = left_cycle {
-            let mut left_cycle = Rc::try_unwrap(left_cycle).unwrap().into_inner();
-
-            cycle.borrow_mut().append(&mut left_cycle);
-        } else {
             cycle
-                .borrow_mut()
-                .insert((left_column as u32, left_row as u32));
-        }
-        if let Some(right_cycle) = right_cycle {
-            let mut right_cycle = Rc::try_unwrap(right_cycle).unwrap().into_inner();
+        });
 
-            cycle.borrow_mut().append(&mut right_cycle);
-        } else {
-            cycle
-                .borrow_mut()
-                .insert((right_column as u32, right_row as u32));
+        let (small_cycle, big_cycle) =
+            if left_cycle.borrow().len() <= right_cycle.borrow_mut().len() {
+                (left_cycle, right_cycle)
+            } else {
+                (right_cycle, left_cycle)
+            };
+
+        // merge small cycle into big cycle
+        self.cycles.remove(&small_cycle);
+        self.cycles.insert(big_cycle.clone());
+
+        for (col, row) in small_cycle.borrow().iter() {
+            self.aux[*col as usize][*row as usize] = Some(big_cycle.clone());
         }
 
-        self.cycles.insert(cycle);
+        let mut small_cycle = Rc::try_unwrap(small_cycle).unwrap().into_inner();
+        big_cycle.borrow_mut().append(&mut small_cycle);
 
         Ok(())
     }
