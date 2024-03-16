@@ -1,4 +1,5 @@
 use crate::helpers::AssignWitnessCollection;
+use ark_std::iterable::Iterable;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
 use ff::Field;
@@ -737,7 +738,7 @@ pub fn create_proof_from_witness<
     mut rng: R,
     transcript: &mut T,
     fd: &mut File,
-    use_gwc: bool
+    use_gwc: bool,
 ) -> Result<(), Error> {
     let meta = &pk.vk.cs;
     let domain = &pk.vk.domain;

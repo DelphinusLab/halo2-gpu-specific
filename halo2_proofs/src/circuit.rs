@@ -161,13 +161,16 @@ where
 /// TODO: It would be great if we could constrain the columns in these types to be
 /// "logical" columns that are guaranteed to correspond to the chip (and have come from
 /// `Chip::Config`).
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Region<'r, F: Field> {
-    region: &'r mut dyn layouter::RegionLayouter<F>,
+    region: &'r dyn layouter::RegionLayouter<F>,
 }
 
-impl<'r, F: Field> From<&'r mut dyn layouter::RegionLayouter<F>> for Region<'r, F> {
-    fn from(region: &'r mut dyn layouter::RegionLayouter<F>) -> Self {
+unsafe impl<'r, F: Field> Sync for Region<'r, F> {}
+unsafe impl<'r, F: Field> Send for Region<'r, F> {}
+
+impl<'r, F: Field> From<&'r dyn layouter::RegionLayouter<F>> for Region<'r, F> {
+    fn from(region: &'r dyn layouter::RegionLayouter<F>) -> Self {
         Region { region }
     }
 }
@@ -175,7 +178,7 @@ impl<'r, F: Field> From<&'r mut dyn layouter::RegionLayouter<F>> for Region<'r, 
 impl<'r, F: Field> Region<'r, F> {
     /// Enables a selector at the given offset.
     pub(crate) fn enable_selector<A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         selector: &Selector,
         offset: usize,
@@ -192,7 +195,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_advice<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: Column<Advice>,
         offset: usize,
@@ -228,7 +231,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Returns the advice cell.
     pub fn assign_advice_from_constant<VR, A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         column: Column<Advice>,
         offset: usize,
@@ -288,7 +291,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_fixed<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: Column<Fixed>,
         offset: usize,
@@ -331,7 +334,7 @@ impl<'r, F: Field> Region<'r, F> {
     ///
     /// Returns an error if either of the cells are in columns where equality
     /// has not been enabled.
-    pub fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error> {
+    pub fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error> {
         self.region.constrain_equal(left, right)
     }
 }
@@ -339,11 +342,11 @@ impl<'r, F: Field> Region<'r, F> {
 /// A lookup table in the circuit.
 #[derive(Debug)]
 pub struct Table<'r, F: Field> {
-    table: &'r mut dyn layouter::TableLayouter<F>,
+    table: &'r dyn layouter::TableLayouter<F>,
 }
 
-impl<'r, F: Field> From<&'r mut dyn layouter::TableLayouter<F>> for Table<'r, F> {
-    fn from(table: &'r mut dyn layouter::TableLayouter<F>) -> Self {
+impl<'r, F: Field> From<&'r dyn layouter::TableLayouter<F>> for Table<'r, F> {
+    fn from(table: &'r dyn layouter::TableLayouter<F>) -> Self {
         Table { table }
     }
 }
@@ -355,7 +358,7 @@ impl<'r, F: Field> Table<'r, F> {
     ///
     /// Even though `to` has `FnMut` bounds, it is guaranteed to be called at most once.
     pub fn assign_cell<'v, V, VR, A, AR>(
-        &'v mut self,
+        &'v self,
         annotation: A,
         column: TableColumn,
         offset: usize,
@@ -398,7 +401,7 @@ pub trait Layouter<F: Field>: Clone + Send {
     /// ```
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
@@ -412,7 +415,7 @@ pub trait Layouter<F: Field>: Clone + Send {
     /// ```
     fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>;
 
@@ -469,7 +472,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -478,7 +481,7 @@ impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F
 
     fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {

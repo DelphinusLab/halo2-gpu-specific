@@ -13,6 +13,7 @@ use crate::{
         layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter},
         Cell, Layouter, Region, RegionIndex, RegionStart, Table,
     },
+    parallel::Parallel,
     plonk::{
         Advice, Any, Assigned, Assignment, Circuit, Column, Error, Fixed, FloorPlanner, Instance,
         Selector, TableColumn,
@@ -37,9 +38,9 @@ struct V1Plan<'a, F: Field, CS: Assignment<F> + 'a> {
     /// Stores the starting row for each region.
     regions: Vec<RegionStart>,
     /// Stores the constants to be assigned, and the cells to which they are copied.
-    constants: Arc<Mutex<Vec<(Assigned<F>, Cell)>>>,
+    constants: Parallel<Vec<(Assigned<F>, Cell)>>,
     /// Stores the table fixed columns.
-    table_columns: Arc<Mutex<Vec<TableColumn>>>,
+    table_columns: Parallel<Vec<TableColumn>>,
 }
 
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
@@ -54,8 +55,8 @@ impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
         let ret = V1Plan {
             cs,
             regions: vec![],
-            constants: Arc::new(Mutex::new(vec![])),
-            table_columns: Arc::new(Mutex::new(vec![])),
+            constants: Parallel::new(vec![]),
+            table_columns: Parallel::new(vec![]),
         };
         Ok(ret)
     }
@@ -188,7 +189,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 
     fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -200,7 +201,7 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for V1Pass<'p, 'a, F,
 
     fn assign_table<A, N, NR>(&self, name: N, assignment: A) -> Result<(), Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<(), Error>,
+        A: Fn(Table<'_, F>) -> Result<(), Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -276,9 +277,9 @@ impl MeasurementPassAssignment {
         }
     }
 
-    fn assign_region<F: Field, A, AR, N, NR>(&self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_region<F: Field, A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -298,11 +299,13 @@ impl MeasurementPassAssignment {
         drop(regions);
 
         // Get shape of the region.
-        let mut shape = RegionShape::new(region_index.into());
+        let shape = Parallel::new(RegionShape::new(region_index.into()));
         let result = {
-            let region: &mut dyn RegionLayouter<F> = &mut shape;
-            assignment(region.into())
+            let region: &dyn RegionLayouter<F> = &shape;
+            assignment(&region.into())
         }?;
+
+        let shape = shape.into_inner();
 
         let mut regions = self.regions.lock().unwrap();
         regions.0[region_index] = Some(shape);
@@ -330,9 +333,9 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         *self.regions_name.get(name).unwrap().clone()
     }
 
-    fn assign_region<A, AR, N, NR>(&self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_region<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Region<'_, F>) -> Result<AR, Error>,
+        A: Fn(&Region<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -340,19 +343,19 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
         let region_index = self.region_from_name(&name().into());
 
         self.plan.cs.enter_region(name);
-        let mut region = V1Region::new(self.plan, region_index.into());
+        let region = V1Region::new(self.plan, region_index.into());
         let result = {
-            let region: &mut dyn RegionLayouter<F> = &mut region;
-            assignment(region.into())
+            let region: &dyn RegionLayouter<F> = &region;
+            assignment(&region.into())
         }?;
         self.plan.cs.exit_region();
 
         Ok(result)
     }
 
-    fn assign_table<A, AR, N, NR>(&self, name: N, mut assignment: A) -> Result<AR, Error>
+    fn assign_table<A, AR, N, NR>(&self, name: N, assignment: A) -> Result<AR, Error>
     where
-        A: FnMut(Table<'_, F>) -> Result<AR, Error>,
+        A: Fn(Table<'_, F>) -> Result<AR, Error>,
         N: Fn() -> NR,
         NR: Into<String>,
     {
@@ -362,12 +365,12 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
 
         // Assign table cells.
         self.plan.cs.enter_region(name);
-        let mut table = SimpleTableLayouter::new(self.plan.cs, &table_columns);
+        let table = SimpleTableLayouter::new(self.plan.cs, &table_columns);
         let result = {
-            let table: &mut dyn TableLayouter<F> = &mut table;
+            let table: &dyn TableLayouter<F> = &table;
             assignment(table.into())
         }?;
-        let default_and_assigned = table.default_and_assigned;
+        let default_and_assigned = table.default_and_assigned.into_inner();
         self.plan.cs.exit_region();
 
         // Check that all table columns have the same length `first_unused`,
@@ -396,8 +399,6 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
             table_columns.push(*column);
         }
 
-        drop(table_columns);
-
         for (col, (default_val, _)) in default_and_assigned {
             // default_val must be Some because we must have assigned
             // at least one cell in each column, and in that case we checked
@@ -406,6 +407,8 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
                 .cs
                 .fill_from_row(col.inner(), first_unused, default_val.unwrap())?;
         }
+
+        drop(table_columns);
 
         Ok(result)
     }
@@ -447,7 +450,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> V1Region<'r, 'a, F, CS> {
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r, 'a, F, CS> {
     fn enable_selector<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         selector: &Selector,
         offset: usize,
@@ -460,7 +463,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_advice<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -481,7 +484,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_advice_from_constant<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Advice>,
         offset: usize,
@@ -494,7 +497,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_advice_from_instance<'v>(
-        &mut self,
+        &self,
         annotation: &'v (dyn Fn() -> String + 'v),
         instance: Column<Instance>,
         row: usize,
@@ -518,7 +521,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
     }
 
     fn assign_fixed<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: Column<Fixed>,
         offset: usize,
@@ -538,13 +541,13 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> RegionLayouter<F> for V1Region<'r
         })
     }
 
-    fn constrain_constant(&mut self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
+    fn constrain_constant(&self, cell: Cell, constant: Assigned<F>) -> Result<(), Error> {
         let mut constants = self.plan.constants.lock().unwrap();
         constants.push((constant, cell));
         Ok(())
     }
 
-    fn constrain_equal(&mut self, left: Cell, right: Cell) -> Result<(), Error> {
+    fn constrain_equal(&self, left: Cell, right: Cell) -> Result<(), Error> {
         self.plan.cs.copy(
             left.column,
             *self.plan.regions[*left.region_index] + left.row_offset,
@@ -588,9 +591,7 @@ mod tests {
             ) -> Result<(), crate::plonk::Error> {
                 layouter.assign_region(
                     || "assign constant",
-                    |mut region| {
-                        region.assign_advice_from_constant(|| "one", config, 0, Scalar::one())
-                    },
+                    |region| region.assign_advice_from_constant(|| "one", config, 0, Scalar::one()),
                 )?;
 
                 Ok(())

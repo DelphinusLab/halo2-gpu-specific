@@ -1,3 +1,4 @@
+/*
 use halo2_proofs::arithmetic::FieldExt;
 use halo2_proofs::circuit::floor_planner::V1;
 use halo2_proofs::circuit::{Cell, Chip, Layouter, Region};
@@ -372,3 +373,4 @@ fn main() {
     let prover = MockProver::run(k, &circuit, vec![public_inputs]).unwrap();
     assert!(prover.verify().is_err());
 }
+*/

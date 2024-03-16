@@ -10,6 +10,7 @@ use crate::{
         layouter::{RegionColumn, RegionLayouter, RegionShape, TableLayouter},
         Cell, Layouter, Region, RegionIndex, RegionStart, Table,
     },
+    parallel::Parallel,
     plonk::{
         Advice, Any, Assigned, Assignment, Circuit, Column, Error, Fixed, FloorPlanner, Instance,
         Selector, TableColumn,
@@ -388,7 +389,8 @@ pub(crate) struct SimpleTableLayouter<'r, 'a, F: Field, CS: Assignment<F> + 'a> 
     cs: &'a CS,
     used_columns: &'r [TableColumn],
     // maps from a fixed column to a pair (default value, vector saying which rows are assigned)
-    pub(crate) default_and_assigned: HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    pub(crate) default_and_assigned:
+        Parallel<HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>>,
 }
 
 impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayouter<'r, 'a, F, CS> {
@@ -405,7 +407,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SimpleTableLayouter<'r, 'a, F, CS
         SimpleTableLayouter {
             cs,
             used_columns,
-            default_and_assigned: HashMap::default(),
+            default_and_assigned: Parallel::new(HashMap::default()),
         }
     }
 }
@@ -414,7 +416,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
     for SimpleTableLayouter<'r, 'a, F, CS>
 {
     fn assign_cell<'v>(
-        &'v mut self,
+        &'v self,
         annotation: &'v (dyn Fn() -> String + 'v),
         column: TableColumn,
         offset: usize,
@@ -424,7 +426,8 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F>
             return Err(Error::Synthesis); // TODO better error
         }
 
-        let entry = self.default_and_assigned.entry(column).or_default();
+        let mut default_and_assigned = self.default_and_assigned.lock().unwrap();
+        let entry = default_and_assigned.entry(column).or_default();
 
         let mut value = None;
         self.cs.assign_fixed(

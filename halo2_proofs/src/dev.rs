@@ -373,7 +373,7 @@ impl<F: Group + Field> Mul<F> for Value<F> {
 thread_local! {
     // The current region being assigned to. Will be `None` after the circuit has been
     // synthesized.
-    static CURRENT_REGION: RefCell<Option<Region>> = RefCell::new(None);
+    static CURRENT_REGION: RefCell<Option<Arc<Mutex<Region>>>> = RefCell::new(None);
 }
 
 /// A test prover for debugging circuits.
@@ -572,24 +572,24 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         N: FnOnce() -> NR,
     {
         CURRENT_REGION.with(|current_region| {
-            let mut current_region = current_region.borrow_mut();
+            assert!(current_region.borrow().is_none());
 
-            assert!((current_region).is_none());
-            *current_region = Some(Region {
+            *current_region.borrow_mut() = Some(Arc::new(Mutex::new(Region {
                 name: name().into(),
                 columns: HashSet::default(),
                 rows: None,
                 enabled_selectors: HashMap::default(),
                 cells: HashMap::default(),
-            });
+            })));
         })
     }
 
     fn exit_region(&self) {
         let region = CURRENT_REGION.with(|current_region| {
-            let mut current_region = current_region.borrow_mut();
-
-            current_region.take().unwrap()
+            Arc::try_unwrap(current_region.take().unwrap())
+                .unwrap()
+                .into_inner()
+                .unwrap()
         });
 
         let mut regions = self.regions.lock().unwrap();
@@ -608,11 +608,10 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         // Track that this selector was enabled. We require that all selectors are enabled
         // inside some region (i.e. no floating selectors).
         CURRENT_REGION.with(|current_region| {
-            let mut current_region = current_region.borrow_mut();
+            let current_region = current_region.borrow();
+            let mut current_region = current_region.as_ref().unwrap().lock().unwrap();
 
             current_region
-                .as_mut()
-                .unwrap()
                 .enabled_selectors
                 .entry(*selector)
                 .or_default()
@@ -655,9 +654,11 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         }
 
         CURRENT_REGION.with(|current_region| {
-            let mut current_region = current_region.borrow_mut();
+            let current_region = current_region.borrow();
 
-            if let Some(region) = current_region.as_mut() {
+            if let Some(region) = current_region.as_ref() {
+                let mut region = region.lock().unwrap();
+
                 region.update_extent(column.into(), row);
                 region.track_cell(column.into(), row);
             }
@@ -690,9 +691,11 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         }
 
         CURRENT_REGION.with(|current_region| {
-            let mut current_region = current_region.borrow_mut();
+            let current_region = current_region.borrow();
 
-            if let Some(region) = current_region.as_mut() {
+            if let Some(region) = current_region.as_ref() {
+                let mut region = region.lock().unwrap();
+
                 region.update_extent(column.into(), row);
                 region.track_cell(column.into(), row);
             }
