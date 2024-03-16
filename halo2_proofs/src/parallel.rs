@@ -3,8 +3,15 @@ use std::{
     sync::{Arc, Mutex, MutexGuard, PoisonError},
 };
 
-#[derive(Clone, Debug)]
-pub(crate) struct Parallel<T: Debug>(pub(crate) Arc<Mutex<T>>);
+#[derive(Debug)]
+pub struct Parallel<T: Debug>(Arc<Mutex<T>>);
+
+// derive failed
+impl<T: Debug> Clone for Parallel<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 impl<T: Debug> Parallel<T> {
     pub(crate) fn new(v: T) -> Self {

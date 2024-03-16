@@ -1229,6 +1229,10 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
     }
 
     impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
+        fn is_in_prove_mode(&self) -> bool {
+            true
+        }
+
         fn enter_region<NR, N>(&self, _: N)
         where
             NR: Into<String>,

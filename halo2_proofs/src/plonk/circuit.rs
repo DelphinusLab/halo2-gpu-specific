@@ -294,6 +294,11 @@ impl TableColumn {
 /// This trait allows a [`Circuit`] to direct some backend to assign a witness
 /// for a constraint system.
 pub trait Assignment<F: Field>: Clone {
+    /// Detects whether the assignment is in proving mode or not
+    /// If it is in proving mode, we could avoid assign fixed and
+    /// copy constraints
+    fn is_in_prove_mode(&self) -> bool;
+
     /// Creates a new region and enters into it.
     ///
     /// Panics if we are currently in a region (if `exit_region` was not called).
@@ -410,7 +415,7 @@ pub trait FloorPlanner {
     ///   calls to `Circuit::default().synthesize(config, &mut layouter)`.
     /// - Call `circuit.synthesize(config, &mut layouter)` exactly once.
     fn synthesize<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        cs: &mut CS,
+        cs: &CS,
         circuit: &C,
         config: C::Config,
         constants: Vec<Column<Fixed>>,

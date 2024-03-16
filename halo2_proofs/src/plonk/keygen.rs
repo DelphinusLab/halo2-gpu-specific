@@ -80,8 +80,6 @@ struct AssemblyAssigner<F: Field> {
 
 impl<F: FieldExt> Into<Assembly<F>> for AssemblyAssigner<F> {
     fn into(self) -> Assembly<F> {
-        // todo!("parallel assignment makes self.mapping inconsistent, fix me.");
-
         Assembly {
             k: self.k,
             fixed: Arc::try_unwrap(self.fixed).unwrap().into_inner().unwrap(),
@@ -102,6 +100,10 @@ impl<F: FieldExt> Into<Assembly<F>> for AssemblyAssigner<F> {
 }
 
 impl<F: Field> Assignment<F> for AssemblyAssigner<F> {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
+
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

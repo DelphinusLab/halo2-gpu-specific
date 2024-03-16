@@ -689,6 +689,10 @@ impl<'a, C: CurveAffine> Into<AssignWitnessCollection<'a, C>>
 }
 
 impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollectionAssigner<'a, C> {
+    fn is_in_prove_mode(&self) -> bool {
+        true
+    }
+
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

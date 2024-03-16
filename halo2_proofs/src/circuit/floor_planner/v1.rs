@@ -51,7 +51,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for V1Plan<'a, F, CS> {
 
 impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
     /// Creates a new v1 layouter.
-    pub fn new(cs: &'a mut CS) -> Result<Self, Error> {
+    pub fn new(cs: &'a CS) -> Result<Self, Error> {
         let ret = V1Plan {
             cs,
             regions: vec![],
@@ -64,7 +64,7 @@ impl<'a, F: Field, CS: Assignment<F>> V1Plan<'a, F, CS> {
 
 impl FloorPlanner for V1 {
     fn synthesize<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        cs: &mut CS,
+        cs: &CS,
         circuit: &C,
         config: C::Config,
         constants: Vec<Column<Fixed>>,

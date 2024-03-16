@@ -63,6 +63,10 @@ impl Into<Assembly> for AssemblyAssigner {
 }
 
 impl<F: Field> Assignment<F> for AssemblyAssigner {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
+
     fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,

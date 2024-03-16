@@ -205,7 +205,7 @@ impl<F: Field> RegionLayouter<F> for Parallel<RegionShape> {
         selector: &Selector,
         offset: usize,
     ) -> Result<(), Error> {
-        let mut region_shape = self.0.lock().unwrap();
+        let mut region_shape = self.lock().unwrap();
 
         // Track the selector's fixed column as part of the region's shape.
         region_shape.columns.insert((*selector).into());
@@ -220,7 +220,7 @@ impl<F: Field> RegionLayouter<F> for Parallel<RegionShape> {
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
-        let mut region_shape = self.0.lock().unwrap();
+        let mut region_shape = self.lock().unwrap();
 
         region_shape
             .columns
@@ -253,7 +253,7 @@ impl<F: Field> RegionLayouter<F> for Parallel<RegionShape> {
         advice: Column<Advice>,
         offset: usize,
     ) -> Result<(Cell, Option<F>), Error> {
-        let mut region_shape = self.0.lock().unwrap();
+        let mut region_shape = self.lock().unwrap();
 
         region_shape
             .columns
@@ -277,7 +277,7 @@ impl<F: Field> RegionLayouter<F> for Parallel<RegionShape> {
         offset: usize,
         _to: &'v mut (dyn FnMut() -> Result<Assigned<F>, Error> + 'v),
     ) -> Result<Cell, Error> {
-        let mut region_shape = self.0.lock().unwrap();
+        let mut region_shape = self.lock().unwrap();
 
         region_shape
             .columns
