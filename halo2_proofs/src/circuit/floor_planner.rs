@@ -2,6 +2,7 @@
 
 pub(super) mod single_pass;
 
-mod v1;
 mod flat;
+mod v1;
+pub use flat::FlatFloorPlanner;
 pub use v1::{V1Pass, V1};
