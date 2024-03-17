@@ -164,12 +164,12 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
 
         let region: &dyn RegionLayouter<F> = &shared_region;
         let result = assignment(&region.into())?;
+        self.cs.exit_region();
 
         let mut shape = shared_region.into_inner();
 
         let mut dynamic = self.dynamic.lock().unwrap();
         dynamic.constants_to_assign.append(&mut shape.constants);
-        self.cs.exit_region();
 
         Ok(result)
     }
