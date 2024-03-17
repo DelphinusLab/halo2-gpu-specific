@@ -408,8 +408,6 @@ impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> AssignmentPass<'p, 'a, F, CS> {
                 .fill_from_row(col.inner(), first_unused, default_val.unwrap())?;
         }
 
-        drop(table_columns);
-
         Ok(result)
     }
 

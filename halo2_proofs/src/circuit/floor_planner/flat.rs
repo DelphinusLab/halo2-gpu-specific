@@ -156,7 +156,6 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
 
         let name = name().into();
 
-        let phase1_timer = start_timer!(|| "phase 1 timer");
         self.cs.enter_region(|| name.clone());
 
         // Get shape of the region.
@@ -171,7 +170,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
         let mut dynamic = self.dynamic.lock().unwrap();
         dynamic.constants_to_assign.append(&mut shape.constants);
         self.cs.exit_region();
-        end_timer!(phase1_timer);
+
         Ok(result)
     }
 
