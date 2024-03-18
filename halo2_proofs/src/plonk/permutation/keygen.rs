@@ -23,8 +23,8 @@ use crate::{
 pub(crate) struct ParallelAssembly {
     n: usize,
     columns: Vec<Column<Any>>,
-    aux: Vec<Vec<Option<Rc<RefCell<BTreeSet<(u32, u32)>>>>>>,
-    cycles: BTreeSet<Rc<RefCell<BTreeSet<(u32, u32)>>>>,
+    aux: Vec<Vec<Option<Rc<RefCell<Vec<(u32, u32)>>>>>>,
+    cycles: BTreeSet<Rc<RefCell<Vec<(u32, u32)>>>>,
 }
 
 impl ParallelAssembly {
@@ -71,19 +71,13 @@ impl ParallelAssembly {
         }
 
         let left_cycle = left_cycle.unwrap_or_else(|| {
-            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
-                left_column as u32,
-                left_row as u32,
-            )])));
+            let cycle = Rc::new(RefCell::new(vec![(left_column as u32, left_row as u32)]));
 
             self.aux[left_column][left_row] = Some(cycle.clone());
             cycle
         });
         let right_cycle = right_cycle.unwrap_or_else(|| {
-            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
-                right_column as u32,
-                right_row as u32,
-            )])));
+            let cycle = Rc::new(RefCell::new(vec![(right_column as u32, right_row as u32)]));
 
             self.aux[right_column][right_row] = Some(cycle.clone());
             cycle
@@ -128,7 +122,9 @@ impl From<ParallelAssembly> for Assembly {
         for cycle in assembly.cycles {
             let mut first = None;
 
-            let cycle = cycle.borrow();
+            let mut cycle = cycle.borrow_mut();
+            cycle.sort();
+
             let mut iter = cycle.iter().peekable();
             while let Some(origin) = iter.next() {
                 if first.is_none() {
