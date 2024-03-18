@@ -22,6 +22,8 @@
 // Remove this once we update pasta_curves
 #![allow(unused_imports)]
 
+pub(crate) mod parallel;
+
 pub mod arithmetic;
 pub mod circuit;
 pub use pairing;

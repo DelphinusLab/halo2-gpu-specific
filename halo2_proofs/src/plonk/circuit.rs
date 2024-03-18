@@ -252,7 +252,7 @@ pub struct Selector(pub(crate) usize, bool);
 
 impl Selector {
     /// Enable this selector at the given offset within the given region.
-    pub fn enable<F: Field>(&self, region: &mut Region<F>, offset: usize) -> Result<(), Error> {
+    pub fn enable<F: Field>(&self, region: &Region<F>, offset: usize) -> Result<(), Error> {
         region.enable_selector(|| "", self, offset)
     }
 
@@ -293,7 +293,12 @@ impl TableColumn {
 
 /// This trait allows a [`Circuit`] to direct some backend to assign a witness
 /// for a constraint system.
-pub trait Assignment<F: Field> {
+pub trait Assignment<F: Field>: Clone {
+    /// Detects whether the assignment is in proving mode or not
+    /// If it is in proving mode, we could avoid assign fixed and
+    /// copy constraints
+    fn is_in_prove_mode(&self) -> bool;
+
     /// Creates a new region and enters into it.
     ///
     /// Panics if we are currently in a region (if `exit_region` was not called).
@@ -301,7 +306,7 @@ pub trait Assignment<F: Field> {
     /// Not intended for downstream consumption; use [`Layouter::assign_region`] instead.
     ///
     /// [`Layouter::assign_region`]: crate::circuit::Layouter#method.assign_region
-    fn enter_region<NR, N>(&mut self, name_fn: N)
+    fn enter_region<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR;
@@ -313,11 +318,11 @@ pub trait Assignment<F: Field> {
     /// Not intended for downstream consumption; use [`Layouter::assign_region`] instead.
     ///
     /// [`Layouter::assign_region`]: crate::circuit::Layouter#method.assign_region
-    fn exit_region(&mut self);
+    fn exit_region(&self);
 
     /// Enables a selector at the given row.
     fn enable_selector<A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         selector: &Selector,
         row: usize,
@@ -333,7 +338,7 @@ pub trait Assignment<F: Field> {
 
     /// Assign an advice column value (witness)
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         column: Column<Advice>,
         row: usize,
@@ -347,7 +352,7 @@ pub trait Assignment<F: Field> {
 
     /// Assign a fixed value
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         annotation: A,
         column: Column<Fixed>,
         row: usize,
@@ -361,7 +366,7 @@ pub trait Assignment<F: Field> {
 
     /// Assign two cells to have the same value
     fn copy(
-        &mut self,
+        &self,
         left_column: Column<Any>,
         left_row: usize,
         right_column: Column<Any>,
@@ -370,7 +375,7 @@ pub trait Assignment<F: Field> {
 
     /// Fills a fixed `column` starting from the given `row` with value `to`.
     fn fill_from_row(
-        &mut self,
+        &self,
         column: Column<Fixed>,
         row: usize,
         to: Option<Assigned<F>>,
@@ -381,7 +386,7 @@ pub trait Assignment<F: Field> {
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
     ///
     /// [`Layouter::namespace`]: crate::circuit::Layouter#method.namespace
-    fn push_namespace<NR, N>(&mut self, name_fn: N)
+    fn push_namespace<NR, N>(&self, name_fn: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR;
@@ -391,7 +396,7 @@ pub trait Assignment<F: Field> {
     /// Not intended for downstream consumption; use [`Layouter::namespace`] instead.
     ///
     /// [`Layouter::namespace`]: crate::circuit::Layouter#method.namespace
-    fn pop_namespace(&mut self, gadget_name: Option<String>);
+    fn pop_namespace(&self, gadget_name: Option<String>);
 }
 
 /// A floor planning strategy for a circuit.
@@ -410,7 +415,7 @@ pub trait FloorPlanner {
     ///   calls to `Circuit::default().synthesize(config, &mut layouter)`.
     /// - Call `circuit.synthesize(config, &mut layouter)` exactly once.
     fn synthesize<F: Field, CS: Assignment<F>, C: Circuit<F>>(
-        cs: &mut CS,
+        cs: &CS,
         circuit: &C,
         config: C::Config,
         constants: Vec<Column<Fixed>>,

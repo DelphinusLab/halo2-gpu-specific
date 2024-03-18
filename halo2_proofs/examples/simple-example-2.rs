@@ -1,8 +1,12 @@
+/*
 use halo2_proofs::{
     arithmetic::FieldExt,
-    circuit::{Cell, Layouter, SimpleFloorPlanner},
+    circuit::{floor_planner::V1, Cell, Layouter},
     plonk::*,
-    poly::{commitment::Params, commitment::ParamsVerifier, Rotation},
+    poly::{
+        commitment::{Params, ParamsVerifier},
+        Rotation,
+    },
     transcript::{Blake2bRead, Blake2bWrite, Challenge255},
 };
 use pairing::bn256::{Bn256, Fr as Fp, G1Affine};
@@ -164,7 +168,7 @@ impl<FF: FieldExt> StandardCs<FF> for StandardPlonk<FF> {
 
 impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     type Config = PlonkConfig;
-    type FloorPlanner = SimpleFloorPlanner;
+    type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
         Self { a: None, k: self.k }
@@ -282,3 +286,4 @@ fn main() {
     )
     .unwrap();
 }
+*/

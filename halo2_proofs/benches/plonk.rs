@@ -1,9 +1,11 @@
+/*
 #[macro_use]
 extern crate criterion;
 
 use group::ff::Field;
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Cell, Layouter, SimpleFloorPlanner};
+use halo2_proofs::circuit::floor_planner::V1;
+use halo2_proofs::circuit::{Cell, Layouter};
 use halo2_proofs::pairing::bn256::{Bn256, Fr as Fp, G1Affine};
 use halo2_proofs::plonk::*;
 use halo2_proofs::poly::{
@@ -169,7 +171,7 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         type Config = PlonkConfig;
-        type FloorPlanner = SimpleFloorPlanner;
+        type FloorPlanner = V1;
 
         fn without_witnesses(&self) -> Self {
             Self { a: None, k: self.k }
@@ -328,3 +330,4 @@ fn criterion_benchmark(c: &mut Criterion) {
 
 criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);
+*/

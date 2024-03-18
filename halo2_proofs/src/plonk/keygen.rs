@@ -1,10 +1,15 @@
 #![allow(clippy::int_plus_one)]
 
-use std::ops::Range;
+use std::{
+    marker::PhantomData,
+    ops::Range,
+    sync::{Arc, Mutex},
+};
 
 use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
+use pairing::arithmetic::FieldExt;
 use rayon::prelude::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 
 use super::{
@@ -50,17 +55,56 @@ where
 /// Assembly to be used in circuit synthesis.
 #[derive(Debug)]
 struct Assembly<F: Field> {
+    #[allow(dead_code)]
     k: u32,
     fixed: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
     permutation: permutation::keygen::Assembly,
     selectors: Vec<Vec<bool>>,
     // A range of available rows for assignment and copies.
+    #[allow(dead_code)]
     usable_rows: Range<usize>,
     _marker: std::marker::PhantomData<F>,
 }
 
-impl<F: Field> Assignment<F> for Assembly<F> {
-    fn enter_region<NR, N>(&mut self, _: N)
+/// Assembly to be used in circuit synthesis.
+#[derive(Clone, Debug)]
+struct AssemblyAssigner<F: Field> {
+    k: u32,
+    fixed: Arc<Mutex<Vec<Polynomial<Assigned<F>, LagrangeCoeff>>>>,
+    permutation: Arc<Mutex<permutation::keygen::ParallelAssembly>>,
+    selectors: Arc<Mutex<Vec<Vec<bool>>>>,
+    // A range of available rows for assignment and copies.
+    usable_rows: Range<usize>,
+    _marker: std::marker::PhantomData<F>,
+}
+
+impl<F: FieldExt> Into<Assembly<F>> for AssemblyAssigner<F> {
+    fn into(self) -> Assembly<F> {
+        Assembly {
+            k: self.k,
+            fixed: Arc::try_unwrap(self.fixed).unwrap().into_inner().unwrap(),
+            permutation: permutation::keygen::Assembly::from(
+                Arc::try_unwrap(self.permutation)
+                    .unwrap()
+                    .into_inner()
+                    .unwrap(),
+            ),
+            selectors: Arc::try_unwrap(self.selectors)
+                .unwrap()
+                .into_inner()
+                .unwrap(),
+            usable_rows: self.usable_rows,
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<F: Field> Assignment<F> for AssemblyAssigner<F> {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
+
+    fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -68,11 +112,11 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn exit_region(&mut self) {
+    fn exit_region(&self) {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
@@ -81,7 +125,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        self.selectors[selector.0][row] = true;
+        let mut selectors = self.selectors.lock().unwrap();
+        selectors[selector.0][row] = true;
 
         Ok(())
     }
@@ -96,7 +141,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Advice>,
         _: usize,
@@ -113,7 +158,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Fixed>,
         row: usize,
@@ -129,8 +174,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        *self
-            .fixed
+        let mut fixed = self.fixed.lock().unwrap();
+        *fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? = to()?.into();
@@ -139,7 +184,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
     }
 
     fn copy(
-        &mut self,
+        &self,
         left_column: Column<Any>,
         left_row: usize,
         right_column: Column<Any>,
@@ -149,12 +194,12 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        self.permutation
-            .copy(left_column, left_row, right_column, right_row)
+        let mut permutation = self.permutation.lock().unwrap();
+        permutation.copy(left_column, left_row, right_column, right_row)
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         column: Column<Fixed>,
         from_row: usize,
         to: Option<Assigned<F>>,
@@ -163,10 +208,8 @@ impl<F: Field> Assignment<F> for Assembly<F> {
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        let col = self
-            .fixed
-            .get_mut(column.index())
-            .ok_or(Error::BoundsFailure)?;
+        let mut fixed = self.fixed.lock().unwrap();
+        let col = fixed.get_mut(column.index()).ok_or(Error::BoundsFailure)?;
 
         for row in self.usable_rows.clone().skip(from_row) {
             col[row] = to.ok_or(Error::Synthesis)?;
@@ -175,7 +218,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -183,7 +226,7 @@ impl<F: Field> Assignment<F> for Assembly<F> {
         // Do nothing; we don't care about namespaces in this context.
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
@@ -203,13 +246,22 @@ where
         return Err(Error::not_enough_rows_available(params.k));
     }
 
-    let mut assembly: Assembly<C::Scalar> = Assembly {
+    let mut assembly: AssemblyAssigner<C::Scalar> = AssemblyAssigner {
         k: params.k,
-        fixed: vec![domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+        fixed: Arc::new(Mutex::new(vec![
+            domain.empty_lagrange_assigned();
+            cs.num_fixed_columns
+        ])),
+        permutation: Arc::new(Mutex::new(permutation::keygen::ParallelAssembly::new(
+            params.n as usize,
+            &cs.permutation,
+        ))),
+        selectors: Arc::new(Mutex::new(vec![
+            vec![false; params.n as usize];
+            cs.num_selectors
+        ])),
         usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
-        _marker: std::marker::PhantomData,
+        _marker: PhantomData,
     };
 
     // Synthesize the circuit to obtain URS
@@ -219,6 +271,8 @@ where
         config,
         cs.constants.clone(),
     )?;
+
+    let assembly: Assembly<C::Scalar> = assembly.into();
 
     let mut fixed = batch_invert_assigned(assembly.fixed);
     let (cs, selector_polys) = cs.compress_selectors(assembly.selectors);
@@ -264,11 +318,20 @@ where
         return Err(Error::not_enough_rows_available(params.k));
     }
 
-    let mut assembly: Assembly<C::Scalar> = Assembly {
+    let mut assembly: AssemblyAssigner<C::Scalar> = AssemblyAssigner {
         k: params.k,
-        fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+        fixed: Arc::new(Mutex::new(vec![
+            vk.domain.empty_lagrange_assigned();
+            cs.num_fixed_columns
+        ])),
+        permutation: Arc::new(Mutex::new(permutation::keygen::ParallelAssembly::new(
+            params.n as usize,
+            &cs.permutation,
+        ))),
+        selectors: Arc::new(Mutex::new(vec![
+            vec![false; params.n as usize];
+            cs.num_selectors
+        ])),
         usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
         _marker: std::marker::PhantomData,
     };
@@ -280,6 +343,8 @@ where
         config,
         cs.constants.clone(),
     )?;
+
+    let assembly: Assembly<C::Scalar> = assembly.into();
 
     let timer = start_timer!(|| "unnecessary part");
     let (cs, fixed) = if false {
@@ -513,11 +578,20 @@ where
         return Err(Error::not_enough_rows_available(params.k));
     }
 
-    let mut assembly: Assembly<C::Scalar> = Assembly {
+    let mut assembly: AssemblyAssigner<C::Scalar> = AssemblyAssigner {
         k: params.k,
-        fixed: vec![vk.domain.empty_lagrange_assigned(); cs.num_fixed_columns],
-        permutation: permutation::keygen::Assembly::new(params.n as usize, &cs.permutation),
-        selectors: vec![vec![false; params.n as usize]; cs.num_selectors],
+        fixed: Arc::new(Mutex::new(vec![
+            vk.domain.empty_lagrange_assigned();
+            cs.num_fixed_columns
+        ])),
+        permutation: Arc::new(Mutex::new(permutation::keygen::ParallelAssembly::new(
+            params.n as usize,
+            &cs.permutation,
+        ))),
+        selectors: Arc::new(Mutex::new(vec![
+            vec![false; params.n as usize];
+            cs.num_selectors
+        ])),
         usable_rows: 0..params.n as usize - (cs.blinding_factors() + 1),
         _marker: std::marker::PhantomData,
     };
@@ -529,6 +603,9 @@ where
         config,
         cs.constants.clone(),
     )?;
+
+    let assembly: Assembly<C::Scalar> = assembly.into();
+
     let fixed = batch_invert_assigned(assembly.fixed);
     Ok((fixed, assembly.permutation))
 }

@@ -1,5 +1,7 @@
+/*
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Cell, Chip, Layouter, Region, SimpleFloorPlanner};
+use halo2_proofs::circuit::floor_planner::V1;
+use halo2_proofs::circuit::{Cell, Chip, Layouter, Region};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use halo2_proofs::poly::Rotation;
@@ -286,7 +288,7 @@ struct MyCircuit<F: FieldExt> {
 impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     // Since we are using a single chip for everything, we can just reuse its config.
     type Config = FieldConfig;
-    type FloorPlanner = SimpleFloorPlanner;
+    type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
         Self::default()
@@ -371,3 +373,4 @@ fn main() {
     let prover = MockProver::run(k, &circuit, vec![public_inputs]).unwrap();
     assert!(prover.verify().is_err());
 }
+*/

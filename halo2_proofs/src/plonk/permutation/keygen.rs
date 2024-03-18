@@ -1,3 +1,9 @@
+use std::{
+    cell::RefCell,
+    collections::{BTreeSet, HashMap, HashSet},
+    rc::Rc,
+};
+
 use ark_std::{end_timer, start_timer};
 use ff::Field;
 use group::Curve;
@@ -13,32 +19,21 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone)]
-pub struct Assembly {
-    pub(crate) columns: Vec<Column<Any>>,
-    pub(crate) mapping: Vec<Vec<(u32, u32)>>,
-    pub(crate) aux: Vec<Vec<(u32, u32)>>,
-    pub(crate) sizes: Vec<Vec<usize>>,
+#[derive(Debug)]
+pub(crate) struct ParallelAssembly {
+    n: usize,
+    columns: Vec<Column<Any>>,
+    aux: Vec<Vec<Option<Rc<RefCell<BTreeSet<(u32, u32)>>>>>>,
+    cycles: BTreeSet<Rc<RefCell<BTreeSet<(u32, u32)>>>>,
 }
 
-impl Assembly {
+impl ParallelAssembly {
     pub(crate) fn new(n: usize, p: &Argument) -> Self {
-        // Initialize the copy vector to keep track of copy constraints in all
-        // the permutation arguments.
-        let mut columns = vec![];
-        for i in 0..p.columns.len() {
-            // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
-            columns.push((0..n).map(|j| (i as u32, j as u32)).collect());
-        }
-
-        // Before any equality constraints are applied, every cell in the permutation is
-        // in a 1-cycle; therefore mapping and aux are identical, because every cell is
-        // its own distinguished element.
-        Assembly {
+        Self {
+            n,
             columns: p.columns.clone(),
-            mapping: columns.clone(),
-            aux: columns,
-            sizes: vec![vec![1usize; n]; p.columns.len()],
+            aux: vec![vec![None; n]; p.columns.len()],
+            cycles: BTreeSet::default(),
         }
     }
 
@@ -61,47 +56,99 @@ impl Assembly {
             .ok_or(Error::ColumnNotInPermutation(right_column))?;
 
         // Check bounds
-        if left_row >= self.mapping[left_column].len()
-            || right_row >= self.mapping[right_column].len()
-        {
+        if left_row >= self.n || right_row >= self.n {
             return Err(Error::BoundsFailure);
         }
 
-        // See book/src/design/permutation.md for a description of this algorithm.
-
-        let mut left_cycle = self.aux[left_column][left_row];
-        let mut right_cycle = self.aux[right_column][right_row];
+        let left_cycle = self.aux[left_column][left_row].clone();
+        let right_cycle = self.aux[right_column][right_row].clone();
 
         // If left and right are in the same cycle, do nothing.
-        if left_cycle == right_cycle {
-            return Ok(());
-        }
-
-        if self.sizes[left_cycle.0 as usize][left_cycle.1 as usize]
-            < self.sizes[right_cycle.0 as usize][right_cycle.1 as usize]
-        {
-            std::mem::swap(&mut left_cycle, &mut right_cycle);
-        }
-
-        // Merge the right cycle into the left one.
-        self.sizes[left_cycle.0 as usize][left_cycle.1 as usize] +=
-            self.sizes[right_cycle.0 as usize][right_cycle.1 as usize];
-        let mut i = right_cycle;
-        loop {
-            self.aux[i.0 as usize][i.1 as usize] = left_cycle;
-            i = self.mapping[i.0 as usize][i.1 as usize];
-            if i == right_cycle {
-                break;
+        if left_cycle.is_some() && right_cycle.is_some() {
+            if Rc::ptr_eq(left_cycle.as_ref().unwrap(), right_cycle.as_ref().unwrap()) {
+                return Ok(());
             }
         }
 
-        let tmp = self.mapping[left_column][left_row];
-        self.mapping[left_column][left_row] = self.mapping[right_column][right_row];
-        self.mapping[right_column][right_row] = tmp;
+        let left_cycle = left_cycle.unwrap_or_else(|| {
+            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
+                left_column as u32,
+                left_row as u32,
+            )])));
+
+            self.aux[left_column][left_row] = Some(cycle.clone());
+            cycle
+        });
+        let right_cycle = right_cycle.unwrap_or_else(|| {
+            let cycle = Rc::new(RefCell::new(BTreeSet::from([(
+                right_column as u32,
+                right_row as u32,
+            )])));
+
+            self.aux[right_column][right_row] = Some(cycle.clone());
+            cycle
+        });
+
+        let (small_cycle, big_cycle) =
+            if left_cycle.borrow().len() <= right_cycle.borrow_mut().len() {
+                (left_cycle, right_cycle)
+            } else {
+                (right_cycle, left_cycle)
+            };
+
+        // merge small cycle into big cycle
+        self.cycles.remove(&small_cycle);
+        self.cycles.insert(big_cycle.clone());
+
+        for (col, row) in small_cycle.borrow().iter() {
+            self.aux[*col as usize][*row as usize] = Some(big_cycle.clone());
+        }
+
+        let mut small_cycle = Rc::try_unwrap(small_cycle).unwrap().into_inner();
+        big_cycle.borrow_mut().append(&mut small_cycle);
 
         Ok(())
     }
+}
 
+#[derive(Debug, Clone)]
+pub struct Assembly {
+    pub(crate) mapping: Vec<Vec<(u32, u32)>>,
+}
+
+impl From<ParallelAssembly> for Assembly {
+    fn from(assembly: ParallelAssembly) -> Self {
+        let mut mapping: Vec<Vec<(u32, u32)>> = vec![];
+
+        for i in 0..assembly.columns.len() {
+            // Computes [(i, 0), (i, 1), ..., (i, n - 1)]
+            mapping.push((0..assembly.n).map(|j| (i as u32, j as u32)).collect());
+        }
+
+        for cycle in assembly.cycles {
+            let mut first = None;
+
+            let cycle = cycle.borrow();
+            let mut iter = cycle.iter().peekable();
+            while let Some(origin) = iter.next() {
+                if first.is_none() {
+                    first = Some(*origin);
+                }
+
+                if let Some(permuted) = iter.peek() {
+                    mapping[origin.0 as usize][origin.1 as usize] = **permuted;
+                } else {
+                    // It's last element
+                    mapping[origin.0 as usize][origin.1 as usize] = first.unwrap();
+                }
+            }
+        }
+
+        Self { mapping }
+    }
+}
+
+impl Assembly {
     pub(crate) fn build_vk<C: CurveAffine>(
         self,
         params: &Params<C>,
@@ -216,4 +263,35 @@ impl Assembly {
             cosets,
         }
     }
+}
+
+#[test]
+fn test_parallel_assembly() {
+    let col0 = Column::new(0, Any::Advice);
+    let col1 = Column::new(1, Any::Advice);
+    let col2 = Column::new(2, Any::Advice);
+
+    let argument = Argument {
+        columns: vec![col0, col1, col2],
+    };
+
+    let mut assembly = ParallelAssembly::new(2, &argument);
+
+    // A <-> B
+    assembly.copy(col0, 0, col1, 0).unwrap();
+
+    // C <-> D
+    assembly.copy(col1, 1, col2, 1).unwrap();
+
+    // B <-> C
+    assembly.copy(col1, 0, col1, 1).unwrap();
+
+    let assembly: Assembly = assembly.into();
+
+    assert_eq!(assembly.mapping[0][0], (1, 0));
+    assert_eq!(assembly.mapping[0][1], (0, 1));
+    assert_eq!(assembly.mapping[1][0], (1, 1));
+    assert_eq!(assembly.mapping[1][1], (2, 1));
+    assert_eq!(assembly.mapping[2][0], (2, 0));
+    assert_eq!(assembly.mapping[2][1], (0, 0));
 }

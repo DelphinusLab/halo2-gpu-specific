@@ -1,4 +1,5 @@
 use crate::helpers::AssignWitnessCollection;
+use ark_std::iterable::Iterable;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
 use ff::Field;
@@ -228,9 +229,9 @@ pub fn create_proof_ext<
                 pk,
                 circuit,
                 instances,
-                &mut advice
+                &advice
                     .iter_mut()
-                    .map(|x| &mut x.values[..])
+                    .map(|x| (&mut x.values[..]) as *mut [_])
                     .collect::<Vec<_>>()[..],
             );
             end_timer!(timer);
@@ -737,7 +738,7 @@ pub fn create_proof_from_witness<
     mut rng: R,
     transcript: &mut T,
     fd: &mut File,
-    use_gwc: bool
+    use_gwc: bool,
 ) -> Result<(), Error> {
     let meta = &pk.vk.cs;
     let domain = &pk.vk.domain;
@@ -1207,7 +1208,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
     pk: &'a ProvingKey<C>,
     circuit: &'a ConcreteCircuit,
     instances: &'a [&'a [C::Scalar]],
-    advices: &'a mut [&'a mut [C::Scalar]],
+    advices: &'a [*mut [C::Scalar]],
 ) {
     use Assigned;
     use Column;
@@ -1219,23 +1220,28 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
     let meta = &pk.vk.cs;
 
+    #[derive(Clone)]
     struct WitnessCollection<'a, F: Field> {
-        pub advice: &'a mut [&'a mut [F]],
+        pub advice: &'a [*mut [F]],
         instances: &'a [&'a [F]],
         usable_rows: core::ops::RangeTo<usize>,
         _marker: std::marker::PhantomData<F>,
     }
 
     impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
-        fn enter_region<NR, N>(&mut self, _: N)
+        fn is_in_prove_mode(&self) -> bool {
+            true
+        }
+
+        fn enter_region<NR, N>(&self, _: N)
         where
             NR: Into<String>,
             N: FnOnce() -> NR,
         {
         }
-        fn exit_region(&mut self) {}
+        fn exit_region(&self) {}
 
-        fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+        fn enable_selector<A, AR>(&self, _: A, _: &Selector, _: usize) -> Result<(), Error>
         where
             A: FnOnce() -> AR,
             AR: Into<String>,
@@ -1257,7 +1263,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
         }
 
         fn assign_advice<V, VR, A, AR>(
-            &mut self,
+            &self,
             _: A,
             column: Column<Advice>,
             row: usize,
@@ -1282,15 +1288,15 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
             *self
                 .advice
-                .get_mut(column.index())
-                .and_then(|v| v.get_mut(row))
+                .get(column.index())
+                .and_then(|v| unsafe { (*v).as_mut().unwrap() }.get_mut(row))
                 .ok_or(Error::BoundsFailure)? = v;
 
             Ok(())
         }
 
         fn assign_fixed<V, VR, A, AR>(
-            &mut self,
+            &self,
             _: A,
             _: Column<Fixed>,
             _: usize,
@@ -1307,20 +1313,14 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
             Ok(())
         }
 
-        fn copy(
-            &mut self,
-            _: Column<Any>,
-            _: usize,
-            _: Column<Any>,
-            _: usize,
-        ) -> Result<(), Error> {
+        fn copy(&self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
             // We only care about advice columns here
 
             Ok(())
         }
 
         fn fill_from_row(
-            &mut self,
+            &self,
             _: Column<Fixed>,
             _: usize,
             _: Option<Assigned<F>>,
@@ -1328,7 +1328,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
             Ok(())
         }
 
-        fn push_namespace<NR, N>(&mut self, _: N)
+        fn push_namespace<NR, N>(&self, _: N)
         where
             NR: Into<String>,
             N: FnOnce() -> NR,
@@ -1336,7 +1336,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
             // Do nothing; we don't care about namespaces in this context.
         }
 
-        fn pop_namespace(&mut self, _: Option<String>) {
+        fn pop_namespace(&self, _: Option<String>) {
             // Do nothing; we don't care about namespaces in this context.
         }
     }

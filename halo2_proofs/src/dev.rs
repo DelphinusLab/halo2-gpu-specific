@@ -1,13 +1,21 @@
 //! Tools for developing circuits.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::iter;
+use std::marker::PhantomData;
 use std::ops::{Add, Mul, Neg, Range};
+use std::rc::Rc;
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::MutexGuard;
 
 use ff::Field;
 
+use crate::parallel::Parallel;
 use crate::plonk::Assigned;
 use crate::{
     arithmetic::{FieldExt, Group},
@@ -33,6 +41,10 @@ mod graph;
 #[cfg(feature = "dev-graph")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dev-graph")))]
 pub use graph::{circuit_dot_graph, layout::CircuitLayout};
+
+lazy_static! {
+    static ref REGION_LOCK: Mutex<()> = Mutex::new(());
+}
 
 /// The location within the circuit at which a particular [`VerifyFailure`] occurred.
 #[derive(Debug, PartialEq)]
@@ -490,9 +502,9 @@ pub struct MockProver<F: Group + Field> {
 
     /// The regions in the circuit.
     regions: Vec<Region>,
-    /// The current region being assigned to. Will be `None` after the circuit has been
-    /// synthesized.
-    current_region: Option<Region>,
+    // The current region being assigned to. Will be `None` after the circuit has been
+    // synthesized.
+    current_region: Option<(Region, MutexGuard<'static, ()>)>,
 
     // The fixed cells in the circuit, arranged as [column][row].
     fixed: Vec<Vec<CellValue<F>>>,
@@ -503,62 +515,119 @@ pub struct MockProver<F: Group + Field> {
 
     selectors: Vec<Vec<bool>>,
 
+    permutation: permutation::keygen::ParallelAssembly,
+
+    // A range of available rows for assignment and copies.
+    usable_rows: Range<usize>,
+}
+
+#[derive(Debug)]
+pub struct MockVerifier<F: Group + Field> {
+    n: u32,
+    cs: ConstraintSystem<F>,
+
+    /// The regions in the circuit.
+    regions: Vec<Region>,
+
+    // The fixed cells in the circuit, arranged as [column][row].
+    fixed: Vec<Vec<CellValue<F>>>,
+    // The advice cells in the circuit, arranged as [column][row].
+    advice: Vec<Vec<CellValue<F>>>,
+    // The instance cells in the circuit, arranged as [column][row].
+    instance: Vec<Vec<F>>,
+
     permutation: permutation::keygen::Assembly,
 
     // A range of available rows for assignment and copies.
     usable_rows: Range<usize>,
 }
 
-impl<F: Field + Group> Assignment<F> for MockProver<F> {
-    fn enter_region<NR, N>(&mut self, name: N)
+impl<F: Group + Field> Into<MockVerifier<F>> for MockProver<F> {
+    fn into(self) -> MockVerifier<F> {
+        MockVerifier {
+            n: self.n,
+            cs: self.cs,
+            regions: self.regions,
+            fixed: self.fixed,
+            advice: self.advice,
+            instance: self.instance,
+            permutation: self.permutation.into(),
+            usable_rows: self.usable_rows,
+        }
+    }
+}
+
+impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
+    fn is_in_prove_mode(&self) -> bool {
+        false
+    }
+
+    fn enter_region<NR, N>(&self, name: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
     {
-        assert!(self.current_region.is_none());
-        self.current_region = Some(Region {
-            name: name().into(),
-            columns: HashSet::default(),
-            rows: None,
-            enabled_selectors: HashMap::default(),
-            cells: HashMap::default(),
-        });
+        let region_lock = REGION_LOCK.lock().unwrap();
+
+        let mut prover = self.lock().unwrap();
+
+        assert!(prover.current_region.is_none());
+        prover.current_region = Some((
+            Region {
+                name: name().into(),
+                columns: HashSet::default(),
+                rows: None,
+                enabled_selectors: HashMap::default(),
+                cells: HashMap::default(),
+            },
+            region_lock,
+        ));
     }
 
-    fn exit_region(&mut self) {
-        self.regions.push(self.current_region.take().unwrap());
+    fn exit_region(&self) {
+        let mut prover = self.lock().unwrap();
+
+        let (region, _) = prover.current_region.take().unwrap();
+        prover.regions.push(region);
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
         // Track that this selector was enabled. We require that all selectors are enabled
         // inside some region (i.e. no floating selectors).
-        self.current_region
+        prover
+            .current_region
             .as_mut()
             .unwrap()
+            .0
             .enabled_selectors
             .entry(*selector)
             .or_default()
             .push(row);
 
-        self.selectors[selector.0][row] = true;
+        prover.selectors[selector.0][row] = true;
 
         Ok(())
     }
 
     fn query_instance(&self, column: Column<Instance>, row: usize) -> Result<Option<F>, Error> {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        self.instance
+        prover
+            .instance
             .get(column.index())
             .and_then(|column| column.get(row))
             .map(|v| Some(*v))
@@ -566,7 +635,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Advice>,
         row: usize,
@@ -578,16 +647,18 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        if let Some(region) = self.current_region.as_mut() {
+        if let Some((region, _)) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
         }
 
-        *self
+        *prover
             .advice
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
@@ -597,7 +668,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Fixed>,
         row: usize,
@@ -609,16 +680,18 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        if !self.usable_rows.contains(&row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        if let Some(region) = self.current_region.as_mut() {
+        if let Some((region, _)) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
         }
 
-        *self
+        *prover
             .fixed
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
@@ -628,38 +701,46 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
     }
 
     fn copy(
-        &mut self,
+        &self,
         left_column: Column<Any>,
         left_row: usize,
         right_column: Column<Any>,
         right_row: usize,
     ) -> Result<(), crate::plonk::Error> {
-        if !self.usable_rows.contains(&left_row) || !self.usable_rows.contains(&right_row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let mut prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&left_row) || !prover.usable_rows.contains(&right_row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        self.permutation
+        prover
+            .permutation
             .copy(left_column, left_row, right_column, right_row)
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         col: Column<Fixed>,
         from_row: usize,
         to: Option<Assigned<F>>,
     ) -> Result<(), Error> {
-        if !self.usable_rows.contains(&from_row) {
-            return Err(Error::not_enough_rows_available(self.k));
+        let prover = self.lock().unwrap();
+
+        if !prover.usable_rows.contains(&from_row) {
+            return Err(Error::not_enough_rows_available(prover.k));
         }
 
-        for row in self.usable_rows.clone().skip(from_row) {
+        let usable_rows = prover.usable_rows.clone();
+        drop(prover);
+
+        for row in usable_rows.skip(from_row) {
             self.assign_fixed(|| "", col, row, || to.ok_or(Error::Synthesis))?;
         }
 
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -667,7 +748,7 @@ impl<F: Field + Group> Assignment<F> for MockProver<F> {
         // TODO: Do something with namespaces :)
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // TODO: Do something with namespaces :)
     }
 }
@@ -679,7 +760,7 @@ impl<F: FieldExt> MockProver<F> {
         k: u32,
         circuit: &ConcreteCircuit,
         instance: Vec<Vec<F>>,
-    ) -> Result<Self, Error> {
+    ) -> Result<MockVerifier<F>, Error> {
         let n = 1 << k;
 
         let mut cs = ConstraintSystem::default();
@@ -723,10 +804,10 @@ impl<F: FieldExt> MockProver<F> {
             };
             cs.num_advice_columns
         ];
-        let permutation = permutation::keygen::Assembly::new(n, &cs.permutation);
+        let permutation = permutation::keygen::ParallelAssembly::new(n, &cs.permutation);
         let constants = cs.constants.clone();
 
-        let mut prover = MockProver {
+        let mut prover = Parallel::new(MockProver {
             k,
             n: n as u32,
             cs,
@@ -738,9 +819,11 @@ impl<F: FieldExt> MockProver<F> {
             selectors,
             permutation,
             usable_rows: 0..usable_rows,
-        };
+        });
 
         ConcreteCircuit::FloorPlanner::synthesize(&mut prover, circuit, config, constants)?;
+
+        let mut prover = prover.into_inner();
 
         let (cs, selector_polys) = prover.cs.compress_selectors(prover.selectors.clone());
         prover.cs = cs;
@@ -752,9 +835,11 @@ impl<F: FieldExt> MockProver<F> {
             v
         }));
 
-        Ok(prover)
+        Ok(prover.into())
     }
+}
 
+impl<F: FieldExt> MockVerifier<F> {
     /// Returns `Ok(())` if this `MockProver` is satisfied, or a list of errors indicating
     /// the reasons that the circuit is not satisfied.
     pub fn verify(&self) -> Result<(), Vec<VerifyFailure>> {
@@ -1076,7 +1161,7 @@ mod tests {
 
     use super::{FailureLocation, MockProver, VerifyFailure};
     use crate::{
-        circuit::{Layouter, SimpleFloorPlanner},
+        circuit::{floor_planner::V1, Layouter},
         plonk::{
             Advice, Any, Circuit, Column, ConstraintSystem, Error, Expression, Selector,
             TableColumn,
@@ -1098,7 +1183,7 @@ mod tests {
 
         impl Circuit<Fp> for FaultyCircuit {
             type Config = FaultyCircuitConfig;
-            type FloorPlanner = SimpleFloorPlanner;
+            type FloorPlanner = V1;
 
             fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
                 let a = meta.advice_column();
@@ -1124,7 +1209,7 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl Layouter<Fp>,
+                layouter: impl Layouter<Fp>,
             ) -> Result<(), Error> {
                 layouter.assign_region(
                     || "Faulty synthesis",
@@ -1171,7 +1256,7 @@ mod tests {
 
         impl Circuit<Fp> for FaultyCircuit {
             type Config = FaultyCircuitConfig;
-            type FloorPlanner = SimpleFloorPlanner;
+            type FloorPlanner = V1;
 
             fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
                 let a = meta.advice_column();
@@ -1199,11 +1284,11 @@ mod tests {
             fn synthesize(
                 &self,
                 config: Self::Config,
-                mut layouter: impl Layouter<Fp>,
+                layouter: impl Layouter<Fp>,
             ) -> Result<(), Error> {
                 layouter.assign_table(
                     || "Doubling table",
-                    |mut table| {
+                    |table| {
                         (1..(1 << (K - 1)))
                             .map(|i| {
                                 table.assign_cell(

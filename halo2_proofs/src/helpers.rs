@@ -21,6 +21,7 @@ use num_derive::FromPrimitive;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::io::Seek;
 use std::marker::PhantomData;
+use std::sync::{Arc, Mutex};
 use std::{
     fs::{File, OpenOptions},
     io,
@@ -664,11 +665,35 @@ pub struct AssignWitnessCollection<'a, C: CurveAffine> {
     pub advice: Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>,
     pub instances: &'a [&'a [C::Scalar]],
     pub usable_rows: RangeTo<usize>,
-    pub _marker: std::marker::PhantomData<C>,
 }
 
-impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C> {
-    fn enter_region<NR, N>(&mut self, _: N)
+#[derive(Clone, Debug)]
+pub struct AssignWitnessCollectionAssigner<'a, C: CurveAffine> {
+    pub k: u32,
+    pub advice: Arc<Mutex<Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>>>,
+    pub instances: &'a [&'a [C::Scalar]],
+    pub usable_rows: RangeTo<usize>,
+}
+
+impl<'a, C: CurveAffine> Into<AssignWitnessCollection<'a, C>>
+    for AssignWitnessCollectionAssigner<'a, C>
+{
+    fn into(self) -> AssignWitnessCollection<'a, C> {
+        AssignWitnessCollection {
+            k: self.k,
+            advice: Arc::try_unwrap(self.advice).unwrap().into_inner().unwrap(),
+            instances: self.instances,
+            usable_rows: self.usable_rows,
+        }
+    }
+}
+
+impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollectionAssigner<'a, C> {
+    fn is_in_prove_mode(&self) -> bool {
+        true
+    }
+
+    fn enter_region<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -676,11 +701,11 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn exit_region(&mut self) {
+    fn exit_region(&self) {
         // Do nothing; we don't care about regions in this context.
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&self, _: A, _: &Selector, _: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
@@ -707,7 +732,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
     }
 
     fn assign_advice<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         column: Column<Advice>,
         row: usize,
@@ -723,8 +748,9 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
             return Err(Error::not_enough_rows_available(self.k));
         }
 
-        *self
-            .advice
+        let mut advice = self.advice.lock().unwrap();
+
+        *advice
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? = to()?.into();
@@ -733,7 +759,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
     }
 
     fn assign_fixed<V, VR, A, AR>(
-        &mut self,
+        &self,
         _: A,
         _: Column<Fixed>,
         _: usize,
@@ -750,14 +776,14 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         Ok(())
     }
 
-    fn copy(&mut self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+    fn copy(&self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
         // We only care about advice columns here
 
         Ok(())
     }
 
     fn fill_from_row(
-        &mut self,
+        &self,
         _: Column<Fixed>,
         _: usize,
         _: Option<Assigned<C::Scalar>>,
@@ -765,7 +791,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         Ok(())
     }
 
-    fn push_namespace<NR, N>(&mut self, _: N)
+    fn push_namespace<NR, N>(&self, _: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
@@ -773,7 +799,7 @@ impl<'a, C: CurveAffine> Assignment<C::Scalar> for AssignWitnessCollection<'a, C
         // Do nothing; we don't care about namespaces in this context.
     }
 
-    fn pop_namespace(&mut self, _: Option<String>) {
+    fn pop_namespace(&self, _: Option<String>) {
         // Do nothing; we don't care about namespaces in this context.
     }
 }
@@ -793,10 +819,7 @@ impl<B: Clone, F: FieldExt> Serializable for Polynomial<Assigned<F>, B> {
 impl ParaSerializable for Assembly {
     fn vec_fetch(fd: &mut File) -> io::Result<Self> {
         let assembly = Assembly {
-            columns: vec![], //Vec::fetch(reader)?,
             mapping: Vec::<Vec<(u32, u32)>>::vec_fetch(fd)?,
-            aux: vec![],   //Vec::fetch(reader)?,
-            sizes: vec![], //Vec::fetch(reader)?,
         };
         Ok(assembly)
     }
@@ -805,8 +828,7 @@ impl ParaSerializable for Assembly {
     fn vec_store(&self, fd: &mut File) -> io::Result<()> {
         //self.columns.store(writer)?;
         self.mapping.vec_store(fd)?;
-        //self.aux.store(writer)?;
-        //self.sizes.store(writer)?;
+
         Ok(())
     }
 }
@@ -826,16 +848,18 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
 
         let domain = &pk.get_vk().domain;
         let meta = &pk.get_vk().cs;
-        let mut witness = AssignWitnessCollection::<C> {
+        let mut witness = AssignWitnessCollectionAssigner::<C> {
             k: params.k,
-            advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+            advice: Arc::new(Mutex::new(vec![
+                domain.empty_lagrange_assigned();
+                meta.num_advice_columns
+            ])),
             instances,
             // The prover will not be allowed to assign values to advice
             // cells that exist within inactive rows, which include some
             // number of blinding factors and an extra row for use in the
             // permutation argument.
             usable_rows: ..unusable_rows_start,
-            _marker: std::marker::PhantomData,
         };
 
         // Synthesize the circuit to obtain the witness and other information.
@@ -845,6 +869,8 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
             config.clone(),
             meta.constants.clone(),
         )?;
+
+        let witness: AssignWitnessCollection<_> = witness.into();
 
         let bundlesize = params.k + 5;
         let advice = batch_invert_assigned(witness.advice);
