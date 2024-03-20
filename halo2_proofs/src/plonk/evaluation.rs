@@ -1,5 +1,6 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
+use crate::helpers::Serializable;
 use crate::plonk::symbol::ProveExpression;
 use crate::plonk::symbol::ProveExpressionUnit;
 use crate::plonk::symbol;
@@ -889,6 +890,8 @@ impl<C: CurveAffine> Evaluator<C> {
         let l_last = &pk.l_last;
         let l_active_row = &pk.l_active_row;
         let p = &pk.vk.cs.permutation;
+
+        
 
         let timer = ark_std::start_timer!(|| "permutations");
         // Permutations

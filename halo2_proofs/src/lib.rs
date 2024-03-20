@@ -1,3 +1,6 @@
+#![allow(incomplete_features)]
+#![feature(generic_const_exprs)]
+
 //! # halo2_proofs
 #![feature(local_key_cell_methods)]
 

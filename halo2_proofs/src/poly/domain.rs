@@ -28,7 +28,7 @@ pub struct EvaluationDomain<G: Group> {
     omega_inv: G::Scalar,
     extended_omega: G::Scalar,
     extended_omega_inv: G::Scalar,
-    pub(crate) g_coset: G::Scalar,
+    pub g_coset: G::Scalar,
     pub(crate) g_coset_inv: G::Scalar,
     quotient_poly_degree: u64,
     pub(crate) ifft_divisor: G::Scalar,
@@ -37,7 +37,7 @@ pub struct EvaluationDomain<G: Group> {
     barycentric_weight: G::Scalar,
 }
 
-impl<G: Group> EvaluationDomain<G> {
+impl<G: Group + std::fmt::Debug> EvaluationDomain<G> {
     /// This constructs a new evaluation domain object based on the provided
     /// values $j, k$.
     pub fn new(j: u32, k: u32) -> Self {
@@ -56,6 +56,7 @@ impl<G: Group> EvaluationDomain<G> {
         while (1 << extended_k) < (n * quotient_poly_degree) {
             extended_k += 1;
         }
+        println!("extended_k = {}", extended_k);
 
         let mut extended_omega = G::Scalar::root_of_unity();
 

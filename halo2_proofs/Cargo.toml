@@ -55,6 +55,8 @@ memmap = "0.7"
 plotters = { version = "0.3.0", optional = true }
 tabbycat = { version = "0.1", features = ["attributes"], optional = true }
 
+poly-optimizer = { path = "../../polyeval/" }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # plotters depends on web-sys, which eventually depends on bumpalo 3. This dependency is
 # required because our MSRV is 1.51, but bumpalo 3.9 increased its MSRV to 1.54. We can
