@@ -1282,14 +1282,21 @@ pub(crate) fn do_yconst<F: FieldExt, C: CurveAffine<ScalarExt = F>, const N : us
     allocator: &mut LinkedList<Buffer<F>>,
     buf : &Buffer<F>,
     rot : i32,
-    scalar_buf : &Buffer<F>,
+    yconst_buf : &Buffer<F>,
 ) -> EcResult<Buffer<F>>
 {
-    let f = buffer_to_vec::<F, C, EN>(program, buf);
-    let s_vec = buffer_to_vec::<F, C, 1>(program, scalar_buf);
-    let scalar = s_vec.first().unwrap();
+    let b_s = do_shift::<F, C, N, EN, RT>(
+                    &ctx,
+                    program,
+                    allocator, 
+                    buf, 
+                    rot)?;
 
-    let res = ctx.yconst_rot(&f, rot, EN, scalar);
+    let f = buffer_to_vec::<F, C, EN>(program, &b_s);
+    let y_vec = buffer_to_vec::<F, C, 1>(program, yconst_buf);
+    let yconst = y_vec.first().unwrap();
+
+    let res = ctx.yconst(&f, *yconst);
 
     let mut out_buf = allocator
         .pop_front()
@@ -1309,11 +1316,18 @@ pub(crate) fn do_scale<F: FieldExt, C: CurveAffine<ScalarExt = F>, const N : usi
     scalar_buf : &Buffer<F>,
 ) -> EcResult<Buffer<F>>
 {
-    let f = buffer_to_vec::<F, C, EN>(program, buf);
+    let b_s = do_shift::<F, C, N, EN, RT>(
+                    &ctx,
+                    program,
+                    allocator, 
+                    buf, 
+                    rot)?;
+
+    let f = buffer_to_vec::<F, C, EN>(program, &b_s);
     let s_vec = buffer_to_vec::<F, C, 1>(program, scalar_buf);
     let scalar = s_vec.first().unwrap();
 
-    let res = ctx.scale_rot(&f, rot, EN, scalar);
+    let res = ctx.scale(&f, *scalar);
 
     let mut out_buf = allocator
         .pop_front()
