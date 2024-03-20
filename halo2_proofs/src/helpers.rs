@@ -418,6 +418,11 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
         p.input_expressions.store(writer)?;
         p.table_expressions.store(writer)?;
     }
+    writer.write(&(cs.shuffles.0.len() as u32).to_le_bytes())?;
+    for p in cs.shuffles.0.iter() {
+        p.input_expressions.store(writer)?;
+        p.shuffle_expressions.store(writer)?;
+    }
     cs.named_advices.store(writer)?;
     write_gates::<C, W>(&cs.gates, writer)?;
     Ok(())
@@ -456,6 +461,17 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
             table_expressions,
         });
     }
+    let mut shuffles = plonk::shuffle::Argument(vec![]);
+    let nb_shuffle = read_u32(reader)?;
+    for _ in 0..nb_shuffle {
+        let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+        let shuffle_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+        shuffles.0.push(plonk::shuffle::ArgumentElement {
+            name: "",
+            input_expressions,
+            shuffle_expressions,
+        });
+    }
     let named_advices = Vec::fetch(reader)?;
     let gates = read_gates::<C, R>(reader)?;
     Ok(ConstraintSystem {
@@ -472,6 +488,7 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         named_advices,
         permutation,
         lookups,
+        shuffles,
         constants,
         minimum_degree: None,
     })
