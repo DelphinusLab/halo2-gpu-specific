@@ -1205,9 +1205,6 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .unwrap()
                                     .0;
 
-                                println!("FIND_ME table_buf");
-                                println!("{:?}", table_buf);
-
                                 end_timer!(timer);
 
                                 let timer = start_timer!(|| "3 fft");

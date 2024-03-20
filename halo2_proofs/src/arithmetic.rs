@@ -543,7 +543,7 @@ pub fn gpu_ifft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32, divisor: G:
 /// by $n$.
 ///
 /// This will use multithreading if beneficial.
-pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
+pub fn best_fft<G: Group+ std::fmt::Debug>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     cfg_if::cfg_if! {
         if #[cfg(feature = "cuda")]{
             return gpu_fft(a, omega, log_n);
@@ -553,7 +553,7 @@ pub fn best_fft<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     }
 }
 
-pub fn best_fft_cpu<G: Group>(a: &mut [G], omega: G::Scalar, log_n: u32) {
+pub fn best_fft_cpu<G: Group + std::fmt::Debug>(a: &mut [G], omega: G::Scalar, log_n: u32) {
     fn bitreverse(mut n: usize, l: usize) -> usize {
         let mut r = 0;
         for _ in 0..l {
