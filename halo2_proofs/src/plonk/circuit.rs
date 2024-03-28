@@ -6,7 +6,8 @@ use std::{
     ops::{Neg, Sub},
 };
 
-use super::{lookup, permutation, Assigned, Error};
+use super::range_check::{Range, RangeCheckRel};
+use super::{lookup, permutation, range_check, shuffle, Assigned, Error};
 use crate::circuit::Layouter;
 use crate::{circuit::Region, poly::Rotation};
 
@@ -1096,12 +1097,18 @@ pub struct ConstraintSystem<F: Field> {
     pub instance_queries: Vec<(Column<Instance>, Rotation)>,
     pub fixed_queries: Vec<(Column<Fixed>, Rotation)>,
 
+    pub range_check: range_check::Argument<F>,
+
     // Permutation argument for performing equality constraints
     pub permutation: permutation::Argument,
 
     // Vector of lookup arguments, where each corresponds to a sequence of
     // input expressions and a sequence of table expressions involved in the lookup.
     pub lookups: Vec<lookup::Argument<F>>,
+
+    // Vector of shuffle arguments, where each corresponds to a sequence of
+    // input expressions and a sequence of table expressions involved in the shuffle.
+    pub shuffles: shuffle::Argument<F>,
 
     // Vector of fixed columns, which can be used to store constant values
     // that are copied into advice columns.
@@ -1125,6 +1132,7 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     fixed_queries: &'a Vec<(Column<Fixed>, Rotation)>,
     permutation: &'a permutation::Argument,
     lookups: PinnedLookups<'a, F>,
+    shuffles: PinnedShuffles<'a, F>,
     constants: &'a Vec<Column<Fixed>>,
     minimum_degree: &'a Option<usize>,
 }
@@ -1139,6 +1147,22 @@ impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
                     format!("lookup{}", i),
                     &arg.input_expressions,
                     &arg.table_expressions,
+                )
+            }))
+            .finish()
+    }
+}
+
+struct PinnedShuffles<'a, F: Field>(&'a shuffle::Argument<F>);
+
+impl<'a, F: Field> std::fmt::Debug for PinnedShuffles<'a, F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.debug_list()
+            .entries(self.0 .0.iter().enumerate().map(|(i, arg)| {
+                (
+                    format!("shuffle{}", i),
+                    &arg.input_expressions,
+                    &arg.shuffle_expressions,
                 )
             }))
             .finish()
@@ -1171,6 +1195,8 @@ impl<F: Field> Default for ConstraintSystem<F> {
             instance_queries: Vec::new(),
             permutation: permutation::Argument::new(),
             lookups: Vec::new(),
+            shuffles: shuffle::Argument::new(),
+            range_check: range_check::Argument::new(),
             constants: vec![],
             minimum_degree: None,
         }
@@ -1194,6 +1220,7 @@ impl<F: Field> ConstraintSystem<F> {
             instance_queries: &self.instance_queries,
             permutation: &self.permutation,
             lookups: PinnedLookups(&self.lookups),
+            shuffles: PinnedShuffles(&self.shuffles),
             constants: &self.constants,
             minimum_degree: &self.minimum_degree,
         }
@@ -1266,6 +1293,25 @@ impl<F: Field> ConstraintSystem<F> {
 
         self.lookups.push(lookup::Argument::new(name, table_map));
 
+        index
+    }
+
+    /// Add a shuffle argument for some input expressions and any columns.
+    ///
+    /// `table_map` returns a map between input expressions and the table columns
+    /// they need to match.
+    pub fn shuffle(
+        &mut self,
+        name: &'static str,
+        table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, Expression<F>)>,
+    ) -> usize {
+        let mut cells = VirtualCells::new(self);
+        let table_map = table_map(&mut cells);
+
+        let index = self.shuffles.0.len();
+        self.shuffles
+            .0
+            .push(shuffle::ArgumentElement::new(name, table_map));
         index
     }
 
@@ -1536,6 +1582,16 @@ impl<F: Field> ConstraintSystem<F> {
             replace_selectors(expr, &selector_replacements, true);
         }
 
+        // Substitute non-simple selectors for the real fixed columns in all
+        // shuffle expressions
+        for expr in self.shuffles.0.iter_mut().flat_map(|shuffle| {
+            shuffle
+                .input_expressions
+                .iter_mut()
+                .chain(shuffle.shuffle_expressions.iter_mut())
+        }) {
+            replace_selectors(expr, &selector_replacements, true);
+        }
         (self, polys)
     }
 
@@ -1572,6 +1628,78 @@ impl<F: Field> ConstraintSystem<F> {
         };
         self.num_fixed_columns += 1;
         tmp
+    }
+
+    pub fn advice_column_range(
+        &mut self,
+        l_0: Column<Fixed>,
+        l_active: Column<Fixed>,
+        l_last_above: Column<Fixed>,
+        min: (u32, F),
+        max: (u32, F),
+        step: (u32, F),
+    ) -> Column<Advice> {
+        let origin = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+
+        let sort = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+
+        let mut step_f = step.1;
+
+        self.create_gate("range check", |meta| {
+            vec![
+                meta.query_fixed(l_0, Rotation::cur())
+                    * (Expression::Constant(min.1) - meta.query_advice(sort, Rotation::cur())),
+                meta.query_fixed(l_last_above, Rotation::cur())
+                    * (Expression::Constant(max.1) - meta.query_advice(sort, Rotation::cur())),
+                (meta.query_fixed(l_active, Rotation::cur())
+                    - meta.query_fixed(l_last_above, Rotation::cur()))
+                    * (0..=step.0)
+                        .fold(None, |acc, _| {
+                            let expr = meta.query_advice(sort, Rotation::next())
+                                - meta.query_advice(sort, Rotation::cur())
+                                - Expression::Constant(step_f);
+
+                            let expr = if let Some(acc) = acc {
+                                acc * expr
+                            } else {
+                                expr
+                            };
+
+                            step_f -= F::one();
+
+                            Some(expr)
+                        })
+                        .unwrap(),
+            ]
+        });
+
+        self.shuffle("range check col", |meta| {
+            vec![(
+                meta.query_advice(origin, Rotation::cur()),
+                meta.query_advice(sort, Rotation::cur()),
+            )]
+        });
+
+        self.range_check.0.push(RangeCheckRel {
+            origin,
+            sort,
+            min,
+            max,
+            step,
+        });
+
+        origin
     }
 
     /// Allocate a new advice column
@@ -1620,6 +1748,16 @@ impl<F: Field> ConstraintSystem<F> {
         degree = std::cmp::max(
             degree,
             self.lookups
+                .iter()
+                .map(|l| l.required_degree())
+                .max()
+                .unwrap_or(1),
+        );
+
+        degree = std::cmp::max(
+            degree,
+            self.shuffles
+                .0
                 .iter()
                 .map(|l| l.required_degree())
                 .max()

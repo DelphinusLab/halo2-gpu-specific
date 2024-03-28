@@ -1,4 +1,5 @@
 use crate::plonk::circuit::FloorPlanner;
+use crate::plonk::range_check::{Range, RangeCheckRel};
 use crate::{
     arithmetic::{CurveAffine, FieldExt},
     plonk::{generate_pk_info, keygen_pk_from_info},
@@ -17,6 +18,7 @@ use crate::{
 use ff::Field;
 use memmap::{MmapMut, MmapOptions};
 use num;
+use num::FromPrimitive;
 use num_derive::FromPrimitive;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::io::Seek;
@@ -57,6 +59,12 @@ pub trait ParaSerializable: Clone {
     /// Reads a compressed element from the buffer and attempts to parse it
     /// using `from_bytes`.
     fn vec_store(&self, fd: &mut File) -> io::Result<()>;
+}
+
+fn write_u32<W: io::Write>(v: u32, writer: &mut W) -> io::Result<()> {
+    writer.write(&v.to_le_bytes())?;
+
+    Ok(())
 }
 
 pub(crate) fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
@@ -418,6 +426,21 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
         p.input_expressions.store(writer)?;
         p.table_expressions.store(writer)?;
     }
+    writer.write(&(cs.shuffles.0.len() as u32).to_le_bytes())?;
+    for p in cs.shuffles.0.iter() {
+        p.input_expressions.store(writer)?;
+        p.shuffle_expressions.store(writer)?;
+    }
+
+    write_u32(cs.range_check.0.len() as u32, writer)?;
+    for argument in cs.range_check.0.iter() {
+        write_column(&argument.origin, writer)?;
+        write_column(&argument.sort, writer)?;
+        write_u32(argument.min.0 as u32, writer)?;
+        write_u32(argument.max.0 as u32, writer)?;
+        write_u32(argument.step.0 as u32, writer)?;
+    }
+
     cs.named_advices.store(writer)?;
     write_gates::<C, W>(&cs.gates, writer)?;
     Ok(())
@@ -456,6 +479,36 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
             table_expressions,
         });
     }
+    let mut shuffles = plonk::shuffle::Argument(vec![]);
+    let nb_shuffle = read_u32(reader)?;
+    for _ in 0..nb_shuffle {
+        let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+        let shuffle_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+        shuffles.0.push(plonk::shuffle::ArgumentElement {
+            name: "",
+            input_expressions,
+            shuffle_expressions,
+        });
+    }
+
+    let mut range_check = plonk::range_check::Argument::new();
+    let range_check_count = read_u32(reader)?;
+    for _ in 0..range_check_count {
+        let origin = read_column(reader, Advice)?;
+        let sort = read_column(reader, Advice)?;
+        let min = read_u32(reader)?;
+        let max = read_u32(reader)?;
+        let step = read_u32(reader)?;
+
+        range_check.0.push(RangeCheckRel {
+            origin,
+            sort,
+            min: (min, C::ScalarExt::from(min as u64)),
+            max: (min, C::ScalarExt::from(max as u64)),
+            step: (min, C::ScalarExt::from(step as u64)),
+        })
+    }
+
     let named_advices = Vec::fetch(reader)?;
     let gates = read_gates::<C, R>(reader)?;
     Ok(ConstraintSystem {
@@ -472,6 +525,8 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         named_advices,
         permutation,
         lookups,
+        shuffles,
+        range_check,
         constants,
         minimum_degree: None,
     })

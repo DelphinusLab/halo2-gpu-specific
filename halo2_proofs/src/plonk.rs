@@ -24,6 +24,8 @@ mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod permutation;
+pub mod range_check;
+pub(crate) mod shuffle;
 mod vanishing;
 
 mod prover;
@@ -264,6 +266,10 @@ type ChallengeBeta<F> = ChallengeScalar<F, Beta>;
 #[derive(Clone, Copy, Debug)]
 struct Gamma;
 type ChallengeGamma<F> = ChallengeScalar<F, Gamma>;
+
+#[derive(Clone, Copy, Debug)]
+struct Delta;
+type ChallengeDelta<F> = ChallengeScalar<F, Delta>;
 
 #[derive(Clone, Copy, Debug)]
 struct Y;
