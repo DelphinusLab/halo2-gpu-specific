@@ -1,4 +1,5 @@
 use crate::helpers::AssignWitnessCollection;
+use crate::plonk::range_check::Range;
 use ark_std::iterable::Iterable;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
@@ -18,7 +19,7 @@ use std::fs::File;
 use std::iter::FromIterator;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 
@@ -224,6 +225,8 @@ pub fn create_proof_ext<
                 .into_par_iter()
                 .map(|_| domain.empty_lagrange())
                 .collect();
+            let first_unassigned_offset =
+                vec![Arc::new(AtomicUsize::new(0)); meta.num_advice_columns];
 
             generate_advice_from_synthesize(
                 params,
@@ -234,8 +237,34 @@ pub fn create_proof_ext<
                     .iter_mut()
                     .map(|x| (&mut x.values[..]) as *mut [_])
                     .collect::<Vec<_>>()[..],
+                &first_unassigned_offset[..],
             );
             end_timer!(timer);
+
+            pk.vk.cs.range_check.0.iter().for_each(|argument| {
+                let origin_column_index = argument.origin.index;
+
+                let mut first_unassigned_offset = first_unassigned_offset
+                    .get(origin_column_index)
+                    .unwrap()
+                    .load(Ordering::Relaxed);
+
+                let values = &mut advice.get_mut(argument.origin.index).unwrap().values;
+
+                for value in argument.min.0..=argument.max.0 {
+                    values[first_unassigned_offset] = C::ScalarExt::from(value as u64);
+                    first_unassigned_offset += argument.step.0 as usize;
+                }
+
+                assert!(first_unassigned_offset <= unusable_rows_start);
+            });
+
+            pk.vk.cs.range_check.0.iter().for_each(|argument| {
+                let origin_value = advice.get(argument.origin.index).unwrap().values.clone();
+                let sort = advice.get_mut(argument.sort.index).unwrap();
+
+                sort.sort_and_copy(unusable_rows_start, origin_value);
+            });
 
             let named = &pk.vk.cs.named_advices;
 
@@ -1453,6 +1482,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
     circuit: &'a ConcreteCircuit,
     instances: &'a [&'a [C::Scalar]],
     advices: &'a [*mut [C::Scalar]],
+    first_unassigned_offset: &'a [Arc<AtomicUsize>],
 ) {
     use Assigned;
     use Column;
@@ -1467,6 +1497,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
     #[derive(Clone)]
     struct WitnessCollection<'a, F: Field> {
         pub advice: &'a [*mut [F]],
+        first_unassigned_offset: &'a [Arc<AtomicUsize>],
         instances: &'a [&'a [F]],
         usable_rows: core::ops::RangeTo<usize>,
         _marker: std::marker::PhantomData<F>,
@@ -1536,6 +1567,11 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
                 .and_then(|v| unsafe { (*v).as_mut().unwrap() }.get_mut(row))
                 .ok_or(Error::BoundsFailure)? = v;
 
+            self.first_unassigned_offset
+                .get(column.index())
+                .and_then(|offset| Some(offset.fetch_max(row + 1, Ordering::Relaxed)))
+                .unwrap();
+
             Ok(())
         }
 
@@ -1589,6 +1625,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
     let mut witness = WitnessCollection {
         advice: advices,
+        first_unassigned_offset,
         instances,
         // The prover will not be allowed to assign values to advice
         // cells that exist within inactive rows, which include some

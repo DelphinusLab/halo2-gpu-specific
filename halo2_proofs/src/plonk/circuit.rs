@@ -6,7 +6,8 @@ use std::{
     ops::{Neg, Sub},
 };
 
-use super::{lookup, permutation, shuffle, Assigned, Error};
+use super::range_check::{Range, RangeCheckRel};
+use super::{lookup, permutation, range_check, shuffle, Assigned, Error};
 use crate::circuit::Layouter;
 use crate::{circuit::Region, poly::Rotation};
 
@@ -1096,6 +1097,8 @@ pub struct ConstraintSystem<F: Field> {
     pub instance_queries: Vec<(Column<Instance>, Rotation)>,
     pub fixed_queries: Vec<(Column<Fixed>, Rotation)>,
 
+    pub range_check: range_check::Argument<F>,
+
     // Permutation argument for performing equality constraints
     pub permutation: permutation::Argument,
 
@@ -1193,6 +1196,7 @@ impl<F: Field> Default for ConstraintSystem<F> {
             permutation: permutation::Argument::new(),
             lookups: Vec::new(),
             shuffles: shuffle::Argument::new(),
+            range_check: range_check::Argument::new(),
             constants: vec![],
             minimum_degree: None,
         }
@@ -1624,6 +1628,78 @@ impl<F: Field> ConstraintSystem<F> {
         };
         self.num_fixed_columns += 1;
         tmp
+    }
+
+    pub fn advice_column_range(
+        &mut self,
+        l_0: Column<Fixed>,
+        l_active: Column<Fixed>,
+        l_last_above: Column<Fixed>,
+        min: (u32, F),
+        max: (u32, F),
+        step: (u32, F),
+    ) -> Column<Advice> {
+        let origin = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+
+        let sort = Column {
+            index: self.num_advice_columns,
+            column_type: Advice,
+        };
+
+        self.num_advice_columns += 1;
+        self.num_advice_queries.push(0);
+
+        let mut step_f = step.1;
+
+        self.create_gate("range check", |meta| {
+            vec![
+                meta.query_fixed(l_0, Rotation::cur())
+                    * (Expression::Constant(min.1) - meta.query_advice(sort, Rotation::cur())),
+                meta.query_fixed(l_last_above, Rotation::cur())
+                    * (Expression::Constant(max.1) - meta.query_advice(sort, Rotation::cur())),
+                (meta.query_fixed(l_active, Rotation::cur())
+                    - meta.query_fixed(l_last_above, Rotation::cur()))
+                    * (0..=step.0)
+                        .fold(None, |acc, _| {
+                            let expr = meta.query_advice(sort, Rotation::next())
+                                - meta.query_advice(sort, Rotation::cur())
+                                - Expression::Constant(step_f);
+
+                            let expr = if let Some(acc) = acc {
+                                acc * expr
+                            } else {
+                                expr
+                            };
+
+                            step_f -= F::one();
+
+                            Some(expr)
+                        })
+                        .unwrap(),
+            ]
+        });
+
+        self.shuffle("range check col", |meta| {
+            vec![(
+                meta.query_advice(origin, Rotation::cur()),
+                meta.query_advice(sort, Rotation::cur()),
+            )]
+        });
+
+        self.range_check.0.push(RangeCheckRel {
+            origin,
+            sort,
+            min,
+            max,
+            step,
+        });
+
+        origin
     }
 
     /// Allocate a new advice column
