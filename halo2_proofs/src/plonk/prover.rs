@@ -225,8 +225,10 @@ pub fn create_proof_ext<
                 .into_par_iter()
                 .map(|_| domain.empty_lagrange())
                 .collect();
-            let first_unassigned_offset =
-                vec![Arc::new(AtomicUsize::new(0)); meta.num_advice_columns];
+            let first_unassigned_offset = (0..meta.num_advice_columns)
+                .into_iter()
+                .map(|_| Arc::new(AtomicUsize::new(0)))
+                .collect::<Vec<_>>();
 
             generate_advice_from_synthesize(
                 params,
@@ -241,22 +243,28 @@ pub fn create_proof_ext<
             );
             end_timer!(timer);
 
+            let last = pk.get_vk().domain.n - (pk.get_vk().cs.blinding_factors() as u64 + 1) - 1;
             pk.vk.cs.range_check.0.iter().for_each(|argument| {
                 let origin_column_index = argument.origin.index;
 
-                let mut first_unassigned_offset = first_unassigned_offset
+                let first_unassigned_offset = first_unassigned_offset
                     .get(origin_column_index)
                     .unwrap()
                     .load(Ordering::Relaxed);
 
                 let values = &mut advice.get_mut(argument.origin.index).unwrap().values;
-
-                for value in argument.min.0..=argument.max.0 {
-                    values[first_unassigned_offset] = C::ScalarExt::from(value as u64);
-                    first_unassigned_offset += argument.step.0 as usize;
+                let mut offset = last as usize;
+                let mut value = argument.min.0;
+                if argument.step.0 != 1 {
+                    assert!(argument.max.0 % argument.step.0 == 0);
+                }
+                while value <= argument.max.0 {
+                    values[offset] = C::ScalarExt::from(value as u64);
+                    offset -= 1;
+                    value += argument.step.0;
                 }
 
-                assert!(first_unassigned_offset <= unusable_rows_start);
+                assert!(offset >= first_unassigned_offset);
             });
 
             pk.vk.cs.range_check.0.iter().for_each(|argument| {

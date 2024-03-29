@@ -504,8 +504,8 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
             origin,
             sort,
             min: (min, C::ScalarExt::from(min as u64)),
-            max: (min, C::ScalarExt::from(max as u64)),
-            step: (min, C::ScalarExt::from(step as u64)),
+            max: (max, C::ScalarExt::from(max as u64)),
+            step: (step, C::ScalarExt::from(step as u64)),
         })
     }
 

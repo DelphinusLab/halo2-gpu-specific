@@ -1,6 +1,7 @@
 //! Tools for developing circuits.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
@@ -532,6 +533,7 @@ pub struct MockProver<F: Group + Field> {
     fixed: Vec<Vec<CellValue<F>>>,
     // The advice cells in the circuit, arranged as [column][row].
     advice: Vec<Vec<CellValue<F>>>,
+    first_unassigned_offset: Vec<usize>,
     // The instance cells in the circuit, arranged as [column][row].
     instance: Vec<Vec<F>>,
 
@@ -581,7 +583,7 @@ impl<F: Group + Field> Into<MockVerifier<F>> for MockProver<F> {
 
 impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
     fn is_in_prove_mode(&self) -> bool {
-        true
+        false
     }
 
     fn enter_region<NR, N>(&self, name: N)
@@ -594,9 +596,11 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
         let mut prover = self.lock().unwrap();
 
         assert!(prover.current_region.is_none());
+        let name = name().into();
+        println!("enter region: {}", name);
         prover.current_region = Some((
             Region {
-                name: name().into(),
+                name,
                 columns: HashSet::default(),
                 rows: None,
                 enabled_selectors: HashMap::default(),
@@ -610,6 +614,7 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
         let mut prover = self.lock().unwrap();
 
         let (region, _) = prover.current_region.take().unwrap();
+        println!("exit region: {}", region.name);
         prover.regions.push(region);
     }
 
@@ -678,6 +683,10 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
         if let Some((region, _)) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
+
+            if region.name == "event table" {
+                println!("{:?}", region.rows);
+            }
         }
 
         *prover
@@ -685,6 +694,11 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? = CellValue::Assigned(to()?.into().evaluate());
+        let first_unassigned_offset = prover.first_unassigned_offset.get(column.index()).unwrap();
+        *prover
+            .first_unassigned_offset
+            .get_mut(column.index())
+            .unwrap() = (*first_unassigned_offset).max(row + 1);
 
         Ok(())
     }
@@ -711,6 +725,10 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
         if let Some((region, _)) = prover.current_region.as_mut() {
             region.update_extent(column.into(), row);
             region.track_cell(column.into(), row);
+
+            if region.name == "range check sel helper" {
+                assert!(region.rows.is_some());
+            }
         }
 
         *prover
@@ -776,6 +794,53 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
 }
 
 impl<F: FieldExt> MockProver<F> {
+    pub fn assign_range_check_column(&mut self) -> Result<(), Error> {
+        // last usable row
+        let last = (1 << self.k) - (self.cs.blinding_factors() + 1) - 1;
+
+        for argument in &self.cs.range_check.0 {
+            let origin_value = self.advice.get_mut(argument.origin.index).unwrap();
+            let first_unassigned_offset = *self
+                .first_unassigned_offset
+                .get(argument.origin.index)
+                .unwrap();
+
+            let mut value = argument.min.0;
+            if argument.step.0 != 1 {
+                assert!(argument.max.0 % argument.step.0 == 0);
+            }
+            let mut offset = last;
+            while value <= argument.max.0 {
+                assert!(self.usable_rows.contains(&first_unassigned_offset));
+
+                origin_value[offset] = CellValue::Assigned(F::from(value as u64));
+                offset -= 1;
+                value += argument.step.0;
+            }
+
+            assert!(offset >= first_unassigned_offset);
+
+            let mut sort_value = origin_value.clone();
+            sort_value.sort_unstable_by(|left, right| match (left, right) {
+                (CellValue::Poison(left), CellValue::Poison(right)) => left.cmp(right),
+                (CellValue::Unassigned, CellValue::Unassigned) => Ordering::Equal,
+                (CellValue::Assigned(left), CellValue::Assigned(right)) => left.cmp(right),
+                (CellValue::Poison(_), _) => Ordering::Greater,
+                (_, CellValue::Poison(_)) => Ordering::Less,
+                (CellValue::Unassigned, _) => Ordering::Less,
+                (_, CellValue::Unassigned) => Ordering::Greater,
+            });
+
+            let sort_col = self.advice.get_mut(argument.sort.index).unwrap();
+            // mem swap for perf?
+            for (target, sorted) in sort_col.iter_mut().zip(sort_value.iter()) {
+                *target = *sorted;
+            }
+        }
+
+        Ok(())
+    }
+
     /// Runs a synthetic keygen-and-prove operation on the given circuit, collecting data
     /// about the constraints and their assignments.
     pub fn run<ConcreteCircuit: Circuit<F>>(
@@ -826,6 +891,7 @@ impl<F: FieldExt> MockProver<F> {
             };
             cs.num_advice_columns
         ];
+        let first_unassigned_offset = vec![0; cs.num_advice_columns];
         let permutation = permutation::keygen::ParallelAssembly::new(n, &cs.permutation);
         let constants = cs.constants.clone();
 
@@ -837,6 +903,7 @@ impl<F: FieldExt> MockProver<F> {
             current_region: None,
             fixed,
             advice,
+            first_unassigned_offset,
             instance,
             selectors,
             permutation,
@@ -847,6 +914,7 @@ impl<F: FieldExt> MockProver<F> {
 
         let mut prover = prover.into_inner();
 
+        prover.assign_range_check_column()?;
         let (cs, selector_polys) = prover.cs.compress_selectors(prover.selectors.clone());
         prover.cs = cs;
         prover.fixed.extend(selector_polys.into_iter().map(|poly| {
@@ -990,32 +1058,36 @@ impl<F: FieldExt> MockVerifier<F> {
                                 &Value::Real(F::zero()),
                             ) {
                                 Value::Real(x) if x.is_zero_vartime() => None,
-                                Value::Real(_) => Some(VerifyFailure::ConstraintNotSatisfied {
-                                    constraint: (
-                                        (gate_index, gate.name()).into(),
-                                        poly_index,
-                                        gate.constraint_name(poly_index),
-                                    )
-                                        .into(),
-                                    location: FailureLocation::find_expressions(
-                                        &self.cs,
-                                        &self.regions,
-                                        row as usize,
-                                        Some(poly).into_iter(),
-                                    ),
-                                    cell_values: util::cell_values(
-                                        gate,
-                                        poly,
-                                        &load(n, row, &self.cs.fixed_queries, &self.fixed),
-                                        &load(n, row, &self.cs.advice_queries, &self.advice),
-                                        &load_instance(
-                                            n,
-                                            row,
-                                            &self.cs.instance_queries,
-                                            &self.instance,
+                                Value::Real(_) => {
+                                    println!("{}", gate.name());
+
+                                    Some(VerifyFailure::ConstraintNotSatisfied {
+                                        constraint: (
+                                            (gate_index, gate.name()).into(),
+                                            poly_index,
+                                            gate.constraint_name(poly_index),
+                                        )
+                                            .into(),
+                                        location: FailureLocation::find_expressions(
+                                            &self.cs,
+                                            &self.regions,
+                                            row as usize,
+                                            Some(poly).into_iter(),
                                         ),
-                                    ),
-                                }),
+                                        cell_values: util::cell_values(
+                                            gate,
+                                            poly,
+                                            &load(n, row, &self.cs.fixed_queries, &self.fixed),
+                                            &load(n, row, &self.cs.advice_queries, &self.advice),
+                                            &load_instance(
+                                                n,
+                                                row,
+                                                &self.cs.instance_queries,
+                                                &self.instance,
+                                            ),
+                                        ),
+                                    })
+                                }
                                 Value::Poison => Some(VerifyFailure::ConstraintPoisoned {
                                     constraint: (
                                         (gate_index, gate.name()).into(),
@@ -1095,6 +1167,7 @@ impl<F: FieldExt> MockVerifier<F> {
                             if lookup_passes {
                                 None
                             } else {
+                                println!("{}", lookup.name);
                                 Some(VerifyFailure::Lookup {
                                     name: lookup.name,
                                     lookup_index,
@@ -1152,6 +1225,7 @@ impl<F: FieldExt> MockVerifier<F> {
                         .zip(shuffles.iter())
                         .flat_map(|((input_value, row), shuffle_value)| {
                             if input_value != shuffle_value {
+                                println!("{}", shuffle.name);
                                 Some(VerifyFailure::Shuffle {
                                     name: shuffle.name.clone(),
                                     shuffle_index,
