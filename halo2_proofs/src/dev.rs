@@ -581,7 +581,7 @@ impl<F: Group + Field> Into<MockVerifier<F>> for MockProver<F> {
 
 impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
     fn is_in_prove_mode(&self) -> bool {
-        false
+        true
     }
 
     fn enter_region<NR, N>(&self, name: N)
