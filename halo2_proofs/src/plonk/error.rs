@@ -37,6 +37,8 @@ pub enum Error {
     /// The instance sets up a copy constraint involving a column that has not been
     /// included in the permutation.
     ColumnNotInPermutation(Column<Any>),
+    /// Not enough rows for extra range values.
+    NotEnoughRowsForRangeCheck,
 }
 
 impl From<io::Error> for Error {
@@ -79,6 +81,11 @@ impl fmt::Display for Error {
                 "Column {:?} must be included in the permutation. Help: try applying `meta.enable_equalty` on the column",
                 column
             ),
+            Error::NotEnoughRowsForRangeCheck => write!(
+                f,
+                "Not enough rows for extra range values. Try using a larger value of k
+                "
+            )
         }
     }
 }

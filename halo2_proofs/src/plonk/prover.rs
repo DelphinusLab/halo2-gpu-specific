@@ -1,5 +1,5 @@
 use crate::helpers::AssignWitnessCollection;
-use crate::plonk::range_check::Range;
+use crate::plonk::range_check::{Range, RangeCheckRelAssigner};
 use ark_std::iterable::Iterable;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
@@ -254,17 +254,16 @@ pub fn create_proof_ext<
 
                 let values = &mut advice.get_mut(argument.origin.index).unwrap().values;
                 let mut offset = last as usize;
-                let mut value = argument.min.0;
-                if argument.step.0 != 1 {
-                    assert!(argument.max.0 % argument.step.0 == 0);
-                }
-                while value <= argument.max.0 {
+
+                let assigner: RangeCheckRelAssigner = argument.into();
+                let mut iter = assigner.into_iter();
+
+                while let Some(value) = iter.next() {
                     values[offset] = C::ScalarExt::from(value as u64);
                     offset -= 1;
-                    value += argument.step.0;
                 }
 
-                assert!(offset >= first_unassigned_offset);
+                assert!(first_unassigned_offset <= offset);
             });
 
             pk.vk.cs.range_check.0.iter().for_each(|argument| {

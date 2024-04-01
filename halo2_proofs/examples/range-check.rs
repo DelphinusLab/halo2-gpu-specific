@@ -1,6 +1,7 @@
 use halo2_proofs::{
     arithmetic::FieldExt,
     circuit::{floor_planner::V1, Layouter},
+    dev::MockProver,
     plonk::*,
     poly::commitment::{Params, ParamsVerifier},
     transcript::{Blake2bRead, Blake2bWrite, Challenge255},
@@ -44,7 +45,7 @@ impl<F: FieldExt> Circuit<F> for TestCircuit<F> {
             l_last_above,
             (0, F::from(0)),
             (u16::MAX as u32, F::from(u16::MAX as u64)),
-            (1, F::from(1)),
+            (2, F::from(2)),
         );
 
         let l_last_offset = (1 << K) - (meta.blinding_factors() + 1);
@@ -93,6 +94,9 @@ fn main() {
     let public_inputs_size = 0;
 
     let circuit: TestCircuit<Fp> = TestCircuit { _mark: PhantomData };
+
+    let prover = MockProver::run(k, &circuit, vec![]).unwrap();
+    assert!(prover.verify().is_ok());
 
     // Initialize the polynomial commitment parameters
     let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(k);

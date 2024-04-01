@@ -152,9 +152,7 @@ impl<C: CurveAffine> CircuitData<C> {
         let fixed_commitments: Vec<_> = (0..cs.num_fixed_columns)
             .map(|_| C::read(reader))
             .collect::<Result<_, _>>()?;
-
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation)?;
-
         Ok(VerifyingKey {
             domain,
             cs,

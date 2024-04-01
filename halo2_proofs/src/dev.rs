@@ -17,6 +17,7 @@ use std::sync::MutexGuard;
 use ff::Field;
 
 use crate::parallel::Parallel;
+use crate::plonk::range_check::RangeCheckRelAssigner;
 use crate::plonk::Assigned;
 use crate::{
     arithmetic::{FieldExt, Group},
@@ -597,7 +598,6 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
 
         assert!(prover.current_region.is_none());
         let name = name().into();
-        println!("enter region: {}", name);
         prover.current_region = Some((
             Region {
                 name,
@@ -614,7 +614,6 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
         let mut prover = self.lock().unwrap();
 
         let (region, _) = prover.current_region.take().unwrap();
-        println!("exit region: {}", region.name);
         prover.regions.push(region);
     }
 
@@ -805,20 +804,19 @@ impl<F: FieldExt> MockProver<F> {
                 .get(argument.origin.index)
                 .unwrap();
 
-            let mut value = argument.min.0;
-            if argument.step.0 != 1 {
-                assert!(argument.max.0 % argument.step.0 == 0);
-            }
             let mut offset = last;
-            while value <= argument.max.0 {
-                assert!(self.usable_rows.contains(&first_unassigned_offset));
 
+            let assigner: RangeCheckRelAssigner = argument.into();
+            let mut iter = assigner.into_iter();
+
+            while let Some(value) = iter.next() {
                 origin_value[offset] = CellValue::Assigned(F::from(value as u64));
                 offset -= 1;
-                value += argument.step.0;
             }
 
-            assert!(offset >= first_unassigned_offset);
+            if offset < first_unassigned_offset {
+                return Err(Error::NotEnoughRowsForRangeCheck);
+            }
 
             let mut sort_value = origin_value.clone();
             sort_value.sort_unstable_by(|left, right| match (left, right) {
