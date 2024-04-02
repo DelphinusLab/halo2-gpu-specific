@@ -14,6 +14,7 @@ use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
 use rayon::slice::ParallelSlice;
+use std::collections::{BTreeMap, HashMap};
 use std::env::var;
 use std::fs::File;
 use std::iter::FromIterator;
@@ -160,6 +161,38 @@ pub fn create_single_instances<C: CurveAffine, E: EncodedChallenge<C>, T: Transc
     Ok(instance)
 }
 
+fn sort<Scalar: FieldExt + PrimeField<Repr = K>, K: std::hash::Hash + std::cmp::Eq + Clone>(
+    values: Vec<Scalar>,
+    hasher: impl Fn(&Scalar) -> K,
+) -> Vec<Scalar> {
+    let len = values.len();
+
+    let mut hash = HashMap::<K, usize>::default();
+    for value in values {
+        hash.entry(hasher(&value))
+            .and_modify(|e| *e += 1)
+            .or_insert(1);
+    }
+
+    let mut values = hash.into_iter().collect::<Vec<_>>();
+    values.sort_by(|a, b| {
+        Scalar::from_repr(a.0.clone())
+            .unwrap()
+            .cmp(&Scalar::from_repr(b.0.clone()).unwrap())
+    });
+
+    values
+        .into_iter()
+        .map(|(k, v)| {
+            let value = Scalar::from_repr(k).unwrap();
+            vec![value; v]
+        })
+        .fold(Vec::with_capacity(len), |mut acc, v| {
+            acc.extend(v);
+            acc
+        })
+}
+
 /// This creates a proof for the provided `circuit` when given the public
 /// parameters `params` and the proving key [`ProvingKey`] that was
 /// generated previously for the same circuit. The provided `instances`
@@ -178,7 +211,10 @@ pub fn create_proof_ext<
     mut rng: R,
     transcript: &mut T,
     use_gwc: bool,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    <<C as CurveAffine>::ScalarExt as PrimeField>::Repr: std::hash::Hash + std::cmp::Eq,
+{
     let domain = &pk.vk.domain;
 
     let timer = start_timer!(|| "instance");
@@ -266,12 +302,37 @@ pub fn create_proof_ext<
                 assert!(first_unassigned_offset <= offset);
             });
 
-            pk.vk.cs.range_check.0.iter().for_each(|argument| {
-                let origin_value = advice.get(argument.origin.index).unwrap().values.clone();
-                let sort = advice.get_mut(argument.sort.index).unwrap();
+            let timer = start_timer!(|| "sort range check");
+            let sort = pk
+                .vk
+                .cs
+                .range_check
+                .0
+                .par_iter()
+                .map(|argument| {
+                    let mut origin_value =
+                        advice.get(argument.origin.index).unwrap().values.clone();
+                    let len = origin_value.len();
+                    origin_value.truncate(unusable_rows_start);
+                    let mut value = sort(origin_value, |value| value.to_repr());
+                    value.resize(len, C::ScalarExt::zero());
 
-                sort.sort_and_copy(unusable_rows_start, origin_value);
-            });
+                    value
+                })
+                .collect::<Vec<_>>();
+            end_timer!(timer);
+
+            println!("{}", pk.vk.cs.range_check.0.iter().len());
+            pk.vk
+                .cs
+                .range_check
+                .0
+                .iter()
+                .zip(sort.into_iter())
+                .for_each(|(argument, sorted_value)| {
+                    let sort_col = advice.get_mut(argument.sort.index).unwrap();
+                    sort_col.values = sorted_value;
+                });
 
             let named = &pk.vk.cs.named_advices;
 
@@ -837,7 +898,10 @@ pub fn create_proof_with_shplonk<
     instances: &[&[&[C::Scalar]]],
     rng: R,
     transcript: &mut T,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    <<C as CurveAffine>::ScalarExt as PrimeField>::Repr: std::hash::Hash + std::cmp::Eq,
+{
     create_proof_ext(params, pk, circuits, instances, rng, transcript, false)
 }
 
@@ -858,7 +922,10 @@ pub fn create_proof<
     instances: &[&[&[C::Scalar]]],
     rng: R,
     transcript: &mut T,
-) -> Result<(), Error> {
+) -> Result<(), Error>
+where
+    <<C as CurveAffine>::ScalarExt as PrimeField>::Repr: std::hash::Hash + std::cmp::Eq,
+{
     create_proof_ext(params, pk, circuits, instances, rng, transcript, true)
 }
 

@@ -5,6 +5,7 @@
 use crate::arithmetic::parallelize;
 use crate::plonk::Assigned;
 
+use ark_std::{end_timer, start_timer};
 use group::ff::{BatchInvert, Field};
 use pairing::arithmetic::FieldExt;
 use rayon::iter::*;
@@ -61,18 +62,6 @@ impl Basis for PreparedExtendedLagrangeCoeff {}
 pub struct Polynomial<F, B> {
     pub values: Vec<F>,
     pub _marker: PhantomData<B>,
-}
-
-impl<F: FieldExt, B> Polynomial<F, B> {
-    pub(crate) fn sort_and_copy(&mut self, unusable_row_start: usize, mut values: Vec<F>) {
-        let len = values.len();
-
-        values.truncate(unusable_row_start);
-        values.sort();
-        values.resize(len, F::zero());
-
-        self.values = values;
-    }
 }
 
 impl<F, B> Index<usize> for Polynomial<F, B> {
