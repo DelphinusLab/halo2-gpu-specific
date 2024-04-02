@@ -1,6 +1,6 @@
 use crate::plonk::circuit::FloorPlanner;
 use crate::{
-    arithmetic::{CurveAffine, FieldExt},
+    arithmetic::{parallelize, CurveAffine, FieldExt},
     plonk::{generate_pk_info, keygen_pk_from_info},
     poly::batch_invert_assigned,
 };
@@ -18,6 +18,8 @@ use ff::Field;
 use memmap::{MmapMut, MmapOptions};
 use num;
 use num_derive::FromPrimitive;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::prelude::ParallelSlice;
 use rayon::prelude::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use std::io::Seek;
 use std::marker::PhantomData;
@@ -63,6 +65,43 @@ pub(crate) fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
     let mut r = [0u8; 4];
     reader.read(&mut r)?;
     Ok(u32::from_le_bytes(r))
+}
+
+pub(crate) fn read_u8<R: io::Read>(reader: &mut R) -> io::Result<u8> {
+    let mut r = [0u8];
+    reader.read(&mut r)?;
+    Ok(r[0])
+}
+
+//reduce the redundant 0s
+fn reduce_buf_u8(buf: &[u8]) -> Vec<u8> {
+    if let Some(pos) = buf
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, &v)| v != 0)
+        .map(|(i, _)| i)
+    {
+        // len
+        let mut res = vec![pos as u8 + 1];
+        // data
+        res.extend_from_slice(&buf[..=pos]);
+        res
+    } else {
+        //when value=0,set len=0
+        vec![0u8]
+    }
+}
+
+fn read_reduced_buf_u8<R: io::Read>(reader: &mut R) -> io::Result<Vec<u8>> {
+    let len = read_u8(reader)?;
+    if len == 0 {
+        Ok(vec![0u8])
+    } else {
+        let mut data = vec![0u8; len as usize];
+        reader.read_exact(&mut data)?;
+        Ok(data)
+    }
 }
 
 impl Serializable for u32 {
@@ -171,21 +210,157 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
     }
 }
 
+impl Serializable for Vec<Vec<(u32, u32)>> {
+    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let columns = read_u32(reader)?;
+        let mut rows = vec![];
+        for _ in 0..columns {
+            rows.push(read_u32(reader)?);
+        }
+        let mut maps = (0..columns)
+            .into_par_iter()
+            .map(|i| {
+                (0..rows[i as usize])
+                    .into_iter()
+                    .map(|j| (i, j))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let permuted = Vec::<((u32, u32), (u32, u32))>::fetch(reader)?;
+        permuted
+            .into_iter()
+            .for_each(|v| maps[v.0 .0 as usize][v.0 .1 as usize] = v.1);
+
+        Ok(maps)
+    }
+
+    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let u = self.len() as u32;
+        u.store(writer)?;
+        (0..u)
+            .into_iter()
+            .for_each(|i| (self[i as usize].len() as u32).store(writer).unwrap());
+
+        let permuted: Vec<((u32, u32), (u32, u32))> = self
+            .into_par_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                s.iter()
+                    .enumerate()
+                    .filter_map(|(j, &v)| {
+                        if (i as u32, j as u32) != v {
+                            Some(((i as u32, j as u32), v))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .flatten()
+            .collect();
+        permuted.store(writer)?;
+        Ok(())
+    }
+}
+
+impl Serializable for ((u32, u32), (u32, u32)) {
+    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let mut buf = vec![0u8; 16];
+        reader.read_exact(&mut buf)?;
+        let t: &[((u32, u32), (u32, u32))] = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr() as *const ((u32, u32), (u32, u32)), 1)
+        };
+        Ok(t[0])
+    }
+    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        let v = vec![*self];
+        let s: &[u8] = unsafe { std::slice::from_raw_parts(v.as_ptr() as *const u8, 16) };
+        writer.write(s)?;
+        Ok(())
+    }
+}
+
 impl<B: Clone, F: FieldExt> Serializable for Polynomial<F, B> {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         let u = read_u32(reader)?;
-        let mut buf = vec![0u8; u as usize * 32];
-        reader.read_exact(&mut buf)?;
-        let s: &[F] = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const F, u as usize) };
-        Ok(Polynomial::new(s.to_vec()))
+
+        let chunk_lens = Vec::<u32>::fetch(reader)?;
+        let mut chunks = vec![];
+        for len in chunk_lens.into_iter() {
+            let mut buf = vec![0u8; len as usize];
+            reader.read_exact(&mut buf)?;
+            chunks.push(buf);
+        }
+
+        let full_len = F::default().to_repr().as_ref().len();
+        let s = chunks
+            .par_iter()
+            .map(|chunk| {
+                let mut i = 0usize;
+                let mut values = vec![];
+                while i < chunk.len() {
+                    let len = chunk[i] as usize;
+                    assert!(full_len >= len as usize);
+                    i += 1;
+                    let val = &chunk[i..i + len as usize]
+                        .iter()
+                        .chain(vec![0u8; full_len - len].iter())
+                        .map(|&x| x)
+                        .collect::<Vec<_>>();
+                    let mut repr = <F as ff::PrimeField>::Repr::default();
+                    repr.as_mut().copy_from_slice(&val);
+                    values.push(F::from_repr(repr).unwrap());
+                    i += len;
+                }
+                values
+            })
+            .fold(
+                || vec![],
+                |mut acc, x| {
+                    acc.extend(x);
+                    acc
+                },
+            )
+            .reduce(
+                || vec![],
+                |mut acc, x| {
+                    acc.extend(x);
+                    acc
+                },
+            );
+        assert_eq!(s.len(), u as usize);
+        Ok(Polynomial::new(s))
     }
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         let u = self.values.len() as u32;
         u.store(writer)?;
-        let s: &[u8] = unsafe {
-            std::slice::from_raw_parts(self.values.as_ptr() as *const u8, u as usize * 32)
-        };
-        writer.write(s)?;
+
+        let threads = 32;
+        let mut chunk = u as usize / threads;
+        if chunk < threads {
+            chunk = u as usize;
+        }
+        let chunks = self
+            .values
+            .par_chunks(chunk)
+            .map(|values| {
+                values
+                    .iter()
+                    .map(|v| reduce_buf_u8(v.to_repr().as_ref()))
+                    .fold(vec![], |mut acc, x| {
+                        acc.extend(x);
+                        acc
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let chunk_slices_lens = chunks.iter().map(|v| v.len() as u32).collect::<Vec<_>>();
+
+        chunk_slices_lens.store(writer)?;
+        for s in chunks {
+            writer.write(&s)?;
+        }
         Ok(())
     }
 }
@@ -833,6 +1008,21 @@ impl ParaSerializable for Assembly {
     }
 }
 
+impl Serializable for Assembly {
+    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let assembly = Assembly {
+            mapping: Vec::<Vec<(u32, u32)>>::fetch(reader)?,
+        };
+        Ok(assembly)
+    }
+    /// Reads a compressed element from the buffer and attempts to parse it
+    /// using `from_bytes`.
+    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        self.mapping.store(writer)?;
+        Ok(())
+    }
+}
+
 impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
     pub fn store_witness<ConcreteCircuit: Circuit<C::Scalar>>(
         params: &Params<C>,
@@ -952,12 +1142,25 @@ impl<F: FieldExt> Serializable for Assigned<F> {
         match num::FromPrimitive::from_u32(code).unwrap() {
             AssignedCode::Zero => Ok(Assigned::Zero),
             AssignedCode::Trivial => {
-                let scalar = F::read(reader)?;
+                let mut v = read_reduced_buf_u8(reader)?;
+                let mut repr = <F as ff::PrimeField>::Repr::default();
+                v.resize(repr.as_ref().len(), 0);
+                repr.as_mut().copy_from_slice(&v);
+                let scalar = F::from_repr(repr).unwrap();
                 Ok(Assigned::Trivial(scalar))
             }
             AssignedCode::Rational => {
-                let p = F::read(reader)?;
-                let q = F::read(reader)?;
+                let mut v = read_reduced_buf_u8(reader)?;
+                let mut repr = <F as ff::PrimeField>::Repr::default();
+                v.resize(repr.as_ref().len(), 0);
+                repr.as_mut().copy_from_slice(&v);
+                let p = F::from_repr(repr).unwrap();
+
+                let mut v = read_reduced_buf_u8(reader)?;
+                let mut repr = <F as ff::PrimeField>::Repr::default();
+                v.resize(repr.as_ref().len(), 0);
+                repr.as_mut().copy_from_slice(&v);
+                let q = F::from_repr(repr).unwrap();
                 Ok(Assigned::Rational(p, q))
             }
         }
@@ -968,12 +1171,12 @@ impl<F: FieldExt> Serializable for Assigned<F> {
         match self {
             Assigned::Zero => Ok(()),
             Assigned::Trivial(f) => {
-                writer.write(&mut f.to_repr().as_ref())?;
+                writer.write(&reduce_buf_u8(f.to_repr().as_ref()))?;
                 Ok(())
             }
             Assigned::Rational(p, q) => {
-                writer.write(&mut p.to_repr().as_ref())?;
-                writer.write(&mut q.to_repr().as_ref())?;
+                writer.write(&reduce_buf_u8(p.to_repr().as_ref()))?;
+                writer.write(&reduce_buf_u8(q.to_repr().as_ref()))?;
                 Ok(())
             }
         }
@@ -999,7 +1202,7 @@ where
     fixed.store(fd)?;
     end_timer!(timer);
     let timer = start_timer!(|| "test store permutation ...");
-    permutation.vec_store(fd)?;
+    permutation.store(fd)?;
     end_timer!(timer);
     Ok(())
 }
@@ -1015,7 +1218,7 @@ pub fn fetch_pk_info<C: CurveAffine>(
     let fixed = Vec::fetch(reader)?;
     end_timer!(timer);
     let timer = start_timer!(|| "test fetch permutation ...");
-    let permutation = Assembly::vec_fetch(reader)?;
+    let permutation = Assembly::fetch(reader)?;
     end_timer!(timer);
     let pkey = keygen_pk_from_info(params, vk, fixed, permutation).unwrap();
     Ok(pkey)
