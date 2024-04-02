@@ -243,11 +243,7 @@ impl<'a, F: Field> Assignment<F> for ProofWitnessCollection<'a, F> {
                 }
 
                 let assigned: Assigned<F> = to()?.into();
-                let v = if let Some(inv) = assigned.denominator() {
-                    assigned.numerator() * inv.invert().unwrap()
-                } else {
-                    assigned.numerator()
-                };
+                let v = assigned.lazy_convert();
 
                 let column = self
                     .advice

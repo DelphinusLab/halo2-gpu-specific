@@ -66,6 +66,12 @@ fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
     Ok(u32::from_le_bytes(r))
 }
 
+fn read_u256<R: io::Read>(reader: &mut R) -> io::Result<[u8; 32]> {
+    let mut r = [0u8; 32];
+    reader.read(&mut r)?;
+    Ok(r)
+}
+
 impl Serializable for u32 {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         let u = read_u32(reader)?;
@@ -919,6 +925,7 @@ enum AssignedCode {
     Zero = 0,
     Trivial,
     Rational,
+    Raw,
 }
 
 fn assigned_code<F: FieldExt>(e: &Assigned<F>) -> AssignedCode {
@@ -926,6 +933,7 @@ fn assigned_code<F: FieldExt>(e: &Assigned<F>) -> AssignedCode {
         Assigned::Zero => AssignedCode::Zero,
         Assigned::Trivial(_) => AssignedCode::Trivial,
         Assigned::Rational(_, _) => AssignedCode::Rational,
+        Assigned::Raw(_) => AssignedCode::Raw,
     }
 }
 
@@ -943,6 +951,9 @@ impl<F: FieldExt> Serializable for Assigned<F> {
                 let q = F::read(reader)?;
                 Ok(Assigned::Rational(p, q))
             }
+            AssignedCode::Raw => {
+                Ok(Assigned::Raw(read_u256(reader)?))
+            }
         }
     }
 
@@ -957,6 +968,10 @@ impl<F: FieldExt> Serializable for Assigned<F> {
             Assigned::Rational(p, q) => {
                 writer.write(&mut p.to_repr().as_ref())?;
                 writer.write(&mut q.to_repr().as_ref())?;
+                Ok(())
+            }
+            Assigned::Raw(a) => {
+                writer.write(&mut a.as_ref())?;
                 Ok(())
             }
         }

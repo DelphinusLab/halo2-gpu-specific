@@ -1,5 +1,6 @@
 use std::ops::{Add, Mul, Neg, Sub};
 
+use cuda_driver_sys::cuMemcpy;
 use group::ff::Field;
 
 /// A value assigned to a cell within a circuit.
@@ -9,6 +10,8 @@ use group::ff::Field;
 /// A denominator of zero maps to an assigned value of zero.
 #[derive(Clone, Copy, Debug)]
 pub enum Assigned<F> {
+    ///
+    Raw([u8; 32]),
     /// The field element zero.
     Zero,
     /// A value that does not require inversion to evaluate.
@@ -42,6 +45,7 @@ impl<F: Field> Neg for Assigned<F> {
             Self::Zero => Self::Zero,
             Self::Trivial(numerator) => Self::Trivial(-numerator),
             Self::Rational(numerator, denominator) => Self::Rational(-numerator, denominator),
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 }
@@ -74,6 +78,7 @@ impl<F: Field> Add for Assigned<F> {
                 lhs_numerator * rhs_denominator + lhs_denominator * rhs_numerator,
                 lhs_denominator * rhs_denominator,
             ),
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 }
@@ -116,6 +121,7 @@ impl<F: Field> Mul for Assigned<F> {
                 lhs_numerator * rhs_numerator,
                 lhs_denominator * rhs_denominator,
             ),
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 }
@@ -128,12 +134,41 @@ impl<F: Field> Mul<F> for Assigned<F> {
 }
 
 impl<F: Field> Assigned<F> {
+    /// convert to F
+    pub fn lazy_convert(self) -> F {
+        match self {
+            Self::Zero => F::zero(),
+            Self::Trivial(x) => x,
+            Self::Rational(numerator, denominator) => {
+                if denominator == F::one() {
+                    numerator
+                } else {
+                    numerator * denominator.invert().unwrap_or(F::zero())
+                }
+            },
+            Self::Raw(_a) => {
+                F::zero()
+            },
+        }
+    }
+
+    /// purify without raw type
+    pub fn purify(&self) -> Self {
+        match self {
+            Self::Raw(a) => {
+                Self::Trivial(Self::Raw(a.clone()).lazy_convert())
+            },
+            _ => self.clone()
+        }
+    }
+
     /// Returns the numerator.
     pub fn numerator(&self) -> F {
         match self {
             Self::Zero => F::zero(),
             Self::Trivial(x) => *x,
             Self::Rational(numerator, _) => *numerator,
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 
@@ -143,6 +178,7 @@ impl<F: Field> Assigned<F> {
             Self::Zero => None,
             Self::Trivial(_) => None,
             Self::Rational(_, denominator) => Some(*denominator),
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 
@@ -152,6 +188,7 @@ impl<F: Field> Assigned<F> {
             Self::Zero => Self::Zero,
             Self::Trivial(x) => Self::Rational(F::one(), *x),
             Self::Rational(numerator, denominator) => Self::Rational(*denominator, *numerator),
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 
@@ -169,7 +206,8 @@ impl<F: Field> Assigned<F> {
                 } else {
                     numerator * denominator.invert().unwrap_or(F::zero())
                 }
-            }
+            },
+            _ => panic!("Assigned Raw can't do F operation"),
         }
     }
 }
