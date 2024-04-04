@@ -6,12 +6,7 @@ use std::{
 #[derive(Debug)]
 pub struct Parallel<T: Debug>(Arc<Mutex<T>>);
 
-// derive failed
-impl<T: Debug> Clone for Parallel<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
+unsafe impl<T: Debug> Sync for Parallel<T> {}
 
 impl<T: Debug> Parallel<T> {
     pub(crate) fn new(v: T) -> Self {

@@ -46,7 +46,6 @@ struct Assembly {
     selectors: Vec<Vec<bool>>,
 }
 
-#[derive(Clone)]
 struct AssemblyAssigner {
     selectors: Arc<Mutex<Vec<Vec<bool>>>>,
 }

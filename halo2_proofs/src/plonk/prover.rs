@@ -1220,13 +1220,14 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
     let meta = &pk.vk.cs;
 
-    #[derive(Clone)]
     struct WitnessCollection<'a, F: Field> {
         pub advice: &'a [*mut [F]],
         instances: &'a [&'a [F]],
         usable_rows: core::ops::RangeTo<usize>,
         _marker: std::marker::PhantomData<F>,
     }
+
+    unsafe impl<'a, F: Field> Sync for WitnessCollection<'a, F> {}
 
     impl<'a, F: Field> Assignment<F> for WitnessCollection<'a, F> {
         fn is_in_prove_mode(&self) -> bool {

@@ -293,7 +293,7 @@ impl TableColumn {
 
 /// This trait allows a [`Circuit`] to direct some backend to assign a witness
 /// for a constraint system.
-pub trait Assignment<F: Field>: Clone {
+pub trait Assignment<F: Field>: Sync {
     /// Detects whether the assignment is in proving mode or not
     /// If it is in proving mode, we could avoid assign fixed and
     /// copy constraints

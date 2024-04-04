@@ -160,19 +160,15 @@ impl FloorPlanner for V1 {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a> {
     Measurement(&'p MeasurementPassAssignment),
     Assignment(&'p AssignmentPass<'p, 'a, F, CS>),
 }
 
 /// A single pass of the [`V1`] layouter.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct V1Pass<'p, 'a, F: Field, CS: Assignment<F> + 'a>(Pass<'p, 'a, F, CS>);
-
-unsafe impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> Send for V1Pass<'p, 'a, F, CS> {
-    // empty.
-}
 
 impl<'p, 'a, F: Field, CS: Assignment<F> + 'a> V1Pass<'p, 'a, F, CS> {
     fn measure(pass: &'p mut MeasurementPassAssignment) -> Self {

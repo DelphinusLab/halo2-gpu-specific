@@ -67,7 +67,7 @@ struct Assembly<F: Field> {
 }
 
 /// Assembly to be used in circuit synthesis.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct AssemblyAssigner<F: Field> {
     k: u32,
     fixed: Arc<Mutex<Vec<Polynomial<Assigned<F>, LagrangeCoeff>>>>,
@@ -77,6 +77,8 @@ struct AssemblyAssigner<F: Field> {
     usable_rows: Range<usize>,
     _marker: std::marker::PhantomData<F>,
 }
+
+unsafe impl<F: Field> Sync for AssemblyAssigner<F> {}
 
 impl<F: FieldExt> Into<Assembly<F>> for AssemblyAssigner<F> {
     fn into(self) -> Assembly<F> {

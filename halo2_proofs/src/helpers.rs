@@ -667,7 +667,7 @@ pub struct AssignWitnessCollection<'a, C: CurveAffine> {
     pub usable_rows: RangeTo<usize>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AssignWitnessCollectionAssigner<'a, C: CurveAffine> {
     pub k: u32,
     pub advice: Arc<Mutex<Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>>>,

@@ -161,13 +161,12 @@ where
 /// TODO: It would be great if we could constrain the columns in these types to be
 /// "logical" columns that are guaranteed to correspond to the chip (and have come from
 /// `Chip::Config`).
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct Region<'r, F: Field> {
     region: &'r dyn layouter::RegionLayouter<F>,
 }
 
 unsafe impl<'r, F: Field> Sync for Region<'r, F> {}
-unsafe impl<'r, F: Field> Send for Region<'r, F> {}
 
 impl<'r, F: Field> From<&'r dyn layouter::RegionLayouter<F>> for Region<'r, F> {
     fn from(region: &'r dyn layouter::RegionLayouter<F>) -> Self {
@@ -382,7 +381,7 @@ impl<'r, F: Field> Table<'r, F> {
 ///
 /// This abstracts over the circuit assignments, handling row indices etc.
 ///
-pub trait Layouter<F: Field>: Clone + Send {
+pub trait Layouter<F: Field>: Sync {
     /// Represents the type of the "root" of this layouter, so that nested namespaces
     /// can minimize indirection.
     type Root: Layouter<F>;
@@ -460,12 +459,8 @@ pub trait Layouter<F: Field>: Clone + Send {
 
 /// This is a "namespaced" layouter which borrows a `Layouter` (pushing a namespace
 /// context) and, when dropped, pops out of the namespace context.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct NamespacedLayouter<'a, F: Field, L: Layouter<F> + 'a>(&'a L, PhantomData<F>);
-
-unsafe impl<'a, F: Field, L: Layouter<F> + 'a> Send for NamespacedLayouter<'a, F, L> {
-    // empty.
-}
 
 impl<'a, F: Field, L: Layouter<F> + 'a> Layouter<F> for NamespacedLayouter<'a, F, L> {
     type Root = L::Root;

@@ -94,7 +94,7 @@ impl FloorPlanner for FlatFloorPlanner {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct FlatShapeDynamic<F: Field> {
     constants_to_assign: Vec<(Assigned<F>, Cell)>,
     /// number of regions
@@ -105,14 +105,20 @@ pub struct FlatShapeDynamic<F: Field> {
 }
 
 /// A [`Layouter`] for a single-chip circuit.
-#[derive(Clone)]
 pub struct FlatShapeLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a CS,
     dynamic: Arc<Mutex<FlatShapeDynamic<F>>>,
 }
 
-unsafe impl<'a, F: Field, CS: Assignment<F> + 'a> Send for FlatShapeLayouter<'a, F, CS> {
-    // No need to provide methods; it's a marker trait
+// Clone derive needs all type parameters to be Clone
+// See issue 'https://github.com/rust-lang/rust/issues/41481'
+impl<'a, F: Field, CS: Assignment<F> + 'a> Clone for FlatShapeLayouter<'a, F, CS> {
+    fn clone(&self) -> Self {
+        Self {
+            cs: self.cs,
+            dynamic: self.dynamic.clone(),
+        }
+    }
 }
 
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for FlatShapeLayouter<'a, F, CS> {
@@ -262,14 +268,9 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> Layouter<F> for FlatShapeLayouter<'a,
 }
 
 /// A [`Layouter`] for a single-chip circuit.
-#[derive(Clone)]
 pub struct FlatChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
     cs: &'a CS,
     _mark: PhantomData<F>,
-}
-
-unsafe impl<'a, F: Field, CS: Assignment<F> + 'a> Send for FlatChipLayouter<'a, F, CS> {
-    // No need to provide methods; it's a marker trait
 }
 
 impl<'a, F: Field, CS: Assignment<F>> FlatChipLayouter<'a, F, CS> {

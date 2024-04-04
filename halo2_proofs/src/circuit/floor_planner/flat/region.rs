@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 /// The shape of a region. For a region at a certain index, we track
 /// the set of columns it uses as well as the number of rows it uses.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct RegionSetup<F: Field> {
     pub(super) region_index: RegionIndex,
     pub(super) columns: HashSet<RegionColumn>,
