@@ -209,14 +209,16 @@ impl Calculation {
                     advice_values,
                     instance_values,
                 );
-                let mut x = match lcx {
+                let x = match lcx {
                     LcChallenge::Beta => beta,
                     LcChallenge::Gamma => gamma,
                 };
+
                 if *p > 1 {
-                    x = x.pow_vartime([*p as u64, 0, 0, 0]);
+                    (a + x.pow_vartime([*p as u64, 0, 0, 0])) * b
+                } else {
+                    (a + x) * b
                 }
-                (a + x) * b
             }
             Calculation::LcTheta(a, b) => {
                 let a = a.get(
