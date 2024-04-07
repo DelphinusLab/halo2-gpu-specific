@@ -79,7 +79,6 @@ pub struct ArgumentElement<F: Field> {
 
 impl<F: Field> ArgumentElement<F> {
     /// Constructs a new shuffle lookup argument.
-    ///
     /// `shuffle_map` is a sequence of `(input, shuffle)` tuples.
     pub fn new(name: &'static str, shuffle_map: Vec<(Expression<F>, Expression<F>)>) -> Self {
         let (input_expressions, shuffle_expressions) = shuffle_map.into_iter().unzip();
@@ -104,10 +103,11 @@ impl<F: Field> ArgumentElement<F> {
         std::cmp::max(shuffle_degree, input_degree)
     }
 
+    //get shuffle gate's max degree
     pub(crate) fn required_degree(&self) -> usize {
         assert_eq!(self.input_expressions.len(), self.shuffle_expressions.len());
         // degree 2+input or 2+shuffle degree:
-        // (1 - (l_last + l_blind)) (z(\omega X) (s(X) + \gamma) - z(X) (a(X) + \gamma))
+        // (1 - (l_last + l_blind)) (z(\omega X) (s1(X) + \beta) - z(X) (a(X) + \beta))
         let mut input_degree = 1;
         for expr in self.input_expressions.iter() {
             input_degree = std::cmp::max(input_degree, expr.degree());

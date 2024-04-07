@@ -36,7 +36,7 @@ fn shuffled<F: FieldExt, R: RngCore, const W: usize, const H: usize>(
 }
 
 #[derive(Clone)]
-struct MyConfig<const W: usize, const T: usize, const G: usize> {
+struct MyConfig<const W: usize, const T: usize, const B: usize> {
     q_shuffle: Column<Fixed>,
     q_first: Column<Fixed>,
     q_last: Column<Fixed>,
@@ -45,13 +45,13 @@ struct MyConfig<const W: usize, const T: usize, const G: usize> {
     z: Column<Advice>,
 }
 
-impl<const W: usize, const T: usize, const G: usize> MyConfig<W, T, G> {
+impl<const W: usize, const T: usize, const B: usize> MyConfig<W, T, B> {
     fn configure<F: FieldExt>(meta: &mut ConstraintSystem<F>) -> Self {
         let [q_shuffle, q_first, q_last] = [(); 3].map(|_| meta.fixed_column());
         let original = [(); W].map(|_| meta.advice_column());
         let shuffled = [(); W].map(|_| meta.advice_column());
         let theta = Expression::Constant(F::from(T as u64));
-        let gamma = Expression::Constant(F::from(G as u64));
+        let beta = Expression::Constant(F::from(B as u64));
         let z = meta.advice_column();
 
         meta.create_gate("z should start with 1", |meta| {
@@ -88,7 +88,7 @@ impl<const W: usize, const T: usize, const G: usize> MyConfig<W, T, G> {
                 .reduce(|acc, a| acc * theta.clone() + a)
                 .unwrap();
 
-            vec![q_shuffle * (z_cur * (original + gamma.clone()) - z_next * (shuffled + gamma))]
+            vec![q_shuffle * (z_cur * (original + beta.clone()) - z_next * (shuffled + beta))]
         });
 
         Self {
@@ -103,13 +103,13 @@ impl<const W: usize, const T: usize, const G: usize> MyConfig<W, T, G> {
 }
 
 #[derive(Clone)]
-struct MyCircuit<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> {
+struct MyCircuit<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize> {
     original: [[F; H]; W],
     shuffled: [[F; H]; W],
 }
 
-impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Default
-    for MyCircuit<F, W, H, T, G>
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize> Default
+    for MyCircuit<F, W, H, T, B>
 {
     fn default() -> Self {
         Self {
@@ -119,8 +119,8 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
     }
 }
 
-impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize>
-    MyCircuit<F, W, H, T, G>
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize>
+    MyCircuit<F, W, H, T, B>
 {
     fn rand<R: RngCore>(rng: &mut R) -> Self {
         let original = rand_2d_array::<F, _, W, H>(rng);
@@ -133,10 +133,10 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
     }
 }
 
-impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize> Circuit<F>
-    for MyCircuit<F, W, H, T, G>
+impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize> Circuit<F>
+    for MyCircuit<F, W, H, T, B>
 {
-    type Config = MyConfig<W, T, G>;
+    type Config = MyConfig<W, T, B>;
     type FloorPlanner = SimpleFloorPlanner;
 
     fn without_witnesses(&self) -> Self {
@@ -153,7 +153,7 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
         let theta = F::from(T as u64);
-        let gamma = F::from(G as u64);
+        let beta = F::from(B as u64);
 
         layouter.assign_region(
             || "Shuffle original into shuffled",
@@ -200,7 +200,7 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
                                 compressed += value[idx];
                             }
 
-                            *product = compressed + gamma
+                            *product = compressed + beta
                         }
 
                         product.iter_mut().batch_invert();
@@ -212,7 +212,7 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
                                 compressed += value[idx];
                             }
 
-                            *product *= compressed + gamma
+                            *product *= compressed + beta
                         }
 
                         #[allow(clippy::let_and_return)]
@@ -246,9 +246,9 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const G: usize
     }
 }
 
-fn test_prover<const W: usize, const H: usize, const T: usize, const G: usize>(
+fn test_prover<const W: usize, const H: usize, const T: usize, const B: usize>(
     k: u32,
-    circuit: MyCircuit<Fp, W, H, T, G>,
+    circuit: MyCircuit<Fp, W, H, T, B>,
 ) {
     let public_inputs_size = 0;
     // Initialize the polynomial commitment parameters
@@ -283,15 +283,15 @@ fn main() {
     const H: usize = 32;
 
     const THETA: usize = 111;
-    const GAMMA: usize = 222;
+    const BETA: usize = 222;
 
     // The number of rows in our circuit cannot exceed 2^k
     let k = 10;
 
-    let circuit = MyCircuit::<Fp, W, H, THETA, GAMMA>::rand(&mut OsRng);
+    let circuit = MyCircuit::<Fp, W, H, THETA, BETA>::rand(&mut OsRng);
 
     let prover = MockProver::run(k, &circuit, vec![]).unwrap();
     assert_eq!(prover.verify(), Ok(()));
 
-    test_prover::<W, H, THETA, GAMMA>(k, circuit);
+    test_prover::<W, H, THETA, BETA>(k, circuit);
 }

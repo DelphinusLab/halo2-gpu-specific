@@ -4,7 +4,6 @@ use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
 use super::ArgumentGroup;
-use crate::plonk::ChallengeDelta;
 use crate::{
     arithmetic::{BaseExt, CurveAffine, FieldExt},
     plonk::{Error, VerifyingKey},
@@ -65,16 +64,13 @@ impl<C: CurveAffine> Evaluated<C> {
         argument: &'a ArgumentGroup<C::Scalar>,
         theta: ChallengeTheta<C>,
         beta: ChallengeBeta<C>,
-        gamma: ChallengeGamma<C>,
-        delta: ChallengeDelta<C>,
         advice_evals: &[C::Scalar],
         fixed_evals: &[C::Scalar],
         instance_evals: &[C::Scalar],
     ) -> impl Iterator<Item = C::Scalar> + 'a {
         let active_rows = C::Scalar::one() - (l_last + l_blind);
         let product_expression = || {
-            // z(\omega X) (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
-            // - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \gamma)
+            // (\theta^{m-1} s_0(X) + ... + s_{m-1}(X))
             let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
                 expressions
                     .iter()
@@ -93,15 +89,17 @@ impl<C: CurveAffine> Evaluated<C> {
                     })
                     .fold(C::Scalar::zero(), |acc, eval| acc * &*theta + &eval)
             };
-
+            let challenges: Vec<C::Scalar> = (0..argument.0.len())
+                .map(|i| beta.pow_vartime([1 + i as u64, 0, 0, 0]))
+                .collect();
             let (product_shuffle, product_input) = argument
                 .0
                 .iter()
-                .zip([*beta, *gamma, *delta])
+                .zip(challenges.iter())
                 .map(|(argument, lcx)| {
                     (
-                        compress_expressions(&argument.shuffle_expressions) + &lcx,
-                        compress_expressions(&argument.input_expressions) + &lcx,
+                        compress_expressions(&argument.shuffle_expressions) + lcx,
+                        compress_expressions(&argument.input_expressions) + lcx,
                     )
                 })
                 .fold((C::Scalar::one(), C::Scalar::one()), |acc, v| {
@@ -123,7 +121,7 @@ impl<C: CurveAffine> Evaluated<C> {
             )
             .chain(
                 // (1 - (l_last(X) + l_blind(X))) *
-                //( z(\omega X) (s1(X)+\beta)(s2(X)+\gamma) - z(X) (a1(X)+\beta)(a2(X)+\gamma))
+                //( z(\omega X) (s1(X)+\beta)(s2(X)+\beta^2) - z(X) (a1(X)+\beta)(a2(X)+\beta^2))
                 Some(product_expression()),
             )
     }

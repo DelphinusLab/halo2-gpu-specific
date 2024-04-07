@@ -5,7 +5,6 @@ use super::super::{
 use super::ArgumentGroup;
 use crate::arithmetic::{batch_invert, eval_polynomial_st};
 use crate::plonk::evaluation::{evaluate, evaluate_with_theta};
-use crate::plonk::ChallengeDelta;
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -115,11 +114,11 @@ impl<C: CurveAffine> Compressed<C> {
         pk: &ProvingKey<C>,
         params: &Params<C>,
         beta: ChallengeBeta<C>,
-        gamma: ChallengeGamma<C>,
-        delta: ChallengeDelta<C>,
     ) -> Result<Vec<C::Scalar>, Error> {
         let blinding_factors = pk.vk.cs.blinding_factors();
-        let challenges: Vec<C::Scalar> = vec![*beta, *gamma, *delta];
+        let challenges: Vec<C::Scalar> = (0..self.shuffle_expressions_group.len())
+            .map(|i| beta.pow_vartime([1 + i as u64, 0, 0, 0]))
+            .collect();
         let mut shuffle_product = vec![C::Scalar::one(); params.n as usize];
 
         // #[cfg(not(feature = "cuda"))]
@@ -163,7 +162,7 @@ impl<C: CurveAffine> Compressed<C> {
             let u = (params.n as usize) - (blinding_factors + 1);
             // l_0(X) * (1 - z(X)) = 0
             assert_eq!(z[0], C::Scalar::one());
-            // z(\omega X) (s1(X)+\beta)(s2(X)+\gamma) - z(X)(a1(X)+\beta)(a2(X)+\gamma) =0
+            // z(\omega X) (s1(X)+\beta)(s2(X)+\beta^2) - z(X)(a1(X)+\beta)(a2(X)+\beta^2) =0
             for i in 0..u {
                 let mut left = z[i + 1];
                 let table_term = self
