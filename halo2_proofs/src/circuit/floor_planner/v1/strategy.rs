@@ -207,7 +207,7 @@ pub fn slot_in_biggest_advice_first(
             .columns()
             .iter()
             .filter(|c| match c {
-                RegionColumn::Column(c) => matches!(c.column_type(), Any::Advice),
+                RegionColumn::Column(c) => matches!(c.column_type(), Any::Advice(_)),
                 _ => false,
             })
             .count();
@@ -228,12 +228,12 @@ pub fn slot_in_biggest_advice_first(
 
 #[test]
 fn test_slot_in() {
-    use crate::plonk::Column;
+    use crate::plonk::{Column, AssignedType};
 
     let regions = vec![
         RegionShape {
             region_index: 0.into(),
-            columns: vec![Column::new(0, Any::Advice), Column::new(1, Any::Advice)]
+            columns: vec![Column::new(0, Any::Advice(AssignedType::Field)), Column::new(1, Any::Advice(AssignedType::Field))]
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),
@@ -241,7 +241,7 @@ fn test_slot_in() {
         },
         RegionShape {
             region_index: 1.into(),
-            columns: vec![Column::new(2, Any::Advice)]
+            columns: vec![Column::new(2, Any::Advice(AssignedType::Field))]
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),
@@ -249,7 +249,7 @@ fn test_slot_in() {
         },
         RegionShape {
             region_index: 2.into(),
-            columns: vec![Column::new(2, Any::Advice), Column::new(0, Any::Advice)]
+            columns: vec![Column::new(2, Any::Advice(AssignedType::Field)), Column::new(0, Any::Advice(AssignedType::Field))]
                 .into_iter()
                 .map(|a| a.into())
                 .collect(),

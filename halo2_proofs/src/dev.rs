@@ -413,9 +413,9 @@ impl<F: Group + Field> Mul<F> for Value<F> {
 ///     }
 ///
 ///     fn configure(meta: &mut ConstraintSystem<F>) -> MyConfig {
-///         let a = meta.advice_column();
-///         let b = meta.advice_column();
-///         let c = meta.advice_column();
+///         let a = meta.advice_column(false);
+///         let b = meta.advice_column(false);
+///         let c = meta.advice_column(false);
 ///         let s = meta.selector();
 ///
 ///         meta.create_gate("R1CS constraint", |meta| {
@@ -1047,8 +1047,8 @@ impl<F: FieldExt> MockProver<F> {
                     .get_columns()
                     .get(column)
                     .map(|c: &Column<Any>| match c.column_type() {
-                        Any::Advice => self.advice[c.index()][row],
-                        Any::Fixed => self.fixed[c.index()][row],
+                        Any::Advice(_) => self.advice[c.index()][row],
+                        Any::Fixed(_) => self.fixed[c.index()][row],
                         Any::Instance => CellValue::Assigned(self.instance[c.index()][row]),
                     })
                     .unwrap()
@@ -1111,7 +1111,7 @@ mod tests {
         circuit::{Layouter, SimpleFloorPlanner},
         plonk::{
             Advice, Any, Circuit, Column, ConstraintSystem, Error, Expression, Selector,
-            TableColumn,
+            TableColumn, AssignedType,
         },
         poly::Rotation,
     };
@@ -1133,8 +1133,8 @@ mod tests {
             type FloorPlanner = SimpleFloorPlanner;
 
             fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-                let a = meta.advice_column();
-                let b = meta.advice_column();
+                let a = meta.advice_column(false);
+                let b = meta.advice_column(false);
                 let q = meta.selector();
 
                 meta.create_gate("Equality check", |cells| {
@@ -1182,7 +1182,7 @@ mod tests {
             Err(vec![VerifyFailure::CellNotAssigned {
                 gate: (0, "Equality check").into(),
                 region: (0, "Faulty synthesis".to_owned()).into(),
-                column: Column::new(1, Any::Advice),
+                column: Column::new(1, Any::Advice(AssignedType::Field)),
                 offset: 1,
             }])
         );
@@ -1206,7 +1206,7 @@ mod tests {
             type FloorPlanner = SimpleFloorPlanner;
 
             fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-                let a = meta.advice_column();
+                let a = meta.advice_column(false);
                 let q = meta.complex_selector();
                 let table = meta.lookup_table_column();
 

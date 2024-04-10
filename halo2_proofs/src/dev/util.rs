@@ -5,7 +5,7 @@ use pairing::arithmetic::FieldExt;
 
 use super::{metadata, Value};
 use crate::{
-    plonk::{Any, Expression, Gate, VirtualCell},
+    plonk::{Any, Expression, Gate, VirtualCell, AssignedType},
     poly::Rotation,
 };
 

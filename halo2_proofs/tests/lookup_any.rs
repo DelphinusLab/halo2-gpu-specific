@@ -28,9 +28,9 @@ fn lookup_any() {
     impl<F: FieldExt> MyConfig<F> {
         fn configure(meta: &mut ConstraintSystem<F>) -> Self {
             let config = Self {
-                input: meta.advice_column(),
+                input: meta.advice_column(false),
                 q_even: meta.complex_selector(),
-                table_even: meta.advice_column(),
+                table_even: meta.advice_column(false),
                 q_odd: meta.complex_selector(),
                 table_odd: meta.instance_column(),
                 _marker: PhantomData,

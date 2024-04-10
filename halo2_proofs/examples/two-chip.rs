@@ -480,7 +480,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
         // We create the two advice columns that FieldChip uses for I/O.
-        let advice = [meta.advice_column(), meta.advice_column()];
+        let advice = [meta.advice_column(false), meta.advice_column(false)];
 
         // We also need an instance column to store public inputs.
         let instance = meta.instance_column();

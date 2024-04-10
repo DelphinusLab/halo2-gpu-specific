@@ -16,7 +16,7 @@ mod compress_selectors;
 
 /// A column type
 pub trait ColumnType:
-    'static + Sized + Copy + std::fmt::Debug + PartialEq + Eq + Into<Any>
+    'static + Sized + Copy + std::fmt::Debug + PartialEq + Eq + Into<Any> + From<u32> + Into<u32>
 {
 }
 
@@ -47,7 +47,9 @@ impl<C: ColumnType> Ord for Column<C> {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // This ordering is consensus-critical! The layouters rely on deterministic column
         // orderings.
-        match self.column_type.into().cmp(&other.column_type.into()) {
+        let l: Any = self.column_type.into();
+        let r: Any = other.column_type.into();
+        match l.cmp(&r) {
             // Indices are assigned within column types.
             std::cmp::Ordering::Equal => self.index.cmp(&other.index),
             order => order,
@@ -61,13 +63,21 @@ impl<C: ColumnType> PartialOrd for Column<C> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum AssignedType {
+    /// need convert later
+    Raw,
+    /// no need convert
+    Field,
+}
+
 /// An advice column
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Advice;
+pub struct Advice(pub AssignedType);
 
 /// A fixed column
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-pub struct Fixed;
+pub struct Fixed(pub AssignedType);
 
 /// An instance column
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
@@ -77,29 +87,98 @@ pub struct Instance;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Any {
     /// An Advice variant
-    Advice,
+    Advice(AssignedType),
     /// A Fixed variant
-    Fixed,
+    Fixed(AssignedType),
     /// An Instance variant
     Instance,
+}
+
+impl Into<u32> for Any {
+    fn into(self) -> u32 {
+        match self {
+            Any::Advice(a) => a as u32 + 1,
+            Any::Fixed(a) => a as u32 + 3,
+            Any::Instance => 0,
+        }
+    }
+}
+
+impl From<u32> for Any {
+    fn from(v: u32) -> Any {
+        match v {
+            1 => Any::Advice(AssignedType::Raw),
+            2 => Any::Advice(AssignedType::Field),
+            3 => Any::Fixed(AssignedType::Raw),
+            4 => Any::Fixed(AssignedType::Field),
+            0 => Any::Instance,
+            _ => panic!("Invalid type"),
+        }
+    }
+}
+
+impl Into<u32> for Advice {
+    fn into(self) -> u32 {
+        let t: Any = self.into();
+        let v: u32 = t.into();
+        v
+    }
+}
+
+impl Into<u32> for Fixed {
+    fn into(self) -> u32 {
+        let t: Any = self.into();
+        let v: u32 = t.into();
+        v
+    }
+}
+
+impl Into<u32> for Instance {
+    fn into(self) -> u32 {
+        let t: Any = self.into();
+        let v: u32 = t.into();
+        v
+    }
+}
+
+impl From<u32> for Advice {
+    fn from(v: u32) -> Advice {
+        let t =  Any::from(v);
+        match t {
+            Any::Advice(a) => Advice(a),
+            _ => panic!("Invalid type"),
+        }
+    }
+}
+
+impl From<u32> for Fixed {
+    fn from(v: u32) -> Fixed {
+        let t =  Any::from(v);
+        match t {
+            Any::Fixed(a) => Fixed(a),
+            _ => panic!("Invalid type"),
+        }
+    }
+}
+
+impl From<u32> for Instance {
+    fn from(v: u32) -> Instance {
+        let t =  Any::from(v);
+        match t {
+            Any::Instance => Instance,
+            _ => panic!("Invalid type"),
+        }
+    }
 }
 
 impl Ord for Any {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         // This ordering is consensus-critical! The layouters rely on deterministic column
         // orderings.
-        match (self, other) {
-            (Any::Instance, Any::Instance)
-            | (Any::Advice, Any::Advice)
-            | (Any::Fixed, Any::Fixed) => std::cmp::Ordering::Equal,
-            // Across column types, sort Instance < Advice < Fixed.
-            (Any::Instance, Any::Advice)
-            | (Any::Advice, Any::Fixed)
-            | (Any::Instance, Any::Fixed) => std::cmp::Ordering::Less,
-            (Any::Fixed, Any::Instance)
-            | (Any::Fixed, Any::Advice)
-            | (Any::Advice, Any::Instance) => std::cmp::Ordering::Greater,
-        }
+        // Across column types, sort Instance < Advice < Fixed.
+        let l: u32 = self.clone().into();
+        let r: u32 = other.clone().into();
+        l.cmp(&r)
     }
 }
 
@@ -115,14 +194,14 @@ impl ColumnType for Instance {}
 impl ColumnType for Any {}
 
 impl From<Advice> for Any {
-    fn from(_: Advice) -> Any {
-        Any::Advice
+    fn from(t: Advice) -> Any {
+        Any::Advice(t.0.clone())
     }
 }
 
 impl From<Fixed> for Any {
-    fn from(_: Fixed) -> Any {
-        Any::Fixed
+    fn from(t: Fixed) -> Any {
+        Any::Fixed(t.0.clone())
     }
 }
 
@@ -133,27 +212,27 @@ impl From<Instance> for Any {
 }
 
 impl From<Column<Advice>> for Column<Any> {
-    fn from(advice: Column<Advice>) -> Column<Any> {
+    fn from(t: Column<Advice>) -> Column<Any> {
         Column {
-            index: advice.index(),
-            column_type: Any::Advice,
+            index: t.index(),
+            column_type: Any::Advice(t.column_type.0.clone()),
         }
     }
 }
 
 impl From<Column<Fixed>> for Column<Any> {
-    fn from(advice: Column<Fixed>) -> Column<Any> {
+    fn from(t: Column<Fixed>) -> Column<Any> {
         Column {
-            index: advice.index(),
-            column_type: Any::Fixed,
+            index: t.index(),
+            column_type: Any::Fixed(t.column_type.0.clone()),
         }
     }
 }
 
 impl From<Column<Instance>> for Column<Any> {
-    fn from(advice: Column<Instance>) -> Column<Any> {
+    fn from(t: Column<Instance>) -> Column<Any> {
         Column {
-            index: advice.index(),
+            index: t.index(),
             column_type: Any::Instance,
         }
     }
@@ -164,9 +243,9 @@ impl TryFrom<Column<Any>> for Column<Advice> {
 
     fn try_from(any: Column<Any>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            Any::Advice => Ok(Column {
+            Any::Advice(a) => Ok(Column {
                 index: any.index(),
-                column_type: Advice,
+                column_type: Advice(a.clone()),
             }),
             _ => Err("Cannot convert into Column<Advice>"),
         }
@@ -178,9 +257,9 @@ impl TryFrom<Column<Any>> for Column<Fixed> {
 
     fn try_from(any: Column<Any>) -> Result<Self, Self::Error> {
         match any.column_type() {
-            Any::Fixed => Ok(Column {
+            Any::Fixed(a) => Ok(Column {
                 index: any.index(),
-                column_type: Fixed,
+                column_type: Fixed(a.clone()),
             }),
             _ => Err("Cannot convert into Column<Fixed>"),
         }
@@ -210,8 +289,8 @@ impl TryFrom<Column<Any>> for Column<Instance> {
 /// # use halo2_proofs::plonk::ConstraintSystem;
 ///
 /// # let mut meta = ConstraintSystem::<Fp>::default();
-/// let a = meta.advice_column();
-/// let b = meta.advice_column();
+/// let a = meta.advice_column(false);
+/// let b = meta.advice_column(false);
 /// let s = meta.selector();
 ///
 /// meta.create_gate("foo", |meta| {
@@ -1324,8 +1403,8 @@ impl<F: Field> ConstraintSystem<F> {
 
     fn query_any_index(&mut self, column: Column<Any>, at: Rotation) -> usize {
         match column.column_type() {
-            Any::Advice => self.query_advice_index(Column::<Advice>::try_from(column).unwrap(), at),
-            Any::Fixed => self.query_fixed_index(Column::<Fixed>::try_from(column).unwrap(), at),
+            Any::Advice(_) => self.query_advice_index(Column::<Advice>::try_from(column).unwrap(), at),
+            Any::Fixed(_) => self.query_fixed_index(Column::<Fixed>::try_from(column).unwrap(), at),
             Any::Instance => {
                 self.query_instance_index(Column::<Instance>::try_from(column).unwrap(), at)
             }
@@ -1364,10 +1443,10 @@ impl<F: Field> ConstraintSystem<F> {
 
     pub fn get_any_query_index(&self, column: Column<Any>, at: Rotation) -> usize {
         match column.column_type() {
-            Any::Advice => {
+            Any::Advice(_) => {
                 self.get_advice_query_index(Column::<Advice>::try_from(column).unwrap(), at)
             }
-            Any::Fixed => {
+            Any::Fixed(_) => {
                 self.get_fixed_query_index(Column::<Fixed>::try_from(column).unwrap(), at)
             }
             Any::Instance => {
@@ -1462,7 +1541,7 @@ impl<F: Field> ConstraintSystem<F> {
                 .collect(),
             max_degree,
             || {
-                let column = self.fixed_column();
+                let column = self.fixed_column(false);
                 new_columns.push(column);
                 Expression::Fixed {
                     query_index: self.query_fixed_index(column, Rotation::cur()),
@@ -1567,25 +1646,27 @@ impl<F: Field> ConstraintSystem<F> {
     /// Allocates a new fixed column that can be used in a lookup table.
     pub fn lookup_table_column(&mut self) -> TableColumn {
         TableColumn {
-            inner: self.fixed_column(),
+            inner: self.fixed_column(false),
         }
     }
 
     /// Allocate a new fixed column
-    pub fn fixed_column(&mut self) -> Column<Fixed> {
+    pub fn fixed_column(&mut self, is_raw: bool) -> Column<Fixed> {
+        let assigned_type = if is_raw {AssignedType::Raw} else {AssignedType::Field};
         let tmp = Column {
             index: self.num_fixed_columns,
-            column_type: Fixed,
+            column_type: Fixed(assigned_type),
         };
         self.num_fixed_columns += 1;
         tmp
     }
 
     /// Allocate a new advice column
-    pub fn advice_column(&mut self) -> Column<Advice> {
+    pub fn advice_column(&mut self, is_raw: bool) -> Column<Advice> {
+        let assigned_type = if is_raw {AssignedType::Raw} else {AssignedType::Field};
         let tmp = Column {
             index: self.num_advice_columns,
-            column_type: Advice,
+            column_type: Advice(assigned_type),
         };
         self.num_advice_columns += 1;
         self.num_advice_queries.push(0);
@@ -1593,10 +1674,11 @@ impl<F: Field> ConstraintSystem<F> {
     }
 
     /// Allocate a new advice column
-    pub fn named_advice_column(&mut self, name: String) -> Column<Advice> {
+    pub fn named_advice_column(&mut self, name: String, is_raw: bool) -> Column<Advice> {
+        let assigned_type = if is_raw {AssignedType::Raw} else {AssignedType::Field};
         let res = Column {
             index: self.num_advice_columns,
-            column_type: Advice,
+            column_type: Advice(assigned_type),
         };
         self.named_advices
             .push((name, self.num_advice_columns as u32));
@@ -1747,8 +1829,8 @@ impl<'a, F: Field> VirtualCells<'a, F> {
     pub fn query_any<C: Into<Column<Any>>>(&mut self, column: C, at: Rotation) -> Expression<F> {
         let column = column.into();
         match column.column_type() {
-            Any::Advice => self.query_advice(Column::<Advice>::try_from(column).unwrap(), at),
-            Any::Fixed => self.query_fixed(Column::<Fixed>::try_from(column).unwrap(), at),
+            Any::Advice(_) => self.query_advice(Column::<Advice>::try_from(column).unwrap(), at),
+            Any::Fixed(_) => self.query_fixed(Column::<Fixed>::try_from(column).unwrap(), at),
             Any::Instance => self.query_instance(Column::<Instance>::try_from(column).unwrap(), at),
         }
     }

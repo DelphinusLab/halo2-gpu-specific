@@ -52,9 +52,9 @@ struct Gate {
 ///     }
 ///
 ///     fn configure(meta: &mut ConstraintSystem<F>) -> MyConfig {
-///         let a = meta.advice_column();
-///         let b = meta.advice_column();
-///         let c = meta.advice_column();
+///         let a = meta.advice_column(false);
+///         let b = meta.advice_column(false);
+///         let c = meta.advice_column(false);
 ///         let s = meta.selector();
 ///
 ///         meta.create_gate("R1CS constraint", |meta| {

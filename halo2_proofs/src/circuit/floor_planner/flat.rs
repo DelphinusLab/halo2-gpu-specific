@@ -522,7 +522,7 @@ mod tests {
             }
 
             fn configure(meta: &mut crate::plonk::ConstraintSystem<Scalar>) -> Self::Config {
-                meta.advice_column()
+                meta.advice_column(false)
             }
 
             fn synthesize(

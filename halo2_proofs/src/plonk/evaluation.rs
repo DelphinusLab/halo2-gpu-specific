@@ -681,8 +681,8 @@ impl<C: CurveAffine> Evaluator<C> {
                             for (values, permutation) in columns
                                 .iter()
                                 .map(|&column| match column.column_type() {
-                                    Any::Advice => &advice[column.index()],
-                                    Any::Fixed => &fixed[column.index()],
+                                    Any::Advice(_) => &advice[column.index()],
+                                    Any::Fixed(_) => &fixed[column.index()],
                                     Any::Instance => &instance[column.index()],
                                 })
                                 .zip(cosets.iter())
@@ -692,8 +692,8 @@ impl<C: CurveAffine> Evaluator<C> {
 
                             let mut right = set.permutation_product_coset[idx];
                             for values in columns.iter().map(|&column| match column.column_type() {
-                                Any::Advice => &advice[column.index()],
-                                Any::Fixed => &fixed[column.index()],
+                                Any::Advice(_) => &advice[column.index()],
+                                Any::Fixed(_) => &fixed[column.index()],
                                 Any::Instance => &instance[column.index()],
                             }) {
                                 right *= values[idx] + current_delta + gamma;

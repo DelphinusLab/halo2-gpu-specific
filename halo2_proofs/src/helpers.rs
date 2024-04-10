@@ -1,3 +1,4 @@
+use crate::plonk::AssignedType;
 use crate::plonk::circuit::FloorPlanner;
 use crate::{
     arithmetic::{CurveAffine, FieldExt},
@@ -252,22 +253,15 @@ impl<T: Serializable> Serializable for Vec<T> {
 impl Serializable for Column<Any> {
     fn store<W: io::Write>(&self, writer: &mut W) -> std::io::Result<()> {
         writer.write(&mut (self.index as u32).to_le_bytes())?;
-        writer.write(&mut (*self.column_type() as u32).to_le_bytes())?;
+        let t = *self.column_type();
+        let v: u32 = t.into();
+        writer.write(&mut v.to_le_bytes())?;
         Ok(())
     }
 
     fn fetch<R: io::Read>(reader: &mut R) -> std::io::Result<Self> {
         let index = read_u32(reader)?;
-        let typ = read_u32(reader)?;
-        let typ = if typ == Any::Advice as u32 {
-            Any::Advice
-        } else if typ == Any::Instance as u32 {
-            Any::Instance
-        } else if typ == Any::Fixed as u32 {
-            Any::Fixed
-        } else {
-            unreachable!()
-        };
+        let typ: Any = Any::from(read_u32(reader)?);
         Ok(Column {
             index: index as usize,
             column_type: typ,
@@ -301,14 +295,16 @@ fn write_column<T: ColumnType, W: std::io::Write>(
     column: &Column<T>,
     writer: &mut W,
 ) -> std::io::Result<()> {
+    let v: u32 = column.column_type.into();
+    writer.write(&mut v.to_le_bytes())?;
     writer.write(&mut (column.index as u32).to_le_bytes())?;
     Ok(())
 }
 
 fn read_column<T: ColumnType, R: std::io::Read>(
     reader: &mut R,
-    t: T,
 ) -> std::io::Result<Column<T>> {
+    let t = T::from(read_u32(reader)?);
     let index = read_u32(reader)? as usize;
     Ok(Column {
         index,
@@ -342,12 +338,11 @@ fn write_virtual_cells<W: std::io::Write>(
 
 fn read_queries<T: ColumnType, R: std::io::Read>(
     reader: &mut R,
-    t: T,
 ) -> std::io::Result<Vec<(Column<T>, Rotation)>> {
     let mut queries = vec![];
     let len = read_u32(reader)?;
     for _ in 0..len {
-        let column = read_column(reader, t)?;
+        let column = read_column(reader)?;
         let rotation = read_u32(reader)?;
         let rotation = Rotation(rotation as i32); //u32 to i32??
         queries.push((column, rotation))
@@ -367,18 +362,18 @@ fn read_virtual_cells<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<V
     Ok(vcells)
 }
 
-fn write_fixed_column<W: std::io::Write>(
-    column: &Column<Fixed>,
-    writer: &mut W,
-) -> std::io::Result<()> {
-    writer.write(&mut (column.index as u32).to_le_bytes())?;
-    Ok(())
-}
+// fn write_fixed_column<W: std::io::Write>(
+//     column: &Column<Fixed>,
+//     writer: &mut W,
+// ) -> std::io::Result<()> {
+//     writer.write(&mut (column.index as u32).to_le_bytes())?;
+//     Ok(())
+// }
 
-fn read_fixed_column<R: std::io::Read>(reader: &mut R) -> std::io::Result<Column<Fixed>> {
-    let index = read_u32(reader)?;
-    Ok(Column::<Fixed>::new(index as usize, Fixed))
-}
+// fn read_fixed_column<R: std::io::Read>(reader: &mut R) -> std::io::Result<Column<Fixed>> {
+//     let index = read_u32(reader)?;
+//     Ok(Column::<Fixed>::new(index as usize, Fixed))
+// }
 
 fn write_fixed_columns<W: std::io::Write>(
     columns: &Vec<Column<Fixed>>,
@@ -386,7 +381,7 @@ fn write_fixed_columns<W: std::io::Write>(
 ) -> std::io::Result<()> {
     writer.write(&mut (columns.len() as u32).to_le_bytes())?;
     for c in columns.iter() {
-        write_fixed_column(c, writer)?;
+        write_column(c, writer)?;
     }
     Ok(())
 }
@@ -395,7 +390,8 @@ fn read_fixed_columns<R: std::io::Read>(reader: &mut R) -> std::io::Result<Vec<C
     let len = read_u32(reader)?;
     let mut columns = vec![];
     for _ in 0..len {
-        columns.push(read_fixed_column(reader)?);
+        let column = read_column(reader)?;
+        columns.push(column);
     }
     Ok(columns)
 }
@@ -443,9 +439,9 @@ fn read_cs<C: CurveAffine, R: io::Read>(reader: &mut R) -> io::Result<Constraint
     let selector_map = read_fixed_columns(reader)?;
     let constants = read_fixed_columns(reader)?;
 
-    let advice_queries = read_queries::<Advice, R>(reader, Advice)?;
-    let instance_queries = read_queries::<Instance, R>(reader, Instance)?;
-    let fixed_queries = read_queries::<Fixed, R>(reader, Fixed)?;
+    let advice_queries = read_queries::<Advice, R>(reader)?;
+    let instance_queries = read_queries::<Instance, R>(reader)?;
+    let fixed_queries = read_queries::<Fixed, R>(reader)?;
     let permutation = read_arguments(reader)?;
 
     let mut lookups = vec![];

@@ -171,18 +171,18 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> PlonkConfig {
-        let a = meta.advice_column();
-        let b = meta.advice_column();
-        let c = meta.advice_column();
+        let a = meta.advice_column(false);
+        let b = meta.advice_column(false);
+        let c = meta.advice_column(false);
 
         meta.enable_equality(a);
         meta.enable_equality(b);
         meta.enable_equality(c);
 
-        let sm = meta.fixed_column();
-        let sa = meta.fixed_column();
-        let sb = meta.fixed_column();
-        let sc = meta.fixed_column();
+        let sm = meta.fixed_column(false);
+        let sa = meta.fixed_column(false);
+        let sb = meta.fixed_column(false);
+        let sc = meta.fixed_column(false);
 
         meta.create_gate("mini plonk", |meta| {
             let a = meta.query_advice(a, Rotation::cur());

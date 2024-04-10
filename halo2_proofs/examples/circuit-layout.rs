@@ -183,21 +183,21 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
 
     #[allow(clippy::many_single_char_names)]
     fn configure(meta: &mut ConstraintSystem<F>) -> PlonkConfig {
-        let e = meta.advice_column();
-        let a = meta.advice_column();
-        let b = meta.advice_column();
-        let sf = meta.fixed_column();
-        let c = meta.advice_column();
-        let d = meta.advice_column();
+        let e = meta.advice_column(false);
+        let a = meta.advice_column(false);
+        let b = meta.advice_column(false);
+        let sf = meta.fixed_column(false);
+        let c = meta.advice_column(false);
+        let d = meta.advice_column(false);
 
         meta.enable_equality(a);
         meta.enable_equality(b);
         meta.enable_equality(c);
 
-        let sm = meta.fixed_column();
-        let sa = meta.fixed_column();
-        let sb = meta.fixed_column();
-        let sc = meta.fixed_column();
+        let sm = meta.fixed_column(false);
+        let sa = meta.fixed_column(false);
+        let sb = meta.fixed_column(false);
+        let sc = meta.fixed_column(false);
         let sl = meta.lookup_table_column();
 
         /*
