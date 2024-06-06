@@ -1,5 +1,6 @@
 use super::Expression;
 use crate::multicore;
+use crate::plonk::evaluation::LcChallenge;
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::{lookup, permutation, Any, ProvingKey};
@@ -84,8 +85,15 @@ pub enum ProveExpression<F> {
 pub enum LookupProveExpression<F> {
     Expression(ProveExpression<F>),
     LcTheta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
-    LcBeta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
-    AddGamma(Box<LookupProveExpression<F>>),
+    //(a+challenge^p)*b
+    LcChallenge(
+        Box<LookupProveExpression<F>>,
+        Box<LookupProveExpression<F>>,
+        LcChallenge,
+        usize,
+    ),
+    //a+challenge
+    AddChallenge(Box<LookupProveExpression<F>>, LcChallenge),
 }
 
 #[cfg(feature = "cuda")]
@@ -159,7 +167,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 //end_timer!(timer);
                 Ok((res, 0))
             }
-            LookupProveExpression::LcBeta(l, r) => {
+            LookupProveExpression::LcChallenge(l, r, lcx, p) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
@@ -177,7 +185,14 @@ impl<F: FieldExt> LookupProveExpression<F> {
                         program.create_buffer::<F>(size as usize).unwrap()
                     }))
                 };
-                let beta = program.create_buffer_from_slice(&vec![beta])?;
+                let mut x = match lcx {
+                    LcChallenge::Beta => beta,
+                    LcChallenge::Gamma => gamma,
+                };
+                if *p > 1 {
+                    x = x.pow(&[*p as u64, 0, 0, 0]);
+                }
+                let beta = program.create_buffer_from_slice(&vec![x])?;
                 let kernel_name = format!("{}_eval_lcbeta", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(
@@ -205,7 +220,7 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 //end_timer!(timer);
                 Ok((res, 0))
             }
-            LookupProveExpression::AddGamma(l) => {
+            LookupProveExpression::AddChallenge(l, lcx) => {
                 let l = l._eval_gpu(
                     pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
                     helper,
@@ -217,7 +232,11 @@ impl<F: FieldExt> LookupProveExpression<F> {
                         program.create_buffer::<F>(size as usize).unwrap()
                     }))
                 };
-                let gamma = program.create_buffer_from_slice(&vec![gamma])?;
+                let x = match lcx {
+                    LcChallenge::Beta => beta,
+                    LcChallenge::Gamma => gamma,
+                };
+                let gamma = program.create_buffer_from_slice(&vec![x])?;
                 let kernel_name = format!("{}_eval_addgamma", "Bn256_Fr");
                 //let timer = start_timer!(|| kernel_name.clone());
                 let kernel = program.create_kernel(

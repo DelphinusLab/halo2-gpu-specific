@@ -27,8 +27,8 @@ use super::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
     },
-    lookup, permutation, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
-    ChallengeY, Error, ProvingKey,
+    lookup, permutation, shuffle, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta,
+    ChallengeX, ChallengeY, Error, ProvingKey,
 };
 use crate::arithmetic::eval_polynomial_st;
 use crate::plonk::lookup::prover::Permuted;
@@ -313,12 +313,42 @@ pub fn create_proof_ext<
     });
     end_timer!(timer);
 
+    let shuffle_groups = pk.vk.cs.shuffles.group(pk.vk.cs.degree());
+    let timer = start_timer!(|| format!(
+        "total shuffles {},groups:{}",
+        pk.vk.cs.shuffles.0.len(),
+        shuffle_groups.len()
+    ));
+    let shuffles: Vec<Vec<shuffle::prover::Compressed<C>>> = instance
+        .iter()
+        .zip(advice.iter())
+        .map(|(instance, advice)| -> Vec<_> {
+            shuffle_groups
+                .par_iter()
+                .map(|shuffle| {
+                    shuffle
+                        .compress(
+                            pk,
+                            params,
+                            theta,
+                            &advice,
+                            &pk.fixed_values,
+                            &instance.instance_values,
+                        )
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+
+    end_timer!(timer);
+
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
-    let (lookups, permutations) = std::thread::scope(|s| {
+    let (lookups, shuffles, permutations) = std::thread::scope(|s| {
         let permutations = s.spawn(|| {
             // prepare permutation value.
             instance
@@ -399,6 +429,58 @@ pub fn create_proof_ext<
             .unzip();
         end_timer!(timer);
 
+        let timer = start_timer!(|| "shuffles commit product");
+        let shuffles: Vec<Vec<_>> = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_par_iter()
+                    .map(|shuffle| shuffle.commit_product(pk, params, beta).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "shuffles add blinding value");
+        let shuffles: Vec<Vec<_>> = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_iter()
+                    .map(|mut z| {
+                        for _ in 0..pk.vk.cs.blinding_factors() {
+                            z.push(C::Scalar::random(&mut rng))
+                        }
+                        assert_eq!(z.len(), params.n as usize);
+                        pk.vk.domain.lagrange_from_vec(z)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<Vec<_>>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "shuffles msm and fft");
+        let (shuffles_z_commitments, shuffles): (Vec<Vec<_>>, Vec<Vec<_>>) = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_par_iter()
+                    .map(|l| {
+                        let (product_poly, c) = params.commit_lagrange_and_ifft(
+                            l,
+                            &pk.vk.domain.get_omega_inv(),
+                            &pk.vk.domain.ifft_divisor,
+                        );
+                        let c = c.to_affine();
+                        (c, shuffle::prover::Committed { product_poly })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .unzip()
+            })
+            .unzip();
+        end_timer!(timer);
+
         let timer = start_timer!(|| "permutation commit");
         let permutations = permutations
             .join()
@@ -456,8 +538,17 @@ pub fn create_proof_ext<
                         transcript.write_point(lookups_z_commitment).unwrap()
                     })
             });
+        shuffles_z_commitments
+            .into_iter()
+            .for_each(|shuffles_z_commitments| {
+                shuffles_z_commitments
+                    .into_iter()
+                    .for_each(|shuffles_z_commitment| {
+                        transcript.write_point(shuffles_z_commitment).unwrap()
+                    })
+            });
 
-        (lookups, permutations)
+        (lookups, shuffles, permutations)
     });
 
     let timer = start_timer!(|| "vanishing commit");
@@ -505,6 +596,7 @@ pub fn create_proof_ext<
         *gamma,
         *theta,
         &lookups,
+        &shuffles,
         &permutations,
     );
 
@@ -518,6 +610,7 @@ pub fn create_proof_ext<
         *gamma,
         *theta,
         &lookups,
+        &shuffles,
         &permutations,
     );
 
@@ -604,13 +697,32 @@ pub fn create_proof_ext<
     });
     end_timer!(timer);
 
+    let timer = start_timer!(|| "eval poly shuffles");
+    // Evaluate the shuffles, if any, at omega^i x.
+    let (shuffles, evals): (
+        Vec<Vec<shuffle::prover::Evaluated<C>>>,
+        Vec<Vec<Vec<C::ScalarExt>>>,
+    ) = shuffles
+        .into_iter()
+        .map(|shuffles| shuffles.into_par_iter().map(|s| s.evaluate(pk, x)).unzip())
+        .unzip();
+    evals.into_iter().for_each(|evals| {
+        evals.into_iter().for_each(|evals| {
+            evals
+                .into_iter()
+                .for_each(|eval| transcript.write_scalar(eval).unwrap())
+        })
+    });
+    end_timer!(timer);
+
     let timer = start_timer!(|| "multi open");
     let instances = instance
         .iter()
         .zip(advice.iter())
         .zip(permutations.iter())
         .zip(lookups.iter())
-        .flat_map(|(((instance, advice), permutation), lookups)| {
+        .zip(shuffles.iter())
+        .flat_map(|((((instance, advice), permutation), lookups), shuffles)| {
             iter::empty()
                 .chain(
                     pk.vk
@@ -636,6 +748,7 @@ pub fn create_proof_ext<
                 )
                 .chain(permutation.open(pk, x))
                 .chain(lookups.iter().flat_map(move |p| p.open(pk, x)).into_iter())
+                .chain(shuffles.iter().flat_map(move |p| p.open(pk, x)).into_iter())
         })
         .chain(
             pk.vk
@@ -855,12 +968,42 @@ pub fn create_proof_from_witness<
     });
     end_timer!(timer);
 
+    let shuffle_groups = pk.vk.cs.shuffles.group(pk.vk.cs.degree());
+    let timer = start_timer!(|| format!(
+        "total shuffles {}, groups {}",
+        pk.vk.cs.shuffles.0.len(),
+        shuffle_groups.len()
+    ));
+    let shuffles: Vec<Vec<shuffle::prover::Compressed<C>>> = instance
+        .iter()
+        .zip(advice.iter())
+        .map(|(instance, advice)| -> Vec<_> {
+            shuffle_groups
+                .par_iter()
+                .map(|shuffle| {
+                    shuffle
+                        .compress(
+                            pk,
+                            params,
+                            theta,
+                            &advice,
+                            &pk.fixed_values,
+                            &instance.instance_values,
+                        )
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+
+    end_timer!(timer);
+
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
     // Sample gamma challenge
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
 
-    let (lookups, permutations) = std::thread::scope(|s| {
+    let (lookups, shuffles, permutations) = std::thread::scope(|s| {
         let permutations = s.spawn(|| {
             // prepare permutation value.
             instance
@@ -941,6 +1084,58 @@ pub fn create_proof_from_witness<
             .unzip();
         end_timer!(timer);
 
+        let timer = start_timer!(|| "shuffles commit product");
+        let shuffles: Vec<Vec<_>> = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_par_iter()
+                    .map(|shuffle| shuffle.commit_product(pk, params, beta).unwrap())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "shuffles add blinding value");
+        let shuffles: Vec<Vec<_>> = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_iter()
+                    .map(|mut z| {
+                        for _ in 0..pk.vk.cs.blinding_factors() {
+                            z.push(C::Scalar::random(&mut rng))
+                        }
+                        assert_eq!(z.len(), params.n as usize);
+                        pk.vk.domain.lagrange_from_vec(z)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<Vec<_>>>();
+        end_timer!(timer);
+
+        let timer = start_timer!(|| "shuffles msm and fft");
+        let (shuffles_z_commitments, shuffles): (Vec<Vec<_>>, Vec<Vec<_>>) = shuffles
+            .into_iter()
+            .map(|shuffles| {
+                shuffles
+                    .into_par_iter()
+                    .map(|l| {
+                        let (product_poly, c) = params.commit_lagrange_and_ifft(
+                            l,
+                            &pk.vk.domain.get_omega_inv(),
+                            &pk.vk.domain.ifft_divisor,
+                        );
+                        let c = c.to_affine();
+                        (c, shuffle::prover::Committed { product_poly })
+                    })
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .unzip()
+            })
+            .unzip();
+        end_timer!(timer);
+
         let timer = start_timer!(|| "permutation commit");
         let permutations = permutations
             .join()
@@ -998,8 +1193,17 @@ pub fn create_proof_from_witness<
                         transcript.write_point(lookups_z_commitment).unwrap()
                     })
             });
+        shuffles_z_commitments
+            .into_iter()
+            .for_each(|shuffles_z_commitments| {
+                shuffles_z_commitments
+                    .into_iter()
+                    .for_each(|shuffles_z_commitment| {
+                        transcript.write_point(shuffles_z_commitment).unwrap()
+                    })
+            });
 
-        (lookups, permutations)
+        (lookups, shuffles, permutations)
     });
 
     let timer = start_timer!(|| "vanishing commit");
@@ -1047,6 +1251,7 @@ pub fn create_proof_from_witness<
         *gamma,
         *theta,
         &lookups,
+        &shuffles,
         &permutations,
     );
 
@@ -1060,6 +1265,7 @@ pub fn create_proof_from_witness<
         *gamma,
         *theta,
         &lookups,
+        &shuffles,
         &permutations,
     );
 
@@ -1146,13 +1352,32 @@ pub fn create_proof_from_witness<
     });
     end_timer!(timer);
 
+    let timer = start_timer!(|| "eval poly shuffles");
+    // Evaluate the shuffles, if any, at omega^i x.
+    let (shuffles, evals): (
+        Vec<Vec<shuffle::prover::Evaluated<C>>>,
+        Vec<Vec<Vec<C::ScalarExt>>>,
+    ) = shuffles
+        .into_iter()
+        .map(|shuffles| shuffles.into_par_iter().map(|s| s.evaluate(pk, x)).unzip())
+        .unzip();
+    evals.into_iter().for_each(|evals| {
+        evals.into_iter().for_each(|evals| {
+            evals
+                .into_iter()
+                .for_each(|eval| transcript.write_scalar(eval).unwrap())
+        })
+    });
+    end_timer!(timer);
+
     let timer = start_timer!(|| "multi open");
     let instances = instance
         .iter()
         .zip(advice.iter())
         .zip(permutations.iter())
         .zip(lookups.iter())
-        .flat_map(|(((instance, advice), permutation), lookups)| {
+        .zip(shuffles.iter())
+        .flat_map(|((((instance, advice), permutation), lookups), shuffles)| {
             iter::empty()
                 .chain(
                     pk.vk
@@ -1178,6 +1403,7 @@ pub fn create_proof_from_witness<
                 )
                 .chain(permutation.open(pk, x))
                 .chain(lookups.iter().flat_map(move |p| p.open(pk, x)).into_iter())
+                .chain(shuffles.iter().flat_map(move |p| p.open(pk, x)).into_iter())
         })
         .chain(
             pk.vk
@@ -1200,6 +1426,7 @@ pub fn create_proof_from_witness<
         multiopen::shplonk::create_proof(params, transcript, instances).map_err(|_| Error::Opening)
     };
     end_timer!(timer);
+
     res
 }
 
