@@ -1,4 +1,5 @@
 use crate::helpers::AssignWitnessCollection;
+use crate::plonk::range_check::RangeCheckRelAssigner;
 use ark_std::iterable::Iterable;
 use ark_std::UniformRand;
 use ark_std::{end_timer, start_timer};
@@ -12,16 +13,19 @@ use rayon::iter::IntoParallelRefMutIterator;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::IntoParallelIterator;
 use rayon::prelude::IntoParallelRefIterator;
+use rayon::prelude::ParallelSliceMut;
 use rayon::slice::ParallelSlice;
+use std::collections::{BTreeMap, HashMap};
 use std::env::var;
 use std::fs::File;
 use std::iter::FromIterator;
 use std::ops::RangeTo;
 use std::sync::atomic::AtomicUsize;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Instant;
 use std::{iter, sync::atomic::Ordering};
 
+use super::range_check::{Argument, RangeCheckRel};
 use super::{
     circuit::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
@@ -156,6 +160,44 @@ pub fn create_single_instances<C: CurveAffine, E: EncodedChallenge<C>, T: Transc
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(instance)
+}
+
+fn sort<Scalar: FieldExt>(
+    origin_advice: &[Scalar],
+    sort_advice: &mut [Scalar],
+    argument: &RangeCheckRel<Scalar>,
+) {
+    let mut field_to_u32_map = HashMap::<[u64; 4], u32>::with_capacity(
+        argument.max.0 as usize - argument.min.0 as usize + 1,
+    );
+    let mut count_map = vec![0; argument.max.0 as usize - argument.min.0 as usize + 1];
+
+    let mut start = argument.min.1;
+    for i in argument.min.0..=argument.max.0 {
+        let raw = unsafe { std::mem::transmute::<_, &[u64; 4]>(&start) };
+
+        field_to_u32_map.insert(*raw, i);
+        start += Scalar::one();
+    }
+
+    for value in &*origin_advice {
+        let v = unsafe { std::mem::transmute::<_, &[u64; 4]>(value) };
+        let v = field_to_u32_map.get(v).unwrap();
+
+        count_map[(*v - argument.min.0 as u32) as usize] += 1;
+    }
+
+    let mut start = argument.min.1;
+
+    let mut offset = 0;
+    count_map.into_iter().for_each(|cnt| {
+        for _ in 0..cnt {
+            sort_advice[offset] = start;
+            offset += 1;
+        }
+
+        start += Scalar::one();
+    });
 }
 
 /// This creates a proof for the provided `circuit` when given the public
@@ -1447,9 +1489,15 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
     let meta = &pk.vk.cs;
 
+    let first_unassigned_offset = (0..meta.num_advice_columns)
+        .into_iter()
+        .map(|_| Arc::new(AtomicUsize::new(0)))
+        .collect::<Vec<_>>();
+
     #[derive(Clone)]
     struct WitnessCollection<'a, F: Field> {
         pub advice: &'a [*mut [F]],
+        first_unassigned_offset: &'a [Arc<AtomicUsize>],
         instances: &'a [&'a [F]],
         usable_rows: core::ops::RangeTo<usize>,
         _marker: std::marker::PhantomData<F>,
@@ -1519,6 +1567,11 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
                 .and_then(|v| unsafe { (*v).as_mut().unwrap() }.get_mut(row))
                 .ok_or(Error::BoundsFailure)? = v;
 
+            self.first_unassigned_offset
+                .get(column.index())
+                .and_then(|offset| Some(offset.fetch_max(row + 1, Ordering::Relaxed)))
+                .unwrap();
+
             Ok(())
         }
 
@@ -1572,6 +1625,7 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
 
     let mut witness = WitnessCollection {
         advice: advices,
+        first_unassigned_offset: &first_unassigned_offset[..],
         instances,
         // The prover will not be allowed to assign values to advice
         // cells that exist within inactive rows, which include some
@@ -1590,5 +1644,88 @@ pub fn generate_advice_from_synthesize<'a, C: CurveAffine, ConcreteCircuit: Circ
         meta.constants.clone(),
     )
     .unwrap();
+    end_timer!(timer);
+
+    let timer = start_timer!(|| "synthesize sort range check col");
+    {
+        let last_active_offset =
+            pk.get_vk().domain.n - (pk.get_vk().cs.blinding_factors() as u64 + 1) - 1;
+
+        // Assign all values within range to unused cells.
+        pk.vk.cs.range_check.0.iter().for_each(|argument| {
+            let origin_column_index = argument.origin.index;
+
+            let first_unassigned_offset = first_unassigned_offset
+                .get(origin_column_index)
+                .unwrap()
+                .load(Ordering::Relaxed);
+
+            let advice = unsafe {
+                advices
+                    .get(argument.origin.index)
+                    .unwrap()
+                    .as_mut()
+                    .unwrap()
+            };
+
+            let mut offset = last_active_offset as usize;
+
+            let assigner: RangeCheckRelAssigner = argument.into();
+            let mut iter = assigner.into_iter();
+
+            while let Some(value) = iter.next() {
+                *advice.get_mut(offset).unwrap() = C::ScalarExt::from(value as u64);
+                offset -= 1;
+            }
+
+            assert!(first_unassigned_offset <= offset);
+        });
+
+        let timer = start_timer!(|| "sort range check");
+        {
+            let mut advices = advices
+                .iter()
+                .map(|advice| unsafe { advice.as_mut() }.unwrap())
+                .collect::<Vec<_>>();
+
+            let advices = advices
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(column_index, advice)| {
+                    pk.vk
+                        .cs
+                        .range_check
+                        .0
+                        .iter()
+                        .find(|argument| {
+                            argument.origin.index == column_index
+                                || argument.sort.index == column_index
+                        })
+                        .map(|argument| (argument, column_index, advice))
+                })
+                .collect::<Vec<_>>();
+
+            advices.into_par_iter().chunks(2).for_each(|mut chunks| {
+                let (range_check_rel, column_index_a, advice_a) = chunks.pop().unwrap();
+                let (_, _, advice_b) = chunks.pop().unwrap();
+
+                let (origin_advice, sort_advice) = if column_index_a == range_check_rel.origin.index
+                {
+                    (
+                        &(advice_a)[0..unusable_rows_start],
+                        &mut (advice_b)[0..unusable_rows_start],
+                    )
+                } else {
+                    (
+                        &(advice_b)[0..unusable_rows_start],
+                        &mut (advice_a)[0..unusable_rows_start],
+                    )
+                };
+
+                sort::<C::ScalarExt>(origin_advice, sort_advice, range_check_rel);
+            });
+            end_timer!(timer);
+        };
+    }
     end_timer!(timer);
 }

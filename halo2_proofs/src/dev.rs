@@ -1,11 +1,13 @@
 //! Tools for developing circuits.
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt;
 use std::iter;
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::{Add, Mul, Neg, Range};
 use std::rc::Rc;
 use std::sync::atomic::AtomicBool;
@@ -16,6 +18,7 @@ use std::sync::MutexGuard;
 use ff::Field;
 
 use crate::parallel::Parallel;
+use crate::plonk::range_check::RangeCheckRelAssigner;
 use crate::plonk::Assigned;
 use crate::{
     arithmetic::{FieldExt, Group},
@@ -532,6 +535,8 @@ pub struct MockProver<F: Group + Field> {
     fixed: Vec<Vec<CellValue<F>>>,
     // The advice cells in the circuit, arranged as [column][row].
     advice: Vec<Vec<CellValue<F>>>,
+    // The first unassigned offset in each advice column.
+    first_unassigned_offset: Vec<usize>,
     // The instance cells in the circuit, arranged as [column][row].
     instance: Vec<Vec<F>>,
 
@@ -685,6 +690,11 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
             .get_mut(column.index())
             .and_then(|v| v.get_mut(row))
             .ok_or(Error::BoundsFailure)? = CellValue::Assigned(to()?.into().evaluate());
+        let first_unassigned_offset = prover.first_unassigned_offset.get(column.index()).unwrap();
+        *prover
+            .first_unassigned_offset
+            .get_mut(column.index())
+            .unwrap() = (*first_unassigned_offset).max(row + 1);
 
         Ok(())
     }
@@ -776,6 +786,51 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
 }
 
 impl<F: FieldExt> MockProver<F> {
+    pub fn assign_range_check_column(&mut self) -> Result<(), Error> {
+        // last usable row
+        let last = (1 << self.k) - (self.cs.blinding_factors() + 1) - 1;
+
+        for argument in &self.cs.range_check.0 {
+            let origin_value = self.advice.get_mut(argument.origin.index).unwrap();
+            let first_unassigned_offset = *self
+                .first_unassigned_offset
+                .get(argument.origin.index)
+                .unwrap();
+
+            let mut offset = last;
+
+            let assigner: RangeCheckRelAssigner = argument.into();
+            let mut iter = assigner.into_iter();
+
+            while let Some(value) = iter.next() {
+                origin_value[offset] = CellValue::Assigned(F::from(value as u64));
+                offset -= 1;
+            }
+
+            if offset < first_unassigned_offset {
+                return Err(Error::NotEnoughRowsForRangeCheck);
+            }
+
+            let mut sort_value = origin_value.clone();
+            sort_value.sort_unstable_by(|left, right| match (left, right) {
+                (CellValue::Poison(left), CellValue::Poison(right)) => left.cmp(right),
+                (CellValue::Unassigned, CellValue::Unassigned) => Ordering::Equal,
+                (CellValue::Assigned(left), CellValue::Assigned(right)) => left.cmp(right),
+                (CellValue::Poison(_), _) => Ordering::Greater,
+                (_, CellValue::Poison(_)) => Ordering::Less,
+                (CellValue::Unassigned, _) => Ordering::Less,
+                (_, CellValue::Unassigned) => Ordering::Greater,
+            });
+
+            mem::swap(
+                self.advice.get_mut(argument.sort.index).unwrap(),
+                &mut sort_value,
+            );
+        }
+
+        Ok(())
+    }
+
     /// Runs a synthetic keygen-and-prove operation on the given circuit, collecting data
     /// about the constraints and their assignments.
     pub fn run<ConcreteCircuit: Circuit<F>>(
@@ -826,6 +881,7 @@ impl<F: FieldExt> MockProver<F> {
             };
             cs.num_advice_columns
         ];
+        let first_unassigned_offset = vec![0; cs.num_advice_columns];
         let permutation = permutation::keygen::ParallelAssembly::new(n, &cs.permutation);
         let constants = cs.constants.clone();
 
@@ -837,6 +893,7 @@ impl<F: FieldExt> MockProver<F> {
             current_region: None,
             fixed,
             advice,
+            first_unassigned_offset,
             instance,
             selectors,
             permutation,
@@ -847,6 +904,7 @@ impl<F: FieldExt> MockProver<F> {
 
         let mut prover = prover.into_inner();
 
+        prover.assign_range_check_column()?;
         let (cs, selector_polys) = prover.cs.compress_selectors(prover.selectors.clone());
         prover.cs = cs;
         prover.fixed.extend(selector_polys.into_iter().map(|poly| {

@@ -24,6 +24,7 @@ mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
 pub(crate) mod permutation;
+pub mod range_check;
 pub(crate) mod shuffle;
 mod vanishing;
 
