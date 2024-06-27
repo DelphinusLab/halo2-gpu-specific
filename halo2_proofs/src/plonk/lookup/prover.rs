@@ -180,61 +180,32 @@ impl<C: CurveAffine> Permuted<C> {
         // and i is the ith row of the expression.
         let mut lookup_product = vec![C::Scalar::zero(); params.n as usize];
 
-        #[cfg(not(feature = "cuda"))]
-        {
-            // Denominator uses the permuted input expression and permuted table expression
-            parallelize(&mut lookup_product, |lookup_product, start| {
-                for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
-                    .iter_mut()
-                    .zip(self.permuted_input_expression[start..].iter())
-                    .zip(self.permuted_table_expression[start..].iter())
-                {
-                    *lookup_product =
-                        (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
-                }
-            });
-
-            // Batch invert to obtain the denominators for the lookup product
-            // polynomials
-            batch_invert(&mut lookup_product);
-
-            // Finish the computation of the entire fraction by computing the numerators
-            // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
-            // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-            parallelize(&mut lookup_product, |product, start| {
-                for (i, product) in product.iter_mut().enumerate() {
-                    let i = i + start;
-
-                    *product *= &(self.compressed_input_expression[i] + &*beta);
-                    *product *= &(self.compressed_table_expression[i] + &*gamma);
-                }
-            });
-        }
-
         // Denominator uses the permuted input expression and permuted table expression
-        for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
-            .iter_mut()
-            .zip(self.permuted_input_expression.iter())
-            .zip(self.permuted_table_expression.iter())
-        {
-            *lookup_product = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
-        }
+        parallelize(&mut lookup_product, |lookup_product, start| {
+            for ((lookup_product, permuted_input_value), permuted_table_value) in lookup_product
+                .iter_mut()
+                .zip(self.permuted_input_expression[start..].iter())
+                .zip(self.permuted_table_expression[start..].iter())
+            {
+                *lookup_product = (*beta + permuted_input_value) * &(*gamma + permuted_table_value);
+            }
+        });
 
         // Batch invert to obtain the denominators for the lookup product
         // polynomials
-        lookup_product.batch_invert();
+        batch_invert(&mut lookup_product);
 
         // Finish the computation of the entire fraction by computing the numerators
         // (\theta^{m-1} a_0(\omega^i) + \theta^{m-2} a_1(\omega^i) + ... + \theta a_{m-2}(\omega^i) + a_{m-1}(\omega^i) + \beta)
         // * (\theta^{m-1} s_0(\omega^i) + \theta^{m-2} s_1(\omega^i) + ... + \theta s_{m-2}(\omega^i) + s_{m-1}(\omega^i) + \gamma)
-        for ((lookup_product, compressed_input_value), compressed_table_value) in lookup_product
-            .iter_mut()
-            .zip(self.compressed_input_expression.iter())
-            .zip(self.compressed_table_expression.iter())
-        {
-            *lookup_product *=
-                (*beta + compressed_input_value) * &(*gamma + compressed_table_value);
-        }
+        parallelize(&mut lookup_product, |product, start| {
+            for (i, product) in product.iter_mut().enumerate() {
+                let i = i + start;
+
+                *product *= &(self.compressed_input_expression[i] + &*beta);
+                *product *= &(self.compressed_table_expression[i] + &*gamma);
+            }
+        });
 
         /*
         #[cfg(feature = "cuda")]
