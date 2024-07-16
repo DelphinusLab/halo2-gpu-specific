@@ -79,6 +79,7 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [features]
 default = []
+asm = ["pairing/asm"]
 dev-graph = ["plotters", "tabbycat"]
 gadget-traces = ["backtrace"]
 sanity-checks = []
