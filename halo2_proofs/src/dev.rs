@@ -842,7 +842,7 @@ impl<F: FieldExt> MockProver<F> {
 
         let mut cs = ConstraintSystem::default();
         let config = ConcreteCircuit::configure(&mut cs);
-        let cs = cs;
+        let cs = cs.chunk_lookups(None);
 
         if n < cs.minimum_rows() {
             return Err(Error::not_enough_rows_available(k));
@@ -1140,17 +1140,23 @@ impl<F: FieldExt> MockVerifier<F> {
                                 .collect::<Vec<_>>()
                         })
                         .collect();
+                    //todo test more for logup
                     lookup_input_row_ids
                         .clone()
                         .into_iter()
                         .filter_map(move |input_row| {
                             let inputs: Vec<_> = lookup
-                                .input_expressions
+                                .input_expressions_set
+                                .0
                                 .iter()
-                                .map(|c| load(c, input_row))
+                                .map(|input| {
+                                    input.iter().map(|c| load(c, input_row)).collect::<Vec<_>>()
+                                })
                                 .collect();
-                            let lookup_passes = table.contains(&inputs);
-                            if lookup_passes {
+                            let lookup_fail_idx =
+                                inputs.iter().position(|input| !table.contains(input));
+
+                            if lookup_fail_idx.is_none() {
                                 None
                             } else {
                                 Some(VerifyFailure::Lookup {
@@ -1160,7 +1166,8 @@ impl<F: FieldExt> MockVerifier<F> {
                                         &self.cs,
                                         &self.regions,
                                         input_row,
-                                        lookup.input_expressions.iter(),
+                                        lookup.input_expressions_set.0[lookup_fail_idx.unwrap()]
+                                            .iter(),
                                     ),
                                 })
                             }

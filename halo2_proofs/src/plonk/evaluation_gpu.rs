@@ -85,15 +85,21 @@ pub enum ProveExpression<F> {
 pub enum LookupProveExpression<F> {
     Expression(ProveExpression<F>),
     LcTheta(Box<LookupProveExpression<F>>, Box<LookupProveExpression<F>>),
-    //(a+challenge^p)*b
+    //(a+challenge^pow)*b
     LcChallenge(
         Box<LookupProveExpression<F>>,
         Box<LookupProveExpression<F>>,
         LcChallenge,
+        //pow
         usize,
     ),
     //a+challenge
     AddChallenge(Box<LookupProveExpression<F>>, LcChallenge),
+    Op(
+        Box<LookupProveExpression<F>>,
+        Box<LookupProveExpression<F>>,
+        Bop,
+    ),
 }
 
 #[cfg(feature = "cuda")]
@@ -257,6 +263,55 @@ impl<F: FieldExt> LookupProveExpression<F> {
                 }
 
                 //end_timer!(timer);
+                Ok((res, 0))
+            }
+            LookupProveExpression::Op(l, r, op) => {
+                let l = l._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
+                )?;
+                let r = r._eval_gpu(
+                    pk, program, advice, instance, y, beta, theta, gamma, unit_cache, allocator,
+                    helper,
+                )?;
+
+                let kernel_name = match op {
+                    Bop::Sum => format!("{}_eval_sum", "Bn256_Fr"),
+                    Bop::Product => format!("{}_eval_mul", "Bn256_Fr"),
+                };
+                let kernel = program.create_kernel(
+                    &kernel_name,
+                    global_work_size as usize,
+                    local_work_size as usize,
+                )?;
+
+                let res = if r.1 == 0 && Rc::strong_count(&r.0) == 1 {
+                    r.0.clone()
+                } else if l.1 == 0 && Rc::strong_count(&l.0) == 1 {
+                    l.0.clone()
+                } else {
+                    Rc::new(allocator.pop_front().unwrap_or_else(|| unsafe {
+                        program.create_buffer::<F>(size as usize).unwrap()
+                    }))
+                };
+
+                kernel
+                    .arg(res.as_ref())
+                    .arg(l.0.as_ref())
+                    .arg(r.0.as_ref())
+                    .arg(&l.1)
+                    .arg(&r.1)
+                    .arg(&size)
+                    .run()?;
+
+                if Rc::strong_count(&l.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(l.0).unwrap())
+                }
+
+                if Rc::strong_count(&r.0) == 1 {
+                    allocator.push_back(Rc::try_unwrap(r.0).unwrap())
+                }
+
                 Ok((res, 0))
             }
         }

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, Error,
     ProvingKey,

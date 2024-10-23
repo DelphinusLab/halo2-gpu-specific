@@ -423,7 +423,10 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
     write_arguments(&cs.permutation.columns, writer)?;
     writer.write(&(cs.lookups.len() as u32).to_le_bytes())?;
     for p in cs.lookups.iter() {
-        p.input_expressions.store(writer)?;
+        writer.write(&(p.input_expressions_set.0.len() as u32).to_le_bytes())?;
+        for q in p.input_expressions_set.0.iter() {
+            q.store(writer)?;
+        }
         p.table_expressions.store(writer)?;
     }
     writer.write(&(cs.shuffles.0.len() as u32).to_le_bytes())?;
@@ -471,11 +474,15 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
     let mut lookups = vec![];
     let nb_lookup = read_u32(reader)?;
     for _ in 0..nb_lookup {
-        let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+        let nb_input = read_u32(reader)?;
+        //todo check the collect to io_result correct?
+        let input_expressions = (0..nb_input)
+            .map(|_| Vec::<Expression<C::Scalar>>::fetch(reader))
+            .collect::<io::Result<Vec<_>>>()?;
         let table_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
-        lookups.push(plonk::lookup::Argument {
+        lookups.push(plonk::logup::Argument {
             name: "",
-            input_expressions,
+            input_expressions_set: plonk::logup::InputExpressionSet(input_expressions),
             table_expressions,
         });
     }
@@ -525,6 +532,7 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         named_advices,
         permutation,
         lookups,
+        lookup_tracer: None,
         shuffles,
         range_check,
         constants,

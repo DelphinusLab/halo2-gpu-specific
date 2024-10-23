@@ -15,23 +15,23 @@ use halo2_proofs::transcript::{Blake2bRead, Blake2bWrite, Challenge255};
 use rand_core::OsRng;
 
 #[derive(Clone, Debug)]
-struct ShuffleChip<F: FieldExt> {
-    config: ShuffleConfig,
+struct SimpleChip<F: FieldExt> {
+    config: SimpleConfig,
     _marker: PhantomData<F>,
 }
 
 #[derive(Clone, Debug)]
-struct ShuffleConfig {
+struct SimpleConfig {
     input_0: Column<Advice>,
     input_1: Column<Advice>,
-    shuffle_0: Column<Advice>,
-    shuffle_1: Column<Advice>,
-    s_input: Column<Fixed>,
-    s_shuffle: Column<Fixed>,
+    lookup_0: Column<Advice>,
+    s_0: Column<Fixed>,
+    s_1: Column<Fixed>,
+    s_table0: TableColumn,
 }
 
-impl<F: FieldExt> Chip<F> for ShuffleChip<F> {
-    type Config = ShuffleConfig;
+impl<F: FieldExt> Chip<F> for SimpleChip<F> {
+    type Config = SimpleConfig;
     type Loaded = ();
 
     fn config(&self) -> &Self::Config {
@@ -42,8 +42,8 @@ impl<F: FieldExt> Chip<F> for ShuffleChip<F> {
     }
 }
 
-impl<F: FieldExt> ShuffleChip<F> {
-    fn construct(config: ShuffleConfig) -> Self {
+impl<F: FieldExt> SimpleChip<F> {
+    fn construct(config: SimpleConfig) -> Self {
         Self {
             config,
             _marker: PhantomData,
@@ -54,66 +54,63 @@ impl<F: FieldExt> ShuffleChip<F> {
         meta: &mut ConstraintSystem<F>,
         input_0: Column<Advice>,
         input_1: Column<Advice>,
-        shuffle_0: Column<Advice>,
-        shuffle_1: Column<Advice>,
-        s_input: Column<Fixed>,
-        s_shuffle: Column<Fixed>,
-    ) -> ShuffleConfig {
-        //need at least one gate or GPU will panic
+        lookup_0: Column<Advice>,
+        s_0: Column<Fixed>,
+        s_1: Column<Fixed>,
+        s_table0: TableColumn,
+    ) -> SimpleConfig {
         meta.create_gate("", |meta| {
             let input_0 = meta.query_advice(input_0, Rotation::cur());
             let input_1 = meta.query_advice(input_1, Rotation::cur());
-            let s_input = meta.query_fixed(s_input, Rotation::cur());
-            vec![s_input * (input_0 * F::from(10) - input_1)]
+            let s0 = meta.query_fixed(s_0, Rotation::cur());
+            vec![s0 * (input_0 * F::from(1) - input_1)]
         });
 
-        meta.shuffle("shuffle", |meta| {
+        meta.lookup("table1", |meta| {
             let input_0 = meta.query_advice(input_0, Rotation::cur());
-            let shuffle_0 = meta.query_advice(shuffle_0, Rotation::cur());
+            [(input_0, s_table0)].to_vec()
+        });
+        meta.lookup("table2", |meta| {
             let input_1 = meta.query_advice(input_1, Rotation::cur());
-            let shuffle_1 = meta.query_advice(shuffle_1, Rotation::cur());
-            let s_input = meta.query_fixed(s_input, Rotation::cur());
-            let s_shuffle = meta.query_fixed(s_shuffle, Rotation::cur());
+            [(input_1 * F::from(2), s_table0)].to_vec()
+        });
+        meta.lookup("table3", |meta| {
+            let lookup_0 = meta.query_advice(lookup_0, Rotation::cur());
+            [(lookup_0, s_table0)].to_vec()
+        });
+
+        meta.lookup_any("any", |meta| {
+            let input_0 = meta.query_advice(input_0, Rotation::cur());
+            let input_1 = meta.query_advice(input_1, Rotation::cur());
+            let lookup_0 = meta.query_advice(lookup_0, Rotation::cur());
+            let s0 = meta.query_fixed(s_0, Rotation::cur());
+            let s1 = meta.query_fixed(s_1, Rotation::cur());
 
             [
-                (s_input.clone() * input_0, s_shuffle.clone() * shuffle_0),
-                (s_input * input_1, s_shuffle * shuffle_1),
+                (s0.clone() * input_0.clone(), s0 * input_1),
+                (s1.clone() * input_0, s1 * lookup_0),
             ]
             .to_vec()
         });
 
-        ShuffleConfig {
+        SimpleConfig {
             input_0,
             input_1,
-            shuffle_0,
-            shuffle_1,
-            s_input,
-            s_shuffle,
+            lookup_0,
+            s_0,
+            s_1,
+            s_table0,
         }
     }
 }
 
 #[derive(Default, Clone, Debug)]
 struct MyCircuit<F: FieldExt> {
-    input0: Vec<F>,
-    input1: Vec<F>,
-    shuffle0: Vec<F>,
-    shuffle1: Vec<F>,
-}
-
-impl<F: FieldExt> MyCircuit<F> {
-    fn construct() -> Self {
-        Self {
-            input0: [1, 2, 4, 1].map(|x| F::from(x as u64)).to_vec(),
-            shuffle0: [4, 1, 1, 2].map(|x| F::from(x as u64)).to_vec(),
-            input1: [10, 20, 40, 10].map(|x| F::from(x as u64)).to_vec(),
-            shuffle1: [40, 10, 10, 20].map(|x| F::from(x as u64)).to_vec(),
-        }
-    }
+    _marker: PhantomData<F>,
 }
 
 impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
-    type Config = ShuffleConfig;
+    type Config = SimpleConfig;
     type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
@@ -121,12 +118,10 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        let [input_0, input_1, shuffle_0, shuffle_1] = [(); 4].map(|_| meta.advice_column());
-        let [s_input, s_shuffle] = [(); 2].map(|_| meta.fixed_column());
-
-        ShuffleChip::configure(
-            meta, input_0, input_1, shuffle_0, shuffle_1, s_input, s_shuffle,
-        )
+        let [input_0, input_1, lookup_0, lookup_1] = [(); 4].map(|_| meta.advice_column());
+        let [s_0, s_1] = [(); 2].map(|_| meta.fixed_column());
+        let [s_table0, s_table1] = [(); 2].map(|_| meta.lookup_table_column());
+        SimpleChip::configure(meta, input_0, input_1, lookup_0, s_0, s_1, s_table0)
     }
 
     fn synthesize(
@@ -134,32 +129,34 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         config: Self::Config,
         mut layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
-        let ch = ShuffleChip::<F>::construct(config.clone());
+        let ch = SimpleChip::<F>::construct(config.clone());
 
         layouter.assign_region(
             || "inputs",
             |mut region: &Region<'_, F>| {
-                for (i, (input0, input1)) in self.input0.iter().zip(self.input1.iter()).enumerate()
-                {
-                    region.assign_advice(|| "", ch.config.input_0, i, || Ok(*input0))?;
-                    region.assign_advice(|| "", ch.config.input_1, i, || Ok(*input1))?;
+                region.assign_advice(|| "", ch.config.input_0, 0, || Ok(F::from(1 as u64)))?;
+                region.assign_advice(|| "", ch.config.input_1, 0, || Ok(F::from(1 as u64)))?;
+                region.assign_fixed(|| "", ch.config.s_0, 0, || Ok(F::from(1)))?;
 
-                    region.assign_fixed(|| "", ch.config.s_input, i, || Ok(F::from(1)))?;
-                }
+                region.assign_advice(|| "", ch.config.input_0, 1, || Ok(F::from(3 as u64)))?;
+                region.assign_advice(|| "", ch.config.lookup_0, 1, || Ok(F::from(3 as u64)))?;
+                region.assign_fixed(|| "", ch.config.s_1, 1, || Ok(F::from(1)))?;
+
                 Ok(())
             },
         )?;
-        layouter.assign_region(
-            || "shuffles",
-            |mut region: &Region<'_, F>| {
-                for (i, (shuffle0, shuffle1)) in
-                    self.shuffle0.iter().zip(self.shuffle1.iter()).enumerate()
-                {
-                    region.assign_advice(|| "", ch.config.shuffle_0, i, || Ok(*shuffle0))?;
-                    region.assign_advice(|| "", ch.config.shuffle_1, i, || Ok(*shuffle1))?;
-
-                    region.assign_fixed(|| "", ch.config.s_shuffle, i, || Ok(F::from(1)))?;
+        layouter.assign_table(
+            || "common range table",
+            |table| {
+                for i in 0..9 {
+                    table.assign_cell(
+                        || "range tag",
+                        ch.config.s_table0,
+                        i,
+                        || Ok(F::from(i as u64)),
+                    )?;
                 }
+
                 Ok(())
             },
         )
@@ -197,9 +194,12 @@ fn test_prover(k: u32, circuit: MyCircuit<Fp>) {
 
 fn main() {
     // The number of rows in our circuit cannot exceed 2^k
-    let k = 10;
+    let k = 4;
 
-    let circuit = MyCircuit::<Fp>::construct();
+    // let circuit = MyCircuit::<Fp>::construct();
+    let circuit = MyCircuit::<Fp> {
+        _marker: PhantomData,
+    };
 
     let prover = MockProver::run(k, &circuit, vec![]).unwrap();
     assert_eq!(prover.verify(), Ok(()));

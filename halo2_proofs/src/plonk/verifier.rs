@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use std::ops::Mul;
 
 use super::{
-    vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
+    logup, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX, ChallengeY, Error,
     VerifyingKey,
 };
 use crate::arithmetic::{BaseExt, CurveAffine, FieldExt, MultiMillerLoop};
@@ -184,13 +184,13 @@ pub fn verify_proof_ext<
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
-    let lookups_permuted = (0..num_proofs)
+    let lookups = (0..num_proofs)
         .map(|_| -> Result<Vec<_>, _> {
             // Hash each lookup permuted commitment
             vk.cs
                 .lookups
                 .iter()
-                .map(|argument| argument.read_permuted_commitments(transcript))
+                .map(|argument| argument.read_m_commitments(transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -208,13 +208,13 @@ pub fn verify_proof_ext<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let lookups_committed = lookups_permuted
+    let lookups_committed = lookups
         .into_iter()
         .map(|lookups| {
             // Hash each lookup product commitment
             lookups
                 .into_iter()
-                .map(|lookup| lookup.read_product_commitment(transcript))
+                .map(|lookup| lookup.read_grand_sum_commitment(transcript))
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -352,7 +352,6 @@ pub fn verify_proof_ext<
                                         argument,
                                         theta,
                                         beta,
-                                        gamma,
                                         advice_evals,
                                         fixed_evals,
                                         instance_evals,

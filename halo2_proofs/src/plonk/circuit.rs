@@ -2,12 +2,13 @@ use core::cmp::max;
 use core::ops::{Add, Mul};
 use ff::Field;
 use std::{
+    collections::BTreeMap,
     convert::TryFrom,
     ops::{Neg, Sub},
 };
 
 use super::range_check::RangeCheckRel;
-use super::{lookup, permutation, range_check, shuffle, Assigned, Error};
+use super::{logup, lookup, permutation, range_check, shuffle, Assigned, Error};
 use crate::circuit::Layouter;
 use crate::{circuit::Region, poly::Rotation};
 
@@ -1102,7 +1103,8 @@ pub struct ConstraintSystem<F: Field> {
 
     // Vector of lookup arguments, where each corresponds to a sequence of
     // input expressions and a sequence of table expressions involved in the lookup.
-    pub lookups: Vec<lookup::Argument<F>>,
+    pub lookups: Vec<logup::Argument<F>>,
+    pub lookup_tracer: Option<BTreeMap<String, logup::ArgumentTracer<F>>>,
 
     // Vector of shuffle arguments, where each corresponds to a sequence of
     // input expressions and a sequence of table expressions involved in the shuffle.
@@ -1139,7 +1141,7 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     minimum_degree: &'a Option<usize>,
 }
 
-struct PinnedLookups<'a, F: Field>(&'a Vec<lookup::Argument<F>>);
+struct PinnedLookups<'a, F: Field>(&'a Vec<logup::Argument<F>>);
 
 impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -1147,7 +1149,7 @@ impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
             .entries(self.0.iter().enumerate().map(|(i, arg)| {
                 (
                     format!("lookup{}", i),
-                    &arg.input_expressions,
+                    &arg.input_expressions_set,
                     &arg.table_expressions,
                 )
             }))
@@ -1197,6 +1199,7 @@ impl<F: Field> Default for ConstraintSystem<F> {
             instance_queries: Vec::new(),
             permutation: permutation::Argument::new(),
             lookups: Vec::new(),
+            lookup_tracer: Some(BTreeMap::new()),
             shuffles: shuffle::Argument::new(),
             range_check: range_check::Argument::new(),
             constants: vec![],
@@ -1257,7 +1260,7 @@ impl<F: Field> ConstraintSystem<F> {
         table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, TableColumn)>,
     ) -> usize {
         let mut cells = VirtualCells::new(self);
-        let table_map = table_map(&mut cells)
+        let (input_expressions, table_expressions): (Vec<_>, Vec<_>) = table_map(&mut cells)
             .into_iter()
             .map(|(input, table)| {
                 if input.contains_simple_selector() {
@@ -1268,11 +1271,23 @@ impl<F: Field> ConstraintSystem<F> {
 
                 (input, table)
             })
-            .collect();
+            .unzip();
 
-        let index = self.lookups.len();
+        let index = self.lookup_tracer.as_ref().unwrap().len();
 
-        self.lookups.push(lookup::Argument::new(name, table_map));
+        let table_identifier = table_expressions
+            .iter()
+            .fold(String::new(), |acc, table| acc + &table.identifier());
+        self.lookup_tracer
+            .as_mut()
+            .unwrap()
+            .entry(table_identifier)
+            .and_modify(|e| e.input_expression_set.push(input_expressions.clone()))
+            .or_insert(logup::ArgumentTracer::new(
+                name,
+                input_expressions,
+                table_expressions,
+            ));
 
         index
     }
@@ -1289,13 +1304,48 @@ impl<F: Field> ConstraintSystem<F> {
         table_map: impl FnOnce(&mut VirtualCells<'_, F>) -> Vec<(Expression<F>, Expression<F>)>,
     ) -> usize {
         let mut cells = VirtualCells::new(self);
-        let table_map = table_map(&mut cells);
+        let (input_expressions, table_expressions): (Vec<_>, Vec<_>) =
+            table_map(&mut cells).into_iter().unzip();
 
-        let index = self.lookups.len();
+        let index = self.lookup_tracer.as_ref().unwrap().len();
 
-        self.lookups.push(lookup::Argument::new(name, table_map));
+        let table_identifier = table_expressions
+            .iter()
+            .fold(String::new(), |acc, table| acc + &table.identifier());
+        self.lookup_tracer
+            .as_mut()
+            .unwrap()
+            .entry(table_identifier)
+            .and_modify(|e| e.input_expression_set.push(input_expressions.clone()))
+            .or_insert(logup::ArgumentTracer::new(
+                name,
+                input_expressions,
+                table_expressions,
+            ));
 
         index
+    }
+
+    //logup: chunks lookup table+inputs by degree
+    pub fn chunk_lookups(mut self, degree: Option<usize>) -> Self {
+        if self.lookup_tracer.as_ref().unwrap().len() == 0 {
+            return self;
+        }
+
+        let degree = if let Some(d) = degree {
+            d
+        } else {
+            self.degree()
+        };
+
+        self.lookups = self
+            .lookup_tracer
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, value)| value.chunks(degree))
+            .collect::<Vec<_>>();
+        self
     }
 
     /// Add a shuffle argument for some input expressions and any columns.
@@ -1577,8 +1627,10 @@ impl<F: Field> ConstraintSystem<F> {
         // lookup expressions
         for expr in self.lookups.iter_mut().flat_map(|lookup| {
             lookup
-                .input_expressions
+                .input_expressions_set
+                .0
                 .iter_mut()
+                .flatten()
                 .chain(lookup.table_expressions.iter_mut())
         }) {
             replace_selectors(expr, &selector_replacements, true);
@@ -1734,13 +1786,14 @@ impl<F: Field> ConstraintSystem<F> {
         // for.
         degree = std::cmp::max(
             degree,
-            self.lookups
+            self.lookup_tracer
+                .as_ref()
+                .unwrap()
                 .iter()
-                .map(|l| l.required_degree())
+                .map(|l| l.1.required_degree())
                 .max()
                 .unwrap_or(1),
         );
-
         degree = std::cmp::max(
             degree,
             self.shuffles

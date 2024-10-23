@@ -46,8 +46,9 @@ where
     let config = ConcreteCircuit::configure(&mut cs);
 
     let degree = cs.degree();
-
     let domain = EvaluationDomain::new(degree as u32, params.k);
+
+    cs = cs.chunk_lookups(Some(degree));
 
     (domain, cs, config)
 }
@@ -311,8 +312,7 @@ where
 {
     let mut cs = ConstraintSystem::default();
     let config = ConcreteCircuit::configure(&mut cs);
-
-    let cs = cs;
+    let cs = cs.chunk_lookups(None);
 
     if (params.n as usize) < cs.minimum_rows() {
         return Err(Error::not_enough_rows_available(params.k));

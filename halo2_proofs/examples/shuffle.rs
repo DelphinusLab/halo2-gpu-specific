@@ -1,6 +1,6 @@
 use group::ff::BatchInvert;
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Layouter, SimpleFloorPlanner};
+use halo2_proofs::circuit::{floor_planner::V1, Layouter};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use pairing::bn256::Fr as Fp;
@@ -137,7 +137,7 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize
     for MyCircuit<F, W, H, T, B>
 {
     type Config = MyConfig<W, T, B>;
-    type FloorPlanner = SimpleFloorPlanner;
+    type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
         Self::default()
