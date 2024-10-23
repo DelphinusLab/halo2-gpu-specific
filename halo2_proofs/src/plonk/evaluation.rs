@@ -1,10 +1,10 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
-use crate::plonk::evaluation_gpu::{LookupProveExpression, ProveExpression};
+use crate::plonk::evaluation_gpu::{Bop, LookupProveExpression, ProveExpression};
 use crate::plonk::lookup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::shuffle::prover::Committed as ShuffleCommitted;
-use crate::plonk::{lookup, permutation, shuffle, Any, ProvingKey};
+use crate::plonk::{logup, permutation, shuffle, Any, ProvingKey};
 use crate::poly::Basis;
 use crate::{
     arithmetic::{eval_polynomial, parallelize, BaseExt, CurveAffine, FieldExt},
@@ -276,13 +276,17 @@ pub struct Evaluator<C: CurveAffine> {
     pub calculations: Vec<CalculationInfo>,
     /// Value parts
     pub value_parts: Vec<ValueSource>,
-    /// Lookup results
-    pub lookup_results: Vec<Calculation>,
+    /// Lookup results, (table, inputs_product,inputs_product_sum>)
+    pub lookup_results: Vec<(Calculation, Calculation, Calculation)>,
     /// Shuffle results (input,shuffle)
     pub shuffle_results: Vec<(Calculation, Calculation)>,
     /// GPU
     pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
-    pub gpu_lookup_expr: Vec<LookupProveExpression<C::ScalarExt>>,
+    pub gpu_lookup_expr: Vec<(
+        LookupProveExpression<C::ScalarExt>,
+        LookupProveExpression<C::ScalarExt>,
+        LookupProveExpression<C::ScalarExt>,
+    )>,
     //[(input,shuffle)]
     pub gpu_shuffle_expr: Vec<(
         LookupProveExpression<C::ScalarExt>,
@@ -307,7 +311,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let mut ev = Evaluator::default();
         ev.add_constant(&C::ScalarExt::zero());
-        ev.add_constant(&C::ScalarExt::one());
+        let constant_one = ev.add_constant(&C::ScalarExt::one());
 
         // Custom gates
 
@@ -352,22 +356,71 @@ impl<C: CurveAffine> Evaluator<C> {
             }
             lc
         };
+
+        let evaluate_compress_challenge =
+            |ev: &mut Evaluator<_>, expressions: &Vec<Expression<_>>| {
+                let compressed_coset = evaluate_lc(ev, expressions);
+                ev.add_calculation(Calculation::AddChallenge(
+                    compressed_coset,
+                    LcChallenge::Beta,
+                ))
+            };
         // Lookups
+        /*
+            φ_i(X) = f_i(X) + beta
+            τ(X) = t(X) + beta
+            LHS = τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+            RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))
+        */
         for lookup in cs.lookups.iter() {
-            // Input coset
-            let compressed_input_coset = evaluate_lc(&mut ev, &lookup.input_expressions);
             // table coset
+            // let compressed_table_coset = evaluate_compress_challenge(&mut ev, &lookup.table_expressions);
             let compressed_table_coset = evaluate_lc(&mut ev, &lookup.table_expressions);
-            // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            let right_gamma = ev.add_calculation(Calculation::AddChallenge(
+            let compressed_table_coset =
+                Calculation::AddChallenge(compressed_table_coset, LcChallenge::Beta);
+
+            // Input coset chunks
+            let compressed_input_cosets = lookup
+                .input_expressions_set
+                .0
+                .iter()
+                .map(|input| evaluate_compress_challenge(&mut ev, input))
+                .collect::<Vec<_>>();
+
+            // Π(φ_i(X))
+            let mut lc_product = compressed_input_cosets[0];
+            for p in compressed_input_cosets.iter().skip(1) {
+                lc_product = ev.add_calculation(Calculation::Mul(lc_product, *p))
+            }
+            let input_coset_products = Calculation::Store(lc_product);
+
+            // Π(φ_i(X)) * (∑ 1/(φ_i(X))=> (abc)*[1/a+1/b+1/c] = bc+ac+ab
+            let input_coset_products_sum = if compressed_input_cosets.len() > 1 {
+                let lc_coset_products = (0..compressed_input_cosets.len())
+                    .map(|i| {
+                        compressed_input_cosets
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, &v)| v)
+                            .reduce(|acc, e| ev.add_calculation(Calculation::Mul(acc, e)))
+                            .unwrap()
+                    })
+                    .collect::<Vec<_>>();
+                let lc_coset_products_sum = lc_coset_products
+                    .into_iter()
+                    .reduce(|acc, e| ev.add_calculation(Calculation::Add(acc, e)))
+                    .unwrap();
+
+                Calculation::Store(lc_coset_products_sum)
+            } else {
+                Calculation::Store(constant_one)
+            };
+
+            ev.lookup_results.push((
                 compressed_table_coset,
-                LcChallenge::Gamma,
-            ));
-            ev.lookup_results.push(Calculation::LcChallenge(
-                compressed_input_coset,
-                right_gamma,
-                LcChallenge::Beta,
-                1,
+                input_coset_products,
+                input_coset_products_sum,
             ));
         }
 
@@ -382,23 +435,69 @@ impl<C: CurveAffine> Evaluator<C> {
             }
             lc
         };
+
+        //todo if the value can get batch invert in gpu related function but not in gpu?
+        //todo if can get invert in gpu?
         // Lookups in GPU
         for lookup in cs.lookups.iter() {
-            // Input coset
-            let compressed_input_coset = evaluate_lc_gpu(&lookup.input_expressions);
             // table coset
             let compressed_table_coset = evaluate_lc_gpu(&lookup.table_expressions);
-            // z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-            let right_gamma = LookupProveExpression::AddChallenge(
+            let table_coset = LookupProveExpression::AddChallenge(
                 Box::new(compressed_table_coset),
-                LcChallenge::Gamma,
-            );
-            ev.gpu_lookup_expr.push(LookupProveExpression::LcChallenge(
-                Box::new(compressed_input_coset),
-                Box::new(right_gamma),
                 LcChallenge::Beta,
-                1,
-            ));
+            );
+            //input coset [input[i]+beta]
+            let input_cosets = lookup
+                .input_expressions_set
+                .0
+                .iter()
+                .map(|input| {
+                    let compressed_input_coset = evaluate_lc_gpu(input);
+                    LookupProveExpression::AddChallenge(
+                        Box::new(compressed_input_coset),
+                        LcChallenge::Beta,
+                    )
+                })
+                .collect::<Vec<_>>();
+
+            let input_cosets_product =
+                input_cosets
+                    .iter()
+                    .clone()
+                    .skip(1)
+                    .fold(input_cosets[0].clone(), |acc, e| {
+                        LookupProveExpression::Op(Box::new(acc), Box::new(e.clone()), Bop::Product)
+                    });
+
+            let input_cosets_product_sum = if input_cosets.len() > 1 {
+                (0..input_cosets.len())
+                    .map(|i| {
+                        input_cosets
+                            .iter()
+                            .enumerate()
+                            .filter(|(j, _)| *j != i)
+                            .map(|(_, v)| v.clone())
+                            .reduce(|acc, e| {
+                                LookupProveExpression::Op(
+                                    Box::new(acc.clone()),
+                                    Box::new(e.clone()),
+                                    Bop::Product,
+                                )
+                            })
+                            .unwrap()
+                    })
+                    .reduce(|acc, e| {
+                        LookupProveExpression::Op(Box::new(acc), Box::new(e.clone()), Bop::Sum)
+                    })
+                    .unwrap()
+            } else {
+                LookupProveExpression::Expression(ProveExpression::from_expr(
+                    &Expression::Constant(C::Scalar::one()),
+                ))
+            };
+
+            ev.gpu_lookup_expr
+                .push((table_coset, input_cosets_product, input_cosets_product_sum));
         }
 
         // Shuffles
@@ -654,7 +753,7 @@ impl<C: CurveAffine> Evaluator<C> {
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
+        lookups: &[Vec<logup::prover::Committed<C>>],
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
@@ -673,12 +772,20 @@ impl<C: CurveAffine> Evaluator<C> {
         let p = &pk.vk.cs.permutation;
 
         let mut values = domain.empty_extended();
-        let mut lookup_values = vec![C::Scalar::zero(); size * num_lookups];
+
+        let mut lookup_table_values = vec![C::Scalar::zero(); size * num_lookups];
+        let mut lookup_input_product_values = vec![C::Scalar::zero(); size * num_lookups];
+        let mut lookup_input_product_sum_values = vec![C::Scalar::zero(); size * num_lookups];
+
         let mut shuffle_input_values = vec![C::Scalar::zero(); size * num_shuffles];
         let mut shuffle_table_values = vec![C::Scalar::zero(); size * num_shuffles];
         // Core expression evaluations
         let num_threads = multicore::current_num_threads();
-        let mut table_values_box = ThreadBox::wrap(&mut lookup_values);
+        let mut table_values_box = ThreadBox::wrap(&mut lookup_table_values);
+        let mut lookup_input_product_values_box = ThreadBox::wrap(&mut lookup_input_product_values);
+        let mut lookup_input_product_sum_values_box =
+            ThreadBox::wrap(&mut lookup_input_product_sum_values);
+
         let mut shuffle_input_box = ThreadBox::wrap(&mut shuffle_input_values);
         let mut shuffle_table_box = ThreadBox::wrap(&mut shuffle_table_values);
 
@@ -696,6 +803,9 @@ impl<C: CurveAffine> Evaluator<C> {
                     let start = thread_idx * chunk_size;
                     scope.spawn(move |_| {
                         let table_values = table_values_box.unwrap();
+                        let lookup_input_product_values = lookup_input_product_values_box.unwrap();
+                        let lookup_input_product_sum_values =
+                            lookup_input_product_sum_values_box.unwrap();
                         let shuffle_input_values = shuffle_input_box.unwrap();
                         let shuffle_table_values = shuffle_table_box.unwrap();
 
@@ -740,7 +850,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                             // Values required for the lookups
                             for (t, table_result) in self.lookup_results.iter().enumerate() {
-                                table_values[t * size + idx] = table_result.evaluate(
+                                table_values[t * size + idx] = table_result.0.evaluate(
                                     &rotations,
                                     &self.constants,
                                     &intermediates,
@@ -751,6 +861,30 @@ impl<C: CurveAffine> Evaluator<C> {
                                     &gamma,
                                     &theta,
                                 );
+                                lookup_input_product_values[t * size + idx] =
+                                    table_result.1.evaluate(
+                                        &rotations,
+                                        &self.constants,
+                                        &intermediates,
+                                        fixed,
+                                        advice,
+                                        instance,
+                                        &beta,
+                                        &gamma,
+                                        &theta,
+                                    );
+                                lookup_input_product_sum_values[t * size + idx] =
+                                    table_result.2.evaluate(
+                                        &rotations,
+                                        &self.constants,
+                                        &intermediates,
+                                        fixed,
+                                        advice,
+                                        instance,
+                                        &beta,
+                                        &gamma,
+                                        &theta,
+                                    );
                             }
 
                             // Values required for the shuffles
@@ -869,62 +1003,57 @@ impl<C: CurveAffine> Evaluator<C> {
             end_timer!(timer);
 
             let timer = ark_std::start_timer!(|| "eval_h_lookups");
+            /*
+                φ_i(X) = f_i(X) + beta
+                τ(X) = t(X) + beta
+                LHS = τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+                RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))      (1)
+                    = (τ(X) * Π(φ_i(X)) * ∑ 1/(φ_i(X))) - Π(φ_i(X)) * m(X)
+                    = Π(φ_i(X)) * (τ(X) * ∑ 1/(φ_i(X)) - m(X))
 
+                    = ∑_i τ(X) * Π_{j != i} φ_j(X) - m(X) * Π(φ_i(X))        (2)
+            */
+            // let mut lookup_grand_sum_offset =0;
             for (lookup_idx, lookup) in lookups.iter().enumerate() {
                 // Lookup constraints
-                let table = &lookup_values[lookup_idx * size..(lookup_idx + 1) * size];
+                let table = &lookup_table_values[lookup_idx * size..(lookup_idx + 1) * size];
+                let input_product =
+                    &lookup_input_product_values[lookup_idx * size..(lookup_idx + 1) * size];
+                let input_product_sum =
+                    &lookup_input_product_sum_values[lookup_idx * size..(lookup_idx + 1) * size];
+                // let input_ext_product = &lookup_input_ext_product_values[lookup_grand_sum_offset * size..(lookup_grand_sum_offset + 1) * size];
+                // let input_ext_product_sum = &lookup_input_ext_product_sum_values[lookup_grand_sum_offset * size..(lookup_grand_sum_offset + 1) * size];
+
                 // Polynomials required for this lookup.
                 // Calculated here so these only have to be kept in memory for the short time
                 // they are actually needed.
-                let product_coset = pk.vk.domain.coeff_to_extended(lookup.product_poly.clone());
-                let permuted_input_coset = pk
+                let grand_sum_coset = pk
                     .vk
                     .domain
-                    .coeff_to_extended(lookup.permuted_input_poly.clone());
-                let permuted_table_coset = pk
-                    .vk
-                    .domain
-                    .coeff_to_extended(lookup.permuted_table_poly.clone());
+                    .coeff_to_extended(lookup.grand_sum_poly.clone());
+                let m_poly_coset = pk.vk.domain.coeff_to_extended(lookup.m_poly.clone());
 
                 parallelize(&mut values, |values, start| {
                     for (i, value) in values.iter_mut().enumerate() {
                         let idx = start + i;
 
                         let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                        let r_prev = get_rotation_idx(idx, -1, rot_scale, isize);
 
-                        let a_minus_s = permuted_input_coset[idx] - permuted_table_coset[idx];
-                        // l_0(X) * (1 - z(X)) = 0
-                        *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
-                        // l_last(X) * (z(X)^2 - z(X)) = 0
-                        *value = *value * y
-                            + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
-                                * l_last[idx]);
+                        let z_gx_minus_z_x = grand_sum_coset[r_next] - grand_sum_coset[idx];
+
+                        // l_0(X) * z(X) = 0
+                        *value = *value * y + (grand_sum_coset[idx] * l0[idx]);
+                        // l_last(X) * z(X) = 0
+                        *value = *value * y + (grand_sum_coset[idx] * l_last[idx]);
                         // (1 - (l_last(X) + l_blind(X))) * (
-                        //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-                        //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
-                        //          (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+                        //   τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+                        //   - ∑_i τ(X) * Π_{j != i} φ_j(X) + m(X) * Π(φ_i(X))
                         // ) = 0
 
                         *value = *value * y
-                            + ((product_coset[r_next]
-                                * (permuted_input_coset[idx] + beta)
-                                * (permuted_table_coset[idx] + gamma)
-                                - product_coset[idx] * table[idx])
-                                * l_active_row[idx]);
-
-                        // Check that the first values in the permuted input expression and permuted
-                        // fixed expression are the same.
-                        // l_0(X) * (a'(X) - s'(X)) = 0
-                        *value = *value * y + (a_minus_s * l0[idx]);
-
-                        // Check that each value in the permuted lookup input expression is either
-                        // equal to the value above it, or the value at the same index in the
-                        // permuted table expression.
-                        // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
-                        *value = *value * y
-                            + (a_minus_s
-                                * (permuted_input_coset[idx] - permuted_input_coset[r_prev])
+                            + ((z_gx_minus_z_x * table[idx] * input_product[idx]
+                                - table[idx] * input_product_sum[idx]
+                                + m_poly_coset[idx] * input_product[idx])
                                 * l_active_row[idx]);
                     }
                 });
@@ -984,7 +1113,7 @@ impl<C: CurveAffine> Evaluator<C> {
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
+        lookups: &[Vec<logup::prover::Committed<C>>],
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
@@ -1321,6 +1450,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 let mut ys = vec![C::ScalarExt::one(), y];
                                 let table_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
+                                    .0
                                     ._eval_gpu(
                                         pk,
                                         program,
@@ -1337,31 +1467,62 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .unwrap()
                                     .0;
 
-                                let permuted_input_coset_buf = do_extended_fft(
+                                let input_product_buf = pk.ev.gpu_lookup_expr
+                                    [lookup_idx + group_idx * group_expr_len]
+                                    .1
+                                    ._eval_gpu(
+                                        pk,
+                                        program,
+                                        &advice_poly[0],
+                                        &instance_poly[0],
+                                        &mut ys,
+                                        beta,
+                                        theta,
+                                        gamma,
+                                        &mut unit_cache,
+                                        &mut allocator,
+                                        &mut helper,
+                                    )
+                                    .unwrap()
+                                    .0;
+
+                                let input_product_sum_buf = pk.ev.gpu_lookup_expr
+                                    [lookup_idx + group_idx * group_expr_len]
+                                    .2
+                                    ._eval_gpu(
+                                        pk,
+                                        program,
+                                        &advice_poly[0],
+                                        &instance_poly[0],
+                                        &mut ys,
+                                        beta,
+                                        theta,
+                                        gamma,
+                                        &mut unit_cache,
+                                        &mut allocator,
+                                        &mut helper,
+                                    )
+                                    .unwrap()
+                                    .0;
+
+                                let m_poly_coset_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.permuted_input_poly,
+                                    &lookup.m_poly,
                                     &mut allocator,
                                     &mut helper,
                                 )?;
-                                let permuted_table_coset_buf = do_extended_fft(
+                                let grand_sum_coset_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.permuted_table_poly,
-                                    &mut allocator,
-                                    &mut helper,
-                                )?;
-                                let product_coset_buf = do_extended_fft(
-                                    pk,
-                                    program,
-                                    &lookup.product_poly,
+                                    &lookup.grand_sum_poly,
                                     &mut allocator,
                                     &mut helper,
                                 )?;
 
                                 let local_work_size = 128;
                                 let global_work_size = size / local_work_size;
-                                let kernel_name = format!("{}_eval_h_lookups", "Bn256_Fr");
+                                let kernel_name = format!("{}_eval_h_logups", "Bn256_Fr");
                                 let kernel = program.create_kernel(
                                     &kernel_name,
                                     global_work_size as usize,
@@ -1370,9 +1531,10 @@ impl<C: CurveAffine> Evaluator<C> {
                                 kernel
                                     .arg(&values_buf)
                                     .arg(table_buf.as_ref())
-                                    .arg(&permuted_input_coset_buf)
-                                    .arg(&permuted_table_coset_buf)
-                                    .arg(&product_coset_buf)
+                                    .arg(input_product_buf.as_ref())
+                                    .arg(input_product_sum_buf.as_ref())
+                                    .arg(&m_poly_coset_buf)
+                                    .arg(&grand_sum_coset_buf)
                                     .arg(&l0_buf)
                                     .arg(&l_last_buf)
                                     .arg(&l_active_row_buf)
@@ -1404,7 +1566,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 .collect::<Vec<_>>()
                 .iter()
                 .fold(values, |acc, (x, len)| {
-                    acc * y.pow_vartime([*len as u64 * 5, 0, 0, 0]) + x
+                    acc * y.pow_vartime([*len as u64 * 3, 0, 0, 0]) + x
                 });
         }
 

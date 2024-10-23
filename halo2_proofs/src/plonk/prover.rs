@@ -31,11 +31,10 @@ use super::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
     },
-    lookup, permutation, shuffle, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta,
+    logup, permutation, shuffle, vanishing, ChallengeBeta, ChallengeGamma, ChallengeTheta,
     ChallengeX, ChallengeY, Error, ProvingKey,
 };
 use crate::arithmetic::eval_polynomial_st;
-use crate::plonk::lookup::prover::Permuted;
 use crate::{
     arithmetic::{eval_polynomial, BaseExt, CurveAffine, FieldExt},
     plonk::Assigned,
@@ -319,8 +318,16 @@ pub fn create_proof_ext<
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
 
     end_timer!(timer);
-    let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
-    let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
+
+    let _lookup_chunks = (0..pk.vk.cs.lookups.len())
+        .map(|i| pk.vk.cs.lookups[i].input_expressions_set.0.len())
+        .collect::<Vec<_>>();
+    let timer = start_timer!(|| format!(
+        "lookups {}, chunks={:?}",
+        pk.vk.cs.lookups.len(),
+        _lookup_chunks
+    ));
+    let (lookups, lookups_commitments): (Vec<Vec<logup::prover::Compressed<C>>>, Vec<Vec<C>>) =
         instance
             .iter()
             .zip(advice.iter())
@@ -331,10 +338,9 @@ pub fn create_proof_ext<
                     .par_iter()
                     .map(|lookup| {
                         lookup
-                            .commit_permuted(
+                            .compress(
                                 pk,
                                 params,
-                                domain,
                                 theta,
                                 &advice,
                                 &pk.fixed_values,
@@ -347,10 +353,10 @@ pub fn create_proof_ext<
             })
             .unzip();
 
+    // m_commitment
     lookups_commitments.into_iter().for_each(|x| {
-        x.iter().for_each(|x| {
-            transcript.write_point(x[0]).unwrap();
-            transcript.write_point(x[1]).unwrap();
+        x.iter().for_each(|m| {
+            transcript.write_point(*m).unwrap();
         })
     });
     end_timer!(timer);
@@ -419,7 +425,7 @@ pub fn create_proof_ext<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .map(|lookup| lookup.commit_product(pk, params, beta, gamma).unwrap())
+                    .map(|lookup| lookup.commit_grand_sum(pk, params, beta).unwrap())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -431,11 +437,11 @@ pub fn create_proof_ext<
             .map(|lookups| {
                 lookups
                     .into_iter()
-                    .map(|(l0, l1, mut z)| {
+                    .map(|(m, mut z)| {
                         for _ in 0..pk.vk.cs.blinding_factors() {
                             z.push(C::Scalar::random(&mut rng))
                         }
-                        (l0, l1, pk.vk.domain.lagrange_from_vec(z))
+                        (m, pk.vk.domain.lagrange_from_vec(z))
                     })
                     .collect::<Vec<_>>()
             })
@@ -449,18 +455,17 @@ pub fn create_proof_ext<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (product_poly, c) = params.commit_lagrange_and_ifft(
-                            l.2,
+                        let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                            l.1,
                             &pk.vk.domain.get_omega_inv(),
                             &pk.vk.domain.ifft_divisor,
                         );
                         let c = c.to_affine();
                         (
                             c,
-                            lookup::prover::Committed {
-                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1),
-                                product_poly,
+                            logup::prover::Committed {
+                                m_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
+                                grand_sum_poly,
                             },
                         )
                     })
@@ -724,7 +729,7 @@ pub fn create_proof_ext<
     let timer = start_timer!(|| "eval poly lookups");
     // Evaluate the lookups, if any, at omega^i x.
     let (lookups, evals): (
-        Vec<Vec<lookup::prover::Evaluated<C>>>,
+        Vec<Vec<logup::prover::Evaluated<C>>>,
         Vec<Vec<Vec<C::ScalarExt>>>,
     ) = lookups
         .into_iter()
@@ -975,7 +980,7 @@ pub fn create_proof_from_witness<
 
     end_timer!(timer);
     let timer = start_timer!(|| format!("lookups {}", pk.vk.cs.lookups.len()));
-    let (lookups, lookups_commitments): (Vec<Vec<lookup::prover::Permuted<C>>>, Vec<Vec<[C; 2]>>) =
+    let (lookups, lookups_commitments): (Vec<Vec<logup::prover::Compressed<C>>>, Vec<Vec<C>>) =
         instance
             .iter()
             .zip(advice.iter())
@@ -986,10 +991,9 @@ pub fn create_proof_from_witness<
                     .par_iter()
                     .map(|lookup| {
                         lookup
-                            .commit_permuted(
+                            .compress(
                                 pk,
                                 params,
-                                domain,
                                 theta,
                                 &advice,
                                 &pk.fixed_values,
@@ -1003,9 +1007,8 @@ pub fn create_proof_from_witness<
             .unzip();
 
     lookups_commitments.into_iter().for_each(|x| {
-        x.iter().for_each(|x| {
-            transcript.write_point(x[0]).unwrap();
-            transcript.write_point(x[1]).unwrap();
+        x.iter().for_each(|m| {
+            transcript.write_point(*m).unwrap();
         })
     });
     end_timer!(timer);
@@ -1074,7 +1077,7 @@ pub fn create_proof_from_witness<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .map(|lookup| lookup.commit_product(pk, params, beta, gamma).unwrap())
+                    .map(|lookup| lookup.commit_grand_sum(pk, params, beta).unwrap())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -1086,11 +1089,11 @@ pub fn create_proof_from_witness<
             .map(|lookups| {
                 lookups
                     .into_iter()
-                    .map(|(l0, l1, mut z)| {
+                    .map(|(m, mut z)| {
                         for _ in 0..pk.vk.cs.blinding_factors() {
                             z.push(C::Scalar::random(&mut rng))
                         }
-                        (l0, l1, pk.vk.domain.lagrange_from_vec(z))
+                        (m, pk.vk.domain.lagrange_from_vec(z))
                     })
                     .collect::<Vec<_>>()
             })
@@ -1104,18 +1107,17 @@ pub fn create_proof_from_witness<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (product_poly, c) = params.commit_lagrange_and_ifft(
-                            l.2,
+                        let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                            l.1,
                             &pk.vk.domain.get_omega_inv(),
                             &pk.vk.domain.ifft_divisor,
                         );
                         let c = c.to_affine();
                         (
                             c,
-                            lookup::prover::Committed {
-                                permuted_input_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                permuted_table_poly: pk.vk.domain.lagrange_to_coeff_st(l.1),
-                                product_poly,
+                            logup::prover::Committed {
+                                m_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
+                                grand_sum_poly,
                             },
                         )
                     })
@@ -1379,7 +1381,7 @@ pub fn create_proof_from_witness<
     let timer = start_timer!(|| "eval poly lookups");
     // Evaluate the lookups, if any, at omega^i x.
     let (lookups, evals): (
-        Vec<Vec<lookup::prover::Evaluated<C>>>,
+        Vec<Vec<logup::prover::Evaluated<C>>>,
         Vec<Vec<Vec<C::ScalarExt>>>,
     ) = lookups
         .into_iter()

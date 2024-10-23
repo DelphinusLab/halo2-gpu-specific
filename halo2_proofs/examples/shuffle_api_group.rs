@@ -1,5 +1,5 @@
 use halo2_proofs::arithmetic::FieldExt;
-use halo2_proofs::circuit::{Chip, Layouter, Region, SimpleFloorPlanner};
+use halo2_proofs::circuit::{floor_planner::V1, Chip, Layouter, Region};
 use halo2_proofs::dev::MockProver;
 use halo2_proofs::plonk::*;
 use pairing::bn256::Fr as Fp;
@@ -126,7 +126,7 @@ impl<F: FieldExt> MyCircuit<F> {
 
 impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     type Config = ShuffleConfig;
-    type FloorPlanner = SimpleFloorPlanner;
+    type FloorPlanner = V1;
 
     fn without_witnesses(&self) -> Self {
         Self::default()
@@ -149,7 +149,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
 
         layouter.assign_region(
             || "inputs",
-            |mut region: Region<'_, F>| {
+            |mut region: &Region<'_, F>| {
                 for (i, (input0, input1)) in self.input0.iter().zip(self.input1.iter()).enumerate()
                 {
                     region.assign_advice(|| "", ch.config.inputs[0], i, || Ok(*input0))?;
