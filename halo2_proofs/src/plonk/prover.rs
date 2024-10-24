@@ -464,7 +464,7 @@ pub fn create_proof_ext<
                         (
                             c,
                             logup::prover::Committed {
-                                m_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
+                                multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
                                 grand_sum_poly,
                             },
                         )
@@ -1116,7 +1116,7 @@ pub fn create_proof_from_witness<
                         (
                             c,
                             logup::prover::Committed {
-                                m_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
+                                multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
                                 grand_sum_poly,
                             },
                         )
