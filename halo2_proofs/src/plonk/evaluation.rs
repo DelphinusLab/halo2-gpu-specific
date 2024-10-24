@@ -463,7 +463,6 @@ impl<C: CurveAffine> Evaluator<C> {
             let input_cosets_product =
                 input_cosets
                     .iter()
-                    .clone()
                     .skip(1)
                     .fold(input_cosets[0].clone(), |acc, e| {
                         LookupProveExpression::Op(Box::new(acc), Box::new(e.clone()), Bop::Product)
@@ -1031,7 +1030,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     .vk
                     .domain
                     .coeff_to_extended(lookup.grand_sum_poly.clone());
-                let m_poly_coset = pk.vk.domain.coeff_to_extended(lookup.m_poly.clone());
+                let m_poly_coset = pk.vk.domain.coeff_to_extended(lookup.multiplicity_poly.clone());
 
                 parallelize(&mut values, |values, start| {
                     for (i, value) in values.iter_mut().enumerate() {
@@ -1043,22 +1042,21 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         // l_0(X) * z(X) = 0
                         *value = *value * y + (grand_sum_coset[idx] * l0[idx]);
+
                         // l_last(X) * z(X) = 0
                         *value = *value * y + (grand_sum_coset[idx] * l_last[idx]);
+
                         // (1 - (l_last(X) + l_blind(X))) * (
                         //   τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                         //   - ∑_i τ(X) * Π_{j != i} φ_j(X) + m(X) * Π(φ_i(X))
                         // ) = 0
-
                         *value = *value * y
-                            + ((z_gx_minus_z_x * table[idx] * input_product[idx]
-                                - table[idx] * input_product_sum[idx]
-                                + m_poly_coset[idx] * input_product[idx])
+                            + (((z_gx_minus_z_x * table[idx] + m_poly_coset[idx]) * input_product[idx]
+                                - table[idx] * input_product_sum[idx])
                                 * l_active_row[idx]);
                     }
                 });
             }
-
             end_timer!(timer);
 
             let timer = ark_std::start_timer!(|| "eval_h_shuffles");

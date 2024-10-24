@@ -16,14 +16,12 @@ use group::{
     Curve,
 };
 #[derive(Debug)]
-pub struct MPolyCommitment<C: CurveAffine> {
-    pub commitment: C,
-}
+pub struct MultiplicityCommitment<C: CurveAffine> (pub C);
 
 #[derive(Debug)]
 pub struct Committed<C: CurveAffine> {
     pub grand_sum_commitment: C,
-    pub m_poly_commitment: MPolyCommitment<C>,
+    pub multiplicity_commitment: MultiplicityCommitment<C>,
 }
 
 #[derive(Debug)]
@@ -31,21 +29,19 @@ pub struct Evaluated<C: CurveAffine> {
     pub committed: Committed<C>,
     pub grand_sum_eval: C::Scalar,
     pub grand_sum_next_eval: C::Scalar,
-    pub m_poly_eval: C::Scalar,
+    pub multiplicity_eval: C::Scalar,
 }
 
 impl<F: FieldExt> Argument<F> {
     pub fn read_m_commitments<C: CurveAffine, E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
         &self,
         transcript: &mut T,
-    ) -> Result<MPolyCommitment<C>, Error> {
-        Ok(MPolyCommitment {
-            commitment: transcript.read_point()?,
-        })
+    ) -> Result<MultiplicityCommitment<C>, Error> {
+        Ok(MultiplicityCommitment (transcript.read_point()?))
     }
 }
 
-impl<C: CurveAffine> MPolyCommitment<C> {
+impl<C: CurveAffine> MultiplicityCommitment<C> {
     pub fn read_grand_sum_commitment<E: EncodedChallenge<C>, T: TranscriptRead<C, E>>(
         self,
         transcript: &mut T,
@@ -53,7 +49,7 @@ impl<C: CurveAffine> MPolyCommitment<C> {
         let grand_sum_commitment = transcript.read_point()?;
 
         Ok(Committed {
-            m_poly_commitment: self,
+            multiplicity_commitment: self,
             grand_sum_commitment,
         })
     }
@@ -66,13 +62,13 @@ impl<C: CurveAffine> Committed<C> {
     ) -> Result<Evaluated<C>, Error> {
         let grand_sum_eval = transcript.read_scalar()?;
         let grand_sum_next_eval = transcript.read_scalar()?;
-        let m_poly_eval = transcript.read_scalar()?;
+        let multiplicity_eval = transcript.read_scalar()?;
 
         Ok(Evaluated {
             committed: self,
             grand_sum_eval,
             grand_sum_next_eval,
-            m_poly_eval,
+            multiplicity_eval,
         })
     }
 }
@@ -98,6 +94,9 @@ impl<C: CurveAffine> Evaluated<C> {
                  τ(X) = t(X) + α
                  LHS = τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                  RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))
+                 <=>
+                 LHS = (τ(X) * (ϕ(gX) - ϕ(X)) + m(x)) *Π(φ_i(X))
+                 RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)))
             */
             let z_gx_minus_zx = self.grand_sum_next_eval - self.grand_sum_eval;
 
@@ -130,8 +129,8 @@ impl<C: CurveAffine> Evaluated<C> {
             phi.batch_invert();
             let sum_invert_fi = phi.iter().fold(C::Scalar::zero(), |acc, e| acc + e);
 
-            let left = tau * product_fi * z_gx_minus_zx;
-            let right = tau * product_fi * sum_invert_fi - product_fi * &self.m_poly_eval;
+            let left = (tau * z_gx_minus_zx + &self.multiplicity_eval) * product_fi;
+            let right = tau * product_fi * sum_invert_fi;
             (left - &right) * &active_rows
         };
 
@@ -176,10 +175,10 @@ impl<C: CurveAffine> Evaluated<C> {
                 self.grand_sum_next_eval,
             )))
             .chain(Some(VerifierQuery::new_commitment(
-                &self.committed.m_poly_commitment.commitment,
+                &self.committed.multiplicity_commitment.0,
                 *x,
                 Rotation::cur(),
-                self.m_poly_eval,
+                self.multiplicity_eval,
             )))
     }
 }

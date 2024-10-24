@@ -40,13 +40,13 @@ use std::{
 pub(in crate::plonk) struct Compressed<C: CurveAffine> {
     compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
     compressed_input_expression_set: Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
-    pub(in crate::plonk) m_expression: Polynomial<C::Scalar, LagrangeCoeff>,
+    pub(in crate::plonk) multiplicity_expression: Polynomial<C::Scalar, LagrangeCoeff>,
 }
 
 #[derive(Debug)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     pub(in crate::plonk) grand_sum_poly: Polynomial<C::Scalar, Coeff>,
-    pub(in crate::plonk) m_poly: Polynomial<C::Scalar, Coeff>,
+    pub(in crate::plonk) multiplicity_poly: Polynomial<C::Scalar, Coeff>,
 }
 
 pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
@@ -54,15 +54,12 @@ pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
 }
 
 impl<F: FieldExt> Argument<F> {
-    /// Given a Lookup with input expressions [A_0, A_1, ..., A_{m-1}] and table expressions
+    /// Given a Lookup with input expressions set [[A_0, A_1, ..., A_{m-1}]..]  and table expressions
     /// [S_0, S_1, ..., S_{m-1}], this method
-    /// - constructs A_compressed = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
-    ///   and S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1},
-    /// - permutes A_compressed and S_compressed using permute_expression_pair() helper,
-    ///   obtaining A' and S', and
-    /// - constructs Permuted<C> struct using permuted_input_value = A', and
-    ///   permuted_table_expression = S'.
-    /// The Permuted<C> struct is used to update the Lookup, and is then returned.
+    /// - constructs A_compressed_1 = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
+    ///   A_compressed_2...
+    /// - constructs S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1}
+    /// - constructs Multiplicity expression to count input expressions set's multiplicity in table expression
     pub(in crate::plonk) fn compress<'a, C, R: RngCore>(
         &self,
         pk: &ProvingKey<C>,
@@ -78,7 +75,7 @@ impl<F: FieldExt> Argument<F> {
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
         let blinding_factors = pk.vk.cs.blinding_factors();
-        let used_row = params.n as usize - blinding_factors - 1;
+        let usable_row = params.n as usize - blinding_factors - 1;
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
             pk.vk.domain.lagrange_from_vec(evaluate_with_theta(
@@ -92,7 +89,6 @@ impl<F: FieldExt> Argument<F> {
             ))
         };
 
-        //todo rayon
         // Get values of input expressions involved in the lookup and compress them
         let compressed_input_expression_set = self
             .input_expressions_set
@@ -110,7 +106,7 @@ impl<F: FieldExt> Argument<F> {
         let timer = start_timer!(|| "lookup table sort");
         let mut sorted_table_with_indices = compressed_table_expression
             .par_iter()
-            .take(params.n as usize - blinding_factors - 1)
+            .take(usable_row)
             .enumerate()
             .map(|(i, t)| (t, i))
             .collect::<Vec<_>>();
@@ -118,14 +114,14 @@ impl<F: FieldExt> Argument<F> {
         end_timer!(timer);
 
         let timer = start_timer!(|| "lookup construct m(X) values");
-        let mut m_values: Vec<F> = {
+        let mut multiplicity_values: Vec<F> = {
             use std::sync::atomic::{AtomicU64, Ordering};
             let m_values: Vec<AtomicU64> = (0..params.n).map(|_| AtomicU64::new(0)).collect();
             //todo check ConstraintSystemFailure report to outside by try_for_each?
             for compressed_input_expression in compressed_input_expression_set.iter() {
                 compressed_input_expression
                     .par_iter()
-                    .take(params.n as usize - blinding_factors - 1)
+                    .take(usable_row)
                     .try_for_each(|fi| -> Result<(), Error> {
                         let index = sorted_table_with_indices
                             .binary_search_by_key(&fi, |&(t, _)| t)
@@ -148,35 +144,32 @@ impl<F: FieldExt> Argument<F> {
                 .commit_lagrange_with_bound(values, max_bits)
                 .to_affine()
         };
-        m_values.truncate(used_row);
+        multiplicity_values.truncate(usable_row);
 
-        let m_expression_max_bits = expression_max_bits::<C>(&m_values);
-        m_values.extend(
+        let m_max_bits = expression_max_bits::<C>(&multiplicity_values);
+        multiplicity_values.extend(
             (0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)),
         );
-        assert_eq!(m_values.len(), params.n as usize);
-        let m_expression = pk.vk.domain.lagrange_from_vec(m_values);
+        assert_eq!(multiplicity_values.len(), params.n as usize);
+        let multiplicity_expression = pk.vk.domain.lagrange_from_vec(multiplicity_values);
 
         // Commit to m expression
-        let m_commitment = commit_values(&m_expression, m_expression_max_bits);
+        let multiplicity_commitment = commit_values(&multiplicity_expression, m_max_bits);
 
         Ok((
             Compressed {
                 compressed_table_expression,
                 compressed_input_expression_set,
-                m_expression,
+                multiplicity_expression,
             },
-            m_commitment,
+            multiplicity_commitment,
         ))
     }
 }
 
 impl<C: CurveAffine> Compressed<C> {
-    /// Given a Lookup with input expressions, table expressions, and the permuted
-    /// input expression and permuted table expression, this method constructs the
-    /// grand product polynomial over the lookup. The grand product polynomial
-    /// is used to populate the Product<C> struct. The Product<C> struct is
-    /// added to the Lookup and finally returned by the method.
+    /// Given a Lookup with input expressions, table expressions, and the multiplicity
+    /// expression, this method constructs the grand sum polynomial over the lookup.
     pub(in crate::plonk) fn commit_grand_sum(
         self,
         pk: &ProvingKey<C>,
@@ -194,15 +187,15 @@ impl<C: CurveAffine> Compressed<C> {
         let mut grand_sum = vec![C::Scalar::zero(); params.n as usize];
 
         for input in self.compressed_input_expression_set.iter() {
-            let mut logup_sum = vec![C::Scalar::zero(); params.n as usize];
-            parallelize(&mut logup_sum, |sum, start| {
+            let mut fi_sum = vec![C::Scalar::zero(); params.n as usize];
+            parallelize(&mut fi_sum, |sum, start| {
                 for (sum_value, expression_value) in sum.iter_mut().zip(input[start..].iter()) {
                     *sum_value += &(*beta + expression_value);
                 }
             });
-            batch_invert(&mut logup_sum);
+            batch_invert(&mut fi_sum);
             parallelize(&mut grand_sum, |sum, start| {
-                for (sum_value, expression_value) in sum.iter_mut().zip(logup_sum[start..].iter()) {
+                for (sum_value, expression_value) in sum.iter_mut().zip(fi_sum[start..].iter()) {
                     *sum_value += expression_value;
                 }
             });
@@ -222,7 +215,7 @@ impl<C: CurveAffine> Compressed<C> {
             for ((sum_value, table_value), m_value) in sum
                 .iter_mut()
                 .zip(table_sum[start..].iter())
-                .zip(self.m_expression[start..].iter())
+                .zip(self.multiplicity_expression[start..].iter())
             {
                 // (Σ 1/(φ_i(X)) - m(X) / τ(X))
                 *sum_value = *sum_value - &(*table_value * m_value);
@@ -275,7 +268,7 @@ impl<C: CurveAffine> Compressed<C> {
             assert_eq!(z[u], C::Scalar::zero())
         }
 
-        Ok((self.m_expression, z))
+        Ok((self.multiplicity_expression, z))
     }
 }
 
@@ -291,7 +284,7 @@ impl<C: CurveAffine> Committed<C> {
         let evals = vec![
             (&self.grand_sum_poly, *x),
             (&self.grand_sum_poly, x_next),
-            (&self.m_poly, *x),
+            (&self.multiplicity_poly, *x),
         ]
         .into_par_iter()
         .map(|(a, b)| eval_polynomial_st(a, b))
@@ -326,13 +319,13 @@ impl<C: CurveAffine> Evaluated<C> {
             .chain(Some(ProverQuery {
                 point: *x,
                 rotation: Rotation::cur(),
-                poly: &self.constructed.m_poly,
+                poly: &self.constructed.multiplicity_poly,
             }))
     }
 }
 
 fn expression_max_bits<C: CurveAffine>(expression: &Vec<C::Scalar>) -> usize {
-    let max_express = *expression.iter().reduce(|a, b| a.max(b)).unwrap();
+    let max_val = *expression.iter().reduce(|a, b| a.max(b)).unwrap();
 
     let get_scalar_bits = |x: C::Scalar| {
         let repr = x.to_repr();
@@ -349,5 +342,5 @@ fn expression_max_bits<C: CurveAffine>(expression: &Vec<C::Scalar>) -> usize {
             })
     };
 
-    16.max(get_scalar_bits(max_express))
+    16.max(get_scalar_bits(max_val))
 }
