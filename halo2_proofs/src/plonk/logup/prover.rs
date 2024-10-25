@@ -257,7 +257,7 @@ impl<C: CurveAffine> Compressed<C> {
             for ((phi, table), m) in phi_chunk_sums
                 .iter_mut()
                 .zip(self.compressed_table_expression.iter())
-                .zip(self.m_expression.iter())
+                .zip(self.multiplicity_expression.iter())
             {
                 *phi = *phi - *m * &(*table + *beta).invert().unwrap();
             }

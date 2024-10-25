@@ -16,7 +16,7 @@ use group::{
     Curve,
 };
 #[derive(Debug)]
-pub struct MultiplicityCommitment<C: CurveAffine> (pub C);
+pub struct MultiplicityCommitment<C: CurveAffine>(pub C);
 
 #[derive(Debug)]
 pub struct Committed<C: CurveAffine> {
@@ -37,7 +37,7 @@ impl<F: FieldExt> Argument<F> {
         &self,
         transcript: &mut T,
     ) -> Result<MultiplicityCommitment<C>, Error> {
-        Ok(MultiplicityCommitment (transcript.read_point()?))
+        Ok(MultiplicityCommitment(transcript.read_point()?))
     }
 }
 

@@ -1,7 +1,7 @@
 use super::{evaluation_gpu, ConstraintSystem, Expression};
 use crate::multicore;
 use crate::plonk::evaluation_gpu::{Bop, LookupProveExpression, ProveExpression};
-use crate::plonk::lookup::prover::Committed;
+use crate::plonk::logup::prover::Committed;
 use crate::plonk::permutation::Argument;
 use crate::plonk::shuffle::prover::Committed as ShuffleCommitted;
 use crate::plonk::{logup, permutation, shuffle, Any, ProvingKey};
@@ -1506,7 +1506,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 let m_poly_coset_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.m_poly,
+                                    &lookup.multiplicity_poly,
                                     &mut allocator,
                                     &mut helper,
                                 )?;
