@@ -1784,16 +1784,22 @@ impl<F: Field> ConstraintSystem<F> {
 
         // The lookup argument also serves alongside the gates and must be accounted
         // for.
-        degree = std::cmp::max(
-            degree,
+        let lookup_degree = if self.lookup_tracer.is_some() {
             self.lookup_tracer
                 .as_ref()
                 .unwrap()
                 .iter()
                 .map(|l| l.1.required_degree())
                 .max()
-                .unwrap_or(1),
-        );
+                .unwrap_or(1)
+        } else {
+            self.lookups
+                .iter()
+                .map(|l| l.required_degree())
+                .max()
+                .unwrap_or(1)
+        };
+        degree = std::cmp::max(degree, lookup_degree);
         degree = std::cmp::max(
             degree,
             self.shuffles
