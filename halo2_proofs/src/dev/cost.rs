@@ -159,8 +159,9 @@ impl<G: PrimeGroup, ConcreteCircuit: Circuit<G::Scalar>> CircuitCost<G, Concrete
     /// Panics if `k` is not large enough for the circuit.
     pub fn measure(k: usize, circuit: &ConcreteCircuit) -> Self {
         // Collect the layout details.
-        let mut cs = ConstraintSystem::default();
-        let config = ConcreteCircuit::configure(&mut cs);
+        let cs = ConstraintSystem::default();
+        let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
+
         let mut assembly = AssemblyAssigner {
             selectors: Arc::new(Mutex::new(vec![vec![false; 1 << k]; cs.num_selectors])),
         };

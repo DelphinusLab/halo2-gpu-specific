@@ -7,15 +7,13 @@ pub(crate) mod verifier;
 #[derive(Clone, Debug)]
 pub struct InputExpressionSet<F: Field>(pub Vec<Vec<Expression<F>>>);
 
+// logup: logarithmic derivative lookup feature support multiple inputs map to one shared table
+// limited by required degree, inputs were chunked to multiple sets.
 #[derive(Clone, Debug)]
 pub struct Argument<F: Field> {
     pub name: &'static str,
     pub table_expressions: Vec<Expression<F>>,
-    // pub input_expressions: Vec<Vec<Vec<Expression<F>>>>,
-    //only [table+[inputs[0]..inputs[n]]] case
     pub input_expressions_set: InputExpressionSet<F>,
-    //one table map to multiple inputs, inputs are chunked by degree.
-    // pub input_expressions_ext: Option<Vec<InputExpressionSet<F>>>,
 }
 
 impl<F: Field> Argument<F> {
@@ -143,4 +141,87 @@ impl<F: Field> ArgumentTracer<F> {
             2 + input_degree + table_degree,
         )
     }
+}
+
+#[test]
+fn test_chunks_normal() {
+    use super::circuit::{ConstraintSystem, VirtualCells};
+    use crate::poly::Rotation;
+    use pairing::bn256::Fr;
+
+    let mut cs = ConstraintSystem::<Fr>::default();
+    let [input_0, input_1, lookup_0, _lookup_1] = [(); 4].map(|_| cs.advice_column());
+    let [s_0, s_1, table_0, table_1] = [(); 4].map(|_| cs.fixed_column());
+
+    cs.lookup_any("table1", |meta| {
+        let input0 = meta.query_advice(input_0, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        [(input0, table0)].to_vec()
+    });
+    cs.lookup_any("table2", |meta| {
+        let input1 = meta.query_advice(input_1, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        [(input1, table0)].to_vec()
+    });
+
+    //degree=4
+    let mut cs = cs.chunk_lookups();
+    assert_eq!(cs.lookups.len(), 2);
+    assert_eq!(cs.lookups[0].table_expressions.len(), 1);
+    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 1);
+
+    //degree=5
+    cs.lookup_any("table3", |meta| {
+        let input0 = meta.query_advice(input_1, Rotation::cur());
+        let input1 = meta.query_advice(input_1, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        let s0 = meta.query_fixed(s_0, Rotation::cur());
+        [(input1 * s0, table0.clone()), (input0, table0)].to_vec()
+    });
+
+    let mut cs = cs.chunk_lookups();
+    assert_eq!(cs.lookups.len(), 2);
+    assert_eq!(cs.lookups[0].table_expressions.len(), 1);
+    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 2);
+    assert_eq!(cs.lookups[1].table_expressions.len(), 2);
+    assert_eq!(cs.lookups[1].input_expressions_set.0.len(), 1);
+}
+
+//test the big degree expression head
+#[test]
+fn test_chunks_order() {
+    use super::circuit::{ConstraintSystem, VirtualCells};
+    use crate::poly::Rotation;
+    use pairing::bn256::Fr;
+
+    let mut cs = ConstraintSystem::<Fr>::default();
+    let [input_0, input_1, lookup_0, _lookup_1] = [(); 4].map(|_| cs.advice_column());
+    let [s_0, s_1, table_0, table_1] = [(); 4].map(|_| cs.fixed_column());
+
+    cs.lookup_any("table1", |meta| {
+        let input0 = meta.query_advice(input_0, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        [(input0, table0)].to_vec()
+    });
+
+    //degree=5
+    cs.lookup_any("table2", |meta| {
+        let input1 = meta.query_advice(input_1, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        let s0 = meta.query_fixed(s_0, Rotation::cur());
+        [(input1 * s0, table0)].to_vec()
+    });
+
+    cs.lookup_any("table3", |meta| {
+        let input1 = meta.query_advice(input_1, Rotation::cur());
+        let table0 = meta.query_fixed(table_0, Rotation::cur());
+        [(input1, table0)].to_vec()
+    });
+
+    let mut cs = cs.chunk_lookups();
+    assert_eq!(cs.lookups.len(), 2);
+    assert_eq!(cs.lookups[0].table_expressions.len(), 1);
+    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 2);
+    assert_eq!(cs.lookups[1].table_expressions.len(), 1);
+    assert_eq!(cs.lookups[1].input_expressions_set.0.len(), 1);
 }

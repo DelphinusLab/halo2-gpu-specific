@@ -89,17 +89,7 @@ impl<C: CurveAffine> Evaluated<C> {
         let active_rows = C::Scalar::one() - (l_last + l_blind);
 
         let product_expression = || {
-            /*
-                 φ_i(X) = f_i(X) + α
-                 τ(X) = t(X) + α
-                 LHS = τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
-                 RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))
-                 <=>
-                 LHS = (τ(X) * (ϕ(gX) - ϕ(X)) + m(x)) *Π(φ_i(X))
-                 RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)))
-            */
             let z_gx_minus_zx = self.grand_sum_next_eval - self.grand_sum_eval;
-
             let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
                 expressions
                     .iter()
@@ -118,6 +108,15 @@ impl<C: CurveAffine> Evaluated<C> {
                     })
                     .fold(C::Scalar::zero(), |acc, eval| acc * &*theta + &eval)
             };
+            /*
+                 φ_i(X) = f_i(X) + α
+                 τ(X) = t(X) + α
+                 LHS = τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+                 RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))
+                 <=>
+                 LHS = (τ(X) * (ϕ(gX) - ϕ(X)) + m(x)) *Π(φ_i(X))
+                 RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)))
+            */
             let mut phi = argument
                 .input_expressions_set
                 .0

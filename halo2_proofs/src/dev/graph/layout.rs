@@ -94,8 +94,8 @@ impl CircuitLayout {
 
         let n = 1 << k;
         // Collect the layout details.
-        let mut cs = ConstraintSystem::default();
-        let config = ConcreteCircuit::configure(&mut cs);
+        let cs = ConstraintSystem::default();
+        let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
         let mut layout = Layout::new(k, n, cs.num_selectors);
         ConcreteCircuit::FloorPlanner::synthesize(
             &mut layout,

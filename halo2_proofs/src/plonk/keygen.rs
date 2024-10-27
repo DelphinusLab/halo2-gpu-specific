@@ -42,13 +42,11 @@ where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let mut cs = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut cs);
+    let cs = ConstraintSystem::default();
+    let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
 
     let degree = cs.degree();
     let domain = EvaluationDomain::new(degree as u32, params.k);
-
-    cs = cs.chunk_lookups(Some(degree));
 
     (domain, cs, config)
 }
@@ -310,9 +308,8 @@ where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let mut cs = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut cs);
-    let cs = cs.chunk_lookups(None);
+    let cs = ConstraintSystem::default();
+    let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
 
     if (params.n as usize) < cs.minimum_rows() {
         return Err(Error::not_enough_rows_available(params.k));
@@ -571,8 +568,8 @@ where
     C: CurveAffine,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
-    let mut cs = ConstraintSystem::default();
-    let config = ConcreteCircuit::configure(&mut cs);
+    let cs = ConstraintSystem::default();
+    let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
 
     if (params.n as usize) < cs.minimum_rows() {
         return Err(Error::not_enough_rows_available(params.k));
