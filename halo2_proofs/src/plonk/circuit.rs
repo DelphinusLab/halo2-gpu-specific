@@ -1250,6 +1250,17 @@ impl<F: Field> ConstraintSystem<F> {
         self.permutation.add_column(column);
     }
 
+    /// concrete circuit configure with cs API and adapt some remaining process
+    pub fn circuit_configure<ConcreteCircuit: Circuit<F>>(
+        mut self,
+    ) -> (ConcreteCircuit::Config, Self) {
+        let config = ConcreteCircuit::configure(&mut self);
+        // chunk lookups by degree
+        let cs = self.chunk_lookups();
+
+        (config, cs)
+    }
+
     /// Add a lookup argument for some input expressions and table columns.
     ///
     /// `table_map` returns a map between input expressions and the table columns
@@ -1326,24 +1337,20 @@ impl<F: Field> ConstraintSystem<F> {
         index
     }
 
-    //logup: chunks lookup table+inputs by degree
-    pub fn chunk_lookups(mut self, degree: Option<usize>) -> Self {
+    // chunks lookup table+inputs by degree
+    // logup: log derivative lookup support multiple inputs map to one table
+    // thus, we can group them within required degree to reduce total lookup amount
+    pub fn chunk_lookups(mut self) -> Self {
         if self.lookup_tracer.as_ref().unwrap().len() == 0 {
             return self;
         }
-
-        let degree = if let Some(d) = degree {
-            d
-        } else {
-            self.degree()
-        };
 
         self.lookups = self
             .lookup_tracer
             .as_ref()
             .unwrap()
             .iter()
-            .flat_map(|(_, value)| value.chunks(degree))
+            .flat_map(|(_, lookup)| lookup.chunks(self.degree()))
             .collect::<Vec<_>>();
         self
     }

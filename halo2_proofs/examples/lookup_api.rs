@@ -118,22 +118,18 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        let [input_0, input_1, lookup_0, lookup_1] = [(); 4].map(|_| meta.advice_column());
+        let [input_0, input_1, lookup_0, _lookup_1] = [(); 4].map(|_| meta.advice_column());
         let [s_0, s_1] = [(); 2].map(|_| meta.fixed_column());
-        let [s_table0, s_table1] = [(); 2].map(|_| meta.lookup_table_column());
+        let [s_table0, _s_table1] = [(); 2].map(|_| meta.lookup_table_column());
         SimpleChip::configure(meta, input_0, input_1, lookup_0, s_0, s_1, s_table0)
     }
 
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        mut layouter: impl Layouter<F>,
-    ) -> Result<(), Error> {
+    fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error> {
         let ch = SimpleChip::<F>::construct(config.clone());
 
         layouter.assign_region(
             || "inputs",
-            |mut region: &Region<'_, F>| {
+            |region: &Region<'_, F>| {
                 region.assign_advice(|| "", ch.config.input_0, 0, || Ok(F::from(1 as u64)))?;
                 region.assign_advice(|| "", ch.config.input_1, 0, || Ok(F::from(1 as u64)))?;
                 region.assign_fixed(|| "", ch.config.s_0, 0, || Ok(F::from(1)))?;
@@ -194,9 +190,8 @@ fn test_prover(k: u32, circuit: MyCircuit<Fp>) {
 
 fn main() {
     // The number of rows in our circuit cannot exceed 2^k
-    let k = 4;
+    let k = 10;
 
-    // let circuit = MyCircuit::<Fp>::construct();
     let circuit = MyCircuit::<Fp> {
         _marker: PhantomData,
     };

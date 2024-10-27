@@ -840,9 +840,8 @@ impl<F: FieldExt> MockProver<F> {
     ) -> Result<MockVerifier<F>, Error> {
         let n = 1 << k;
 
-        let mut cs = ConstraintSystem::default();
-        let config = ConcreteCircuit::configure(&mut cs);
-        let cs = cs.chunk_lookups(None);
+        let cs = ConstraintSystem::default();
+        let (config, cs) = cs.circuit_configure::<ConcreteCircuit>();
 
         if n < cs.minimum_rows() {
             return Err(Error::not_enough_rows_available(k));

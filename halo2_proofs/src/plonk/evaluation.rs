@@ -1020,8 +1020,6 @@ impl<C: CurveAffine> Evaluator<C> {
                     &lookup_input_product_values[lookup_idx * size..(lookup_idx + 1) * size];
                 let input_product_sum =
                     &lookup_input_product_sum_values[lookup_idx * size..(lookup_idx + 1) * size];
-                // let input_ext_product = &lookup_input_ext_product_values[lookup_grand_sum_offset * size..(lookup_grand_sum_offset + 1) * size];
-                // let input_ext_product_sum = &lookup_input_ext_product_sum_values[lookup_grand_sum_offset * size..(lookup_grand_sum_offset + 1) * size];
 
                 // Polynomials required for this lookup.
                 // Calculated here so these only have to be kept in memory for the short time
@@ -1030,7 +1028,10 @@ impl<C: CurveAffine> Evaluator<C> {
                     .vk
                     .domain
                     .coeff_to_extended(lookup.grand_sum_poly.clone());
-                let m_poly_coset = pk.vk.domain.coeff_to_extended(lookup.multiplicity_poly.clone());
+                let m_poly_coset = pk
+                    .vk
+                    .domain
+                    .coeff_to_extended(lookup.multiplicity_poly.clone());
 
                 parallelize(&mut values, |values, start| {
                     for (i, value) in values.iter_mut().enumerate() {
@@ -1051,7 +1052,8 @@ impl<C: CurveAffine> Evaluator<C> {
                         //   - ∑_i τ(X) * Π_{j != i} φ_j(X) + m(X) * Π(φ_i(X))
                         // ) = 0
                         *value = *value * y
-                            + (((z_gx_minus_z_x * table[idx] + m_poly_coset[idx]) * input_product[idx]
+                            + (((z_gx_minus_z_x * table[idx] + m_poly_coset[idx])
+                                * input_product[idx]
                                 - table[idx] * input_product_sum[idx])
                                 * l_active_row[idx]);
                     }

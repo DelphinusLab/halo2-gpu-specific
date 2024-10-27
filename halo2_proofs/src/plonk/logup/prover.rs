@@ -117,7 +117,6 @@ impl<F: FieldExt> Argument<F> {
         let mut multiplicity_values: Vec<F> = {
             use std::sync::atomic::{AtomicU64, Ordering};
             let m_values: Vec<AtomicU64> = (0..params.n).map(|_| AtomicU64::new(0)).collect();
-            //todo check ConstraintSystemFailure report to outside by try_for_each?
             for compressed_input_expression in compressed_input_expression_set.iter() {
                 compressed_input_expression
                     .par_iter()
@@ -222,6 +221,9 @@ impl<C: CurveAffine> Compressed<C> {
             }
         });
 
+        // usable rows = n - blinding_rows -1
+        // z[0]=zero, the last row for z is the usable row + 1
+        // { |--- usable rows --|z[last]|-- blinding rows --| }
         let z = iter::once(C::Scalar::zero())
             .chain(grand_sum)
             .scan(C::Scalar::zero(), |state, v| {

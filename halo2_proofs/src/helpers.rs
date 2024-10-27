@@ -906,8 +906,8 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
         fd: &mut File,
     ) -> Result<(), Error> {
         use std::io::prelude::*;
-        let mut meta = ConstraintSystem::default();
-        let config = ConcreteCircuit::configure(&mut meta);
+        let meta = ConstraintSystem::default();
+        let (config, _) = meta.circuit_configure::<ConcreteCircuit>();
 
         let domain = &pk.get_vk().domain;
         let meta = &pk.get_vk().cs;
