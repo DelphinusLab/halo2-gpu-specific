@@ -1350,7 +1350,7 @@ impl<F: Field> ConstraintSystem<F> {
             .as_ref()
             .unwrap()
             .iter()
-            .flat_map(|(_, lookup)| lookup.chunks(self.degree()))
+            .map(|(_, lookup)| lookup.chunks(self.degree()))
             .collect::<Vec<_>>();
         self
     }

@@ -208,13 +208,18 @@ pub fn verify_proof_ext<
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let lookups_committed = lookups
+    let lookups_committed = (0..num_proofs)
+        .zip(lookups)
         .into_iter()
-        .map(|lookups| {
+        .map(|(_, multiplicity_commiments)| {
             // Hash each lookup product commitment
-            lookups
-                .into_iter()
-                .map(|lookup| lookup.read_grand_sum_commitment(transcript))
+            vk.cs
+                .lookups
+                .iter()
+                .zip(multiplicity_commiments)
+                .map(|(argument, multiplicity_commitment)| {
+                    argument.read_grand_sum_commitment(transcript, multiplicity_commitment)
+                })
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;

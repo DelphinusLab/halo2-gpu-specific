@@ -427,6 +427,13 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
         for q in p.input_expressions_set.0.iter() {
             q.store(writer)?;
         }
+        writer.write(&(p.input_expressions_set_group.len() as u32).to_le_bytes())?;
+        for input_expressions_set in p.input_expressions_set_group.iter() {
+            writer.write(&(input_expressions_set.0.len() as u32).to_le_bytes())?;
+            for q in input_expressions_set.0.iter() {
+                q.store(writer)?;
+            }
+        }
         p.table_expressions.store(writer)?;
     }
     writer.write(&(cs.shuffles.0.len() as u32).to_le_bytes())?;
@@ -479,10 +486,24 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         let input_expressions = (0..nb_input)
             .map(|_| Vec::<Expression<C::Scalar>>::fetch(reader))
             .collect::<io::Result<Vec<_>>>()?;
+        let nb_input_group = read_u32(reader)?;
+        let input_expressions_set_group = (0..nb_input_group)
+            .map(|_| {
+                let nb_input = read_u32(reader)?;
+                (0..nb_input)
+                    .map(|_| Vec::<Expression<C::Scalar>>::fetch(reader))
+                    .collect::<io::Result<Vec<_>>>()
+                // plonk::logup::InputExpressionSet(input_expressions)
+            })
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .map(plonk::logup::InputExpressionSet)
+            .collect::<Vec<_>>();
         let table_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
         lookups.push(plonk::logup::Argument {
             name: "",
             input_expressions_set: plonk::logup::InputExpressionSet(input_expressions),
+            input_expressions_set_group,
             table_expressions,
         });
     }

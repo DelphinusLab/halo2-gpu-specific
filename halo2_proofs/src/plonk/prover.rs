@@ -316,16 +316,20 @@ pub fn create_proof_ext<
 
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
-
     end_timer!(timer);
 
-    let _lookup_chunks = (0..pk.vk.cs.lookups.len())
-        .map(|i| pk.vk.cs.lookups[i].input_expressions_set.0.len())
+    let _lookup_sets = pk
+        .vk
+        .cs
+        .lookups
+        .iter()
+        .map(|lookup| lookup.input_expressions_set_group.len() + 1)
         .collect::<Vec<_>>();
+
     let timer = start_timer!(|| format!(
-        "lookups {}, chunks={:?}",
+        "lookups {}, sets={:?}",
         pk.vk.cs.lookups.len(),
-        _lookup_chunks
+        _lookup_sets
     ));
     let (lookups, lookups_commitments): (Vec<Vec<logup::prover::Compressed<C>>>, Vec<Vec<C>>) =
         instance
@@ -437,11 +441,17 @@ pub fn create_proof_ext<
             .map(|lookups| {
                 lookups
                     .into_iter()
-                    .map(|(m, mut z)| {
-                        for _ in 0..pk.vk.cs.blinding_factors() {
-                            z.push(C::Scalar::random(&mut rng))
+                    .map(|(m, mut zs)| {
+                        for z in zs.iter_mut() {
+                            for _ in 0..pk.vk.cs.blinding_factors() {
+                                z.push(C::Scalar::random(&mut rng))
+                            }
                         }
-                        (m, pk.vk.domain.lagrange_from_vec(z))
+                        let poly_zs = zs
+                            .into_par_iter()
+                            .map(|z| pk.vk.domain.lagrange_from_vec(z))
+                            .collect::<Vec<_>>();
+                        (m, poly_zs)
                     })
                     .collect::<Vec<_>>()
             })
@@ -455,17 +465,24 @@ pub fn create_proof_ext<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
-                            l.1,
-                            &pk.vk.domain.get_omega_inv(),
-                            &pk.vk.domain.ifft_divisor,
-                        );
-                        let c = c.to_affine();
+                        let (grand_sum_poly_set, zs): (Vec<_>, Vec<_>) =
+                            l.1.into_par_iter()
+                                .map(|z| {
+                                    let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                                        z,
+                                        &pk.vk.domain.get_omega_inv(),
+                                        &pk.vk.domain.ifft_divisor,
+                                    );
+                                    let c = c.to_affine();
+                                    (grand_sum_poly, c)
+                                })
+                                .unzip();
+
                         (
-                            c,
-                            logup::prover::Committed {
+                            zs,
+                            logup::prover::Committed::<C> {
                                 multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                grand_sum_poly,
+                                grand_sum_poly_set,
                             },
                         )
                     })
@@ -581,8 +598,10 @@ pub fn create_proof_ext<
             .for_each(|lookups_z_commitments| {
                 lookups_z_commitments
                     .into_iter()
-                    .for_each(|lookups_z_commitment| {
-                        transcript.write_point(lookups_z_commitment).unwrap()
+                    .for_each(|lookups_z_commitment_set| {
+                        lookups_z_commitment_set
+                            .into_iter()
+                            .for_each(|z_commitment| transcript.write_point(z_commitment).unwrap())
                     })
             });
         shuffles_z_commitments
@@ -1089,11 +1108,17 @@ pub fn create_proof_from_witness<
             .map(|lookups| {
                 lookups
                     .into_iter()
-                    .map(|(m, mut z)| {
-                        for _ in 0..pk.vk.cs.blinding_factors() {
-                            z.push(C::Scalar::random(&mut rng))
+                    .map(|(m, mut zs)| {
+                        for z in zs.iter_mut() {
+                            for _ in 0..pk.vk.cs.blinding_factors() {
+                                z.push(C::Scalar::random(&mut rng))
+                            }
                         }
-                        (m, pk.vk.domain.lagrange_from_vec(z))
+                        let poly_zs = zs
+                            .into_par_iter()
+                            .map(|z| pk.vk.domain.lagrange_from_vec(z))
+                            .collect::<Vec<_>>();
+                        (m, poly_zs)
                     })
                     .collect::<Vec<_>>()
             })
@@ -1107,17 +1132,24 @@ pub fn create_proof_from_witness<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
-                            l.1,
-                            &pk.vk.domain.get_omega_inv(),
-                            &pk.vk.domain.ifft_divisor,
-                        );
-                        let c = c.to_affine();
+                        let (grand_sum_poly_set, zs): (Vec<_>, Vec<_>) =
+                            l.1.into_par_iter()
+                                .map(|z| {
+                                    let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                                        z,
+                                        &pk.vk.domain.get_omega_inv(),
+                                        &pk.vk.domain.ifft_divisor,
+                                    );
+                                    let c = c.to_affine();
+                                    (grand_sum_poly, c)
+                                })
+                                .unzip();
+
                         (
-                            c,
+                            zs,
                             logup::prover::Committed {
                                 multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                grand_sum_poly,
+                                grand_sum_poly_set,
                             },
                         )
                     })
@@ -1228,15 +1260,15 @@ pub fn create_proof_from_witness<
         let permutations: Vec<_> = permutations.into_iter().map(|x| x.1).collect();
         end_timer!(timer);
 
-        lookups_z_commitments
-            .into_iter()
-            .for_each(|lookups_z_commitments| {
-                lookups_z_commitments
-                    .into_iter()
-                    .for_each(|lookups_z_commitment| {
-                        transcript.write_point(lookups_z_commitment).unwrap()
-                    })
-            });
+        lookups_z_commitments.into_iter().for_each(|z_commitments| {
+            z_commitments
+                .into_iter()
+                .for_each(|lookups_z_commitment_set| {
+                    lookups_z_commitment_set
+                        .into_iter()
+                        .for_each(|z_commitment| transcript.write_point(z_commitment).unwrap())
+                })
+        });
         shuffles_z_commitments
             .into_iter()
             .for_each(|shuffles_z_commitments| {
