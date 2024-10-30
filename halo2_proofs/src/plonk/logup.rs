@@ -13,7 +13,11 @@ pub struct InputExpressionSet<F: Field>(pub Vec<Vec<Expression<F>>>);
 pub struct Argument<F: Field> {
     pub name: &'static str,
     pub table_expressions: Vec<Expression<F>>,
+    // this inputs set degree sum + table degree <= required degree
     pub input_expressions_set: InputExpressionSet<F>,
+    // more inputs set with same target table in limit degree(instead of more lookup argument instances)
+    // each inputs set degree sum <= required degree
+    pub input_expressions_set_group: Vec<InputExpressionSet<F>>,
 }
 
 impl<F: Field> Argument<F> {
@@ -27,6 +31,7 @@ impl<F: Field> Argument<F> {
             name,
             input_expressions_set: input_expressions.to_owned(),
             table_expressions: table_expressions.to_owned(),
+            input_expressions_set_group: vec![],
         }
     }
 
@@ -39,6 +44,15 @@ impl<F: Field> Argument<F> {
         for inputs in self.input_expressions_set.0.iter() {
             for expr in inputs {
                 input_degree = std::cmp::max(input_degree, expr.degree());
+            }
+        }
+        // for some scenario, the max inputs degree is in input_expressions_set_ext
+        // we also take the table + max inputs degree as the max lookup degree for simplicity and unity
+        for inputs_set in self.input_expressions_set_group.iter() {
+            for inputs in inputs_set.0.iter() {
+                for expr in inputs {
+                    input_degree = std::cmp::max(input_degree, expr.degree());
+                }
             }
         }
         let mut table_degree = 1;
@@ -74,16 +88,18 @@ impl<F: Field> ArgumentTracer<F> {
         }
     }
 
-    pub fn chunks(&self, degree: usize) -> Vec<Argument<F>> {
+    //group the argument tracer's input expressions by required global degree
+    pub fn chunks(&self, global_degree: usize) -> Argument<F> {
         //reserve degree 2: (1 - (l_last + l_blind)) (z(wx)-z(x))
-        assert!(degree > 2);
-        let degree = degree - 2;
-        //the degree covered table+max(inputs), so the input[0] is ok
-        let mut args = vec![Argument {
+        assert!(global_degree > 2);
+        let degree = global_degree - 2;
+        //the degree covered table+max(inputs), degree(inputs[0])<=max(inputs) so the input[0] is ok
+        let mut argument = Argument {
             name: self.name,
             table_expressions: self.table_expressions.clone(),
             input_expressions_set: InputExpressionSet(vec![self.input_expression_set[0].clone()]),
-        }];
+            input_expressions_set_group: vec![],
+        };
         let table_degree = self
             .table_expressions
             .iter()
@@ -94,29 +110,42 @@ impl<F: Field> ArgumentTracer<F> {
         for input in self.input_expression_set.iter().skip(1) {
             let new_input_degree = input.iter().map(|e| e.degree()).max().unwrap();
             let mut indicator = false;
-            for arg in args.iter_mut() {
-                let sum: usize = arg
-                    .input_expressions_set
+
+            // 1. table + input_expressions_set case
+            let sum: usize = argument
+                .input_expressions_set
+                .0
+                .iter()
+                .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
+                .sum();
+            if table_degree + sum + new_input_degree <= degree {
+                argument.input_expressions_set.0.push(input.clone());
+                continue;
+            }
+
+            // 2. input_expressions_set_ext case
+            for set in argument.input_expressions_set_group.iter_mut() {
+                let sum: usize = set
                     .0
                     .iter()
                     .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
                     .sum();
-                if table_degree + sum + new_input_degree <= degree {
-                    arg.input_expressions_set.0.push(input.clone());
+                // inputs set extension degree only care the inputs degree, no table degree
+                if sum + new_input_degree <= degree {
+                    set.0.push(input.clone());
                     indicator = true;
                     break;
                 }
             }
+            // 3. new InputExpressionSet to input_expressions_set_ext
             if !indicator {
-                args.push(Argument {
-                    name: self.name,
-                    table_expressions: self.table_expressions.clone(),
-                    input_expressions_set: InputExpressionSet(vec![input.clone()]),
-                })
+                argument
+                    .input_expressions_set_group
+                    .push(InputExpressionSet(vec![input.clone()]));
             }
         }
 
-        args
+        argument
     }
 
     pub(crate) fn required_degree(&self) -> usize {

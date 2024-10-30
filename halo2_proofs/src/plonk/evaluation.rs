@@ -277,15 +277,15 @@ pub struct Evaluator<C: CurveAffine> {
     /// Value parts
     pub value_parts: Vec<ValueSource>,
     /// Lookup results, (table, inputs_product,inputs_product_sum>)
-    pub lookup_results: Vec<(Calculation, Calculation, Calculation)>,
+    pub lookup_results: Vec<(Calculation, Vec<Calculation>, Vec<Calculation>)>,
     /// Shuffle results (input,shuffle)
     pub shuffle_results: Vec<(Calculation, Calculation)>,
     /// GPU
     pub gpu_gates_expr: Vec<ProveExpression<C::ScalarExt>>,
     pub gpu_lookup_expr: Vec<(
         LookupProveExpression<C::ScalarExt>,
-        LookupProveExpression<C::ScalarExt>,
-        LookupProveExpression<C::ScalarExt>,
+        Vec<LookupProveExpression<C::ScalarExt>>,
+        Vec<LookupProveExpression<C::ScalarExt>>,
     )>,
     //[(input,shuffle)]
     pub gpu_shuffle_expr: Vec<(
@@ -380,47 +380,60 @@ impl<C: CurveAffine> Evaluator<C> {
                 Calculation::AddChallenge(compressed_table_coset, LcChallenge::Beta);
 
             // Input coset chunks
-            let compressed_input_cosets = lookup
-                .input_expressions_set
-                .0
-                .iter()
-                .map(|input| evaluate_compress_challenge(&mut ev, input))
+            let compressed_input_cosets_group = iter::once(&lookup.input_expressions_set)
+                .chain(lookup.input_expressions_set_group.iter())
+                .map(|set| {
+                    set.0
+                        .iter()
+                        .map(|input| evaluate_compress_challenge(&mut ev, input))
+                        .collect::<Vec<_>>()
+                })
                 .collect::<Vec<_>>();
 
             // Π(φ_i(X))
-            let mut lc_product = compressed_input_cosets[0];
-            for p in compressed_input_cosets.iter().skip(1) {
-                lc_product = ev.add_calculation(Calculation::Mul(lc_product, *p))
-            }
-            let input_coset_products = Calculation::Store(lc_product);
+            let input_coset_products_group = compressed_input_cosets_group
+                .iter()
+                .map(|compressed_input_cosets| {
+                    let mut lc_product = compressed_input_cosets[0];
+                    for p in compressed_input_cosets.iter().skip(1) {
+                        lc_product = ev.add_calculation(Calculation::Mul(lc_product, *p))
+                    }
+                    Calculation::Store(lc_product)
+                })
+                .collect::<Vec<_>>();
 
             // Π(φ_i(X)) * (∑ 1/(φ_i(X))=> (abc)*[1/a+1/b+1/c] = bc+ac+ab
-            let input_coset_products_sum = if compressed_input_cosets.len() > 1 {
-                let lc_coset_products = (0..compressed_input_cosets.len())
-                    .map(|i| {
-                        compressed_input_cosets
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, &v)| v)
-                            .reduce(|acc, e| ev.add_calculation(Calculation::Mul(acc, e)))
-                            .unwrap()
-                    })
-                    .collect::<Vec<_>>();
-                let lc_coset_products_sum = lc_coset_products
-                    .into_iter()
-                    .reduce(|acc, e| ev.add_calculation(Calculation::Add(acc, e)))
-                    .unwrap();
+            let input_coset_product_sum_group = compressed_input_cosets_group
+                .iter()
+                .map(|compressed_input_cosets| {
+                    if compressed_input_cosets.len() > 1 {
+                        let lc_coset_products = (0..compressed_input_cosets.len())
+                            .map(|i| {
+                                compressed_input_cosets
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(j, _)| *j != i)
+                                    .map(|(_, &v)| v)
+                                    .reduce(|acc, e| ev.add_calculation(Calculation::Mul(acc, e)))
+                                    .unwrap()
+                            })
+                            .collect::<Vec<_>>();
+                        let lc_coset_products_sum = lc_coset_products
+                            .into_iter()
+                            .reduce(|acc, e| ev.add_calculation(Calculation::Add(acc, e)))
+                            .unwrap();
 
-                Calculation::Store(lc_coset_products_sum)
-            } else {
-                Calculation::Store(constant_one)
-            };
+                        Calculation::Store(lc_coset_products_sum)
+                    } else {
+                        Calculation::Store(constant_one)
+                    }
+                })
+                .collect::<Vec<_>>();
 
             ev.lookup_results.push((
                 compressed_table_coset,
-                input_coset_products,
-                input_coset_products_sum,
+                input_coset_products_group,
+                input_coset_product_sum_group,
             ));
         }
 
@@ -436,8 +449,6 @@ impl<C: CurveAffine> Evaluator<C> {
             lc
         };
 
-        //todo if the value can get batch invert in gpu related function but not in gpu?
-        //todo if can get invert in gpu?
         // Lookups in GPU
         for lookup in cs.lookups.iter() {
             // table coset
@@ -447,56 +458,80 @@ impl<C: CurveAffine> Evaluator<C> {
                 LcChallenge::Beta,
             );
             //input coset [input[i]+beta]
-            let input_cosets = lookup
-                .input_expressions_set
-                .0
-                .iter()
-                .map(|input| {
-                    let compressed_input_coset = evaluate_lc_gpu(input);
-                    LookupProveExpression::AddChallenge(
-                        Box::new(compressed_input_coset),
-                        LcChallenge::Beta,
-                    )
+            let input_cosets_group = iter::once(&lookup.input_expressions_set)
+                .chain(lookup.input_expressions_set_group.iter())
+                .map(|input_set| {
+                    input_set
+                        .0
+                        .iter()
+                        .map(|input| {
+                            let compressed_input_coset = evaluate_lc_gpu(input);
+                            LookupProveExpression::AddChallenge(
+                                Box::new(compressed_input_coset),
+                                LcChallenge::Beta,
+                            )
+                        })
+                        .collect::<Vec<_>>()
                 })
                 .collect::<Vec<_>>();
 
-            let input_cosets_product =
-                input_cosets
-                    .iter()
-                    .skip(1)
-                    .fold(input_cosets[0].clone(), |acc, e| {
-                        LookupProveExpression::Op(Box::new(acc), Box::new(e.clone()), Bop::Product)
-                    });
+            let input_cosets_product_group = input_cosets_group
+                .iter()
+                .map(|input_cosets| {
+                    input_cosets
+                        .iter()
+                        .skip(1)
+                        .fold(input_cosets[0].clone(), |acc, e| {
+                            LookupProveExpression::Op(
+                                Box::new(acc),
+                                Box::new(e.clone()),
+                                Bop::Product,
+                            )
+                        })
+                })
+                .collect::<Vec<_>>();
 
-            let input_cosets_product_sum = if input_cosets.len() > 1 {
-                (0..input_cosets.len())
-                    .map(|i| {
-                        input_cosets
-                            .iter()
-                            .enumerate()
-                            .filter(|(j, _)| *j != i)
-                            .map(|(_, v)| v.clone())
+            let input_cosets_product_sum_group = input_cosets_group
+                .iter()
+                .map(|input_cosets| {
+                    if input_cosets.len() > 1 {
+                        (0..input_cosets.len())
+                            .map(|i| {
+                                input_cosets
+                                    .iter()
+                                    .enumerate()
+                                    .filter(|(j, _)| *j != i)
+                                    .map(|(_, v)| v.clone())
+                                    .reduce(|acc, e| {
+                                        LookupProveExpression::Op(
+                                            Box::new(acc.clone()),
+                                            Box::new(e.clone()),
+                                            Bop::Product,
+                                        )
+                                    })
+                                    .unwrap()
+                            })
                             .reduce(|acc, e| {
                                 LookupProveExpression::Op(
-                                    Box::new(acc.clone()),
+                                    Box::new(acc),
                                     Box::new(e.clone()),
-                                    Bop::Product,
+                                    Bop::Sum,
                                 )
                             })
                             .unwrap()
-                    })
-                    .reduce(|acc, e| {
-                        LookupProveExpression::Op(Box::new(acc), Box::new(e.clone()), Bop::Sum)
-                    })
-                    .unwrap()
-            } else {
-                LookupProveExpression::Expression(ProveExpression::from_expr(
-                    &Expression::Constant(C::Scalar::one()),
-                ))
-            };
+                    } else {
+                        LookupProveExpression::Expression(ProveExpression::from_expr(
+                            &Expression::Constant(C::Scalar::one()),
+                        ))
+                    }
+                })
+                .collect::<Vec<_>>();
 
-            ev.gpu_lookup_expr
-                .push((table_coset, input_cosets_product, input_cosets_product_sum));
+            ev.gpu_lookup_expr.push((
+                table_coset,
+                input_cosets_product_group,
+                input_cosets_product_sum_group,
+            ));
         }
 
         // Shuffles
@@ -772,9 +807,21 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let mut values = domain.empty_extended();
 
+        // calculate total number of inputs_set groups
+        let num_lookup_input_group: usize = pk
+            .vk
+            .cs
+            .lookups
+            .iter()
+            .map(|lookup| lookup.input_expressions_set_group.len())
+            .sum();
         let mut lookup_table_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_sum_values = vec![C::Scalar::zero(); size * num_lookups];
+        let mut lookup_input_product_group_values =
+            vec![C::Scalar::zero(); size * num_lookup_input_group];
+        let mut lookup_input_product_sum_group_values =
+            vec![C::Scalar::zero(); size * num_lookup_input_group];
 
         let mut shuffle_input_values = vec![C::Scalar::zero(); size * num_shuffles];
         let mut shuffle_table_values = vec![C::Scalar::zero(); size * num_shuffles];
@@ -784,6 +831,10 @@ impl<C: CurveAffine> Evaluator<C> {
         let mut lookup_input_product_values_box = ThreadBox::wrap(&mut lookup_input_product_values);
         let mut lookup_input_product_sum_values_box =
             ThreadBox::wrap(&mut lookup_input_product_sum_values);
+        let mut lookup_input_product_group_values_box =
+            ThreadBox::wrap(&mut lookup_input_product_group_values);
+        let mut lookup_input_product_sum_group_values_box =
+            ThreadBox::wrap(&mut lookup_input_product_sum_group_values);
 
         let mut shuffle_input_box = ThreadBox::wrap(&mut shuffle_input_values);
         let mut shuffle_table_box = ThreadBox::wrap(&mut shuffle_table_values);
@@ -805,6 +856,11 @@ impl<C: CurveAffine> Evaluator<C> {
                         let lookup_input_product_values = lookup_input_product_values_box.unwrap();
                         let lookup_input_product_sum_values =
                             lookup_input_product_sum_values_box.unwrap();
+                        let lookup_input_product_group_values =
+                            lookup_input_product_group_values_box.unwrap();
+                        let lookup_input_product_sum_group_values =
+                            lookup_input_product_sum_group_values_box.unwrap();
+
                         let shuffle_input_values = shuffle_input_box.unwrap();
                         let shuffle_table_values = shuffle_table_box.unwrap();
 
@@ -848,6 +904,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             }
 
                             // Values required for the lookups
+                            let mut lookup_input_group_offset = 0;
                             for (t, table_result) in self.lookup_results.iter().enumerate() {
                                 table_values[t * size + idx] = table_result.0.evaluate(
                                     &rotations,
@@ -860,8 +917,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     &gamma,
                                     &theta,
                                 );
-                                lookup_input_product_values[t * size + idx] =
-                                    table_result.1.evaluate(
+                                lookup_input_product_values[t * size + idx] = table_result.1[0]
+                                    .evaluate(
                                         &rotations,
                                         &self.constants,
                                         &intermediates,
@@ -872,8 +929,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                         &gamma,
                                         &theta,
                                     );
-                                lookup_input_product_sum_values[t * size + idx] =
-                                    table_result.2.evaluate(
+                                lookup_input_product_sum_values[t * size + idx] = table_result.2[0]
+                                    .evaluate(
                                         &rotations,
                                         &self.constants,
                                         &intermediates,
@@ -884,6 +941,36 @@ impl<C: CurveAffine> Evaluator<C> {
                                         &gamma,
                                         &theta,
                                     );
+                                // input groups
+                                for i in 1..table_result.1.len() {
+                                    lookup_input_product_group_values
+                                        [lookup_input_group_offset * size + idx] =
+                                        table_result.1[i].evaluate(
+                                            &rotations,
+                                            &self.constants,
+                                            &intermediates,
+                                            fixed,
+                                            advice,
+                                            instance,
+                                            &beta,
+                                            &gamma,
+                                            &theta,
+                                        );
+                                    lookup_input_product_sum_group_values
+                                        [lookup_input_group_offset * size + idx] =
+                                        table_result.2[i].evaluate(
+                                            &rotations,
+                                            &self.constants,
+                                            &intermediates,
+                                            fixed,
+                                            advice,
+                                            instance,
+                                            &beta,
+                                            &gamma,
+                                            &theta,
+                                        );
+                                    lookup_input_group_offset += 1;
+                                }
                             }
 
                             // Values required for the shuffles
@@ -1012,8 +1099,9 @@ impl<C: CurveAffine> Evaluator<C> {
 
                     = ∑_i τ(X) * Π_{j != i} φ_j(X) - m(X) * Π(φ_i(X))        (2)
             */
-            // let mut lookup_grand_sum_offset =0;
+            let mut lookup_input_group_offset = 0;
             for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                let group_len = lookup.grand_sum_poly_set.len();
                 // Lookup constraints
                 let table = &lookup_table_values[lookup_idx * size..(lookup_idx + 1) * size];
                 let input_product =
@@ -1021,41 +1109,81 @@ impl<C: CurveAffine> Evaluator<C> {
                 let input_product_sum =
                     &lookup_input_product_sum_values[lookup_idx * size..(lookup_idx + 1) * size];
 
+                let mut input_product_group = vec![];
+                let mut input_product_sum_group = vec![];
+                for _ in 0..group_len - 1 {
+                    input_product_group.push(
+                        &lookup_input_product_group_values[lookup_input_group_offset * size
+                            ..(lookup_input_group_offset + 1) * size],
+                    );
+                    input_product_sum_group.push(
+                        &lookup_input_product_sum_group_values[lookup_input_group_offset * size
+                            ..(lookup_input_group_offset + 1) * size],
+                    );
+                    lookup_input_group_offset += 1;
+                }
+
                 // Polynomials required for this lookup.
                 // Calculated here so these only have to be kept in memory for the short time
                 // they are actually needed.
-                let grand_sum_coset = pk
-                    .vk
-                    .domain
-                    .coeff_to_extended(lookup.grand_sum_poly.clone());
+                let grand_sum_coset_set = lookup
+                    .grand_sum_poly_set
+                    .iter()
+                    .map(|poly| pk.vk.domain.coeff_to_extended(poly.clone()))
+                    .collect::<Vec<_>>();
                 let m_poly_coset = pk
                     .vk
                     .domain
                     .coeff_to_extended(lookup.multiplicity_poly.clone());
 
+                let blinding_factors = pk.vk.cs.blinding_factors();
+                let last_rotation = Rotation(-((blinding_factors + 1) as i32));
                 parallelize(&mut values, |values, start| {
                     for (i, value) in values.iter_mut().enumerate() {
                         let idx = start + i;
 
                         let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-
-                        let z_gx_minus_z_x = grand_sum_coset[r_next] - grand_sum_coset[idx];
+                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
                         // l_0(X) * z(X) = 0
-                        *value = *value * y + (grand_sum_coset[idx] * l0[idx]);
+                        *value = *value * y + (grand_sum_coset_set[0][idx] * l0[idx]);
 
                         // l_last(X) * z(X) = 0
-                        *value = *value * y + (grand_sum_coset[idx] * l_last[idx]);
+                        *value =
+                            *value * y + (grand_sum_coset_set[group_len - 1][idx] * l_last[idx]);
 
                         // (1 - (l_last(X) + l_blind(X))) * (
                         //   τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                         //   - ∑_i τ(X) * Π_{j != i} φ_j(X) + m(X) * Π(φ_i(X))
                         // ) = 0
+                        let z_gx_minus_z_x =
+                            grand_sum_coset_set[0][r_next] - grand_sum_coset_set[0][idx];
                         *value = *value * y
                             + (((z_gx_minus_z_x * table[idx] + m_poly_coset[idx])
                                 * input_product[idx]
                                 - table[idx] * input_product_sum[idx])
                                 * l_active_row[idx]);
+
+                        // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
+                        for i in 1..group_len {
+                            *value = *value * y
+                                + ((grand_sum_coset_set[i][idx]
+                                    - grand_sum_coset_set[i - 1][r_last])
+                                    * l0[idx]);
+                        }
+
+                        // (1 - (l_last(X) + l_blind(X))) * (
+                        //   Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+                        //   - ∑_i Π_{j != i} φ_j(X))
+                        // ) = 0
+                        for i in 1..group_len {
+                            let z_gx_minus_z_x =
+                                grand_sum_coset_set[i][r_next] - grand_sum_coset_set[i][idx];
+                            *value = *value * y
+                                + ((z_gx_minus_z_x * input_product_group[i - 1][idx]
+                                    - input_product_sum_group[i - 1][idx])
+                                    * l_active_row[idx]);
+                        }
                     }
                 });
             }
@@ -1447,6 +1575,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
                             let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
                             for (lookup_idx, lookup) in lookups.iter().enumerate() {
+                                let sets_len = lookup.grand_sum_poly_set.len();
                                 let mut ys = vec![C::ScalarExt::one(), y];
                                 let table_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
@@ -1469,7 +1598,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                                 let input_product_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
-                                    .1
+                                    .1[0]
                                     ._eval_gpu(
                                         pk,
                                         program,
@@ -1488,7 +1617,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                                 let input_product_sum_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
-                                    .2
+                                    .2[0]
                                     ._eval_gpu(
                                         pk,
                                         program,
@@ -1505,17 +1634,24 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .unwrap()
                                     .0;
 
-                                let m_poly_coset_buf = do_extended_fft(
+                                let m_poly_buf = do_extended_fft(
                                     pk,
                                     program,
                                     &lookup.multiplicity_poly,
                                     &mut allocator,
                                     &mut helper,
                                 )?;
-                                let grand_sum_coset_buf = do_extended_fft(
+                                let first_grand_sum_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.grand_sum_poly,
+                                    &lookup.grand_sum_poly_set[0],
+                                    &mut allocator,
+                                    &mut helper,
+                                )?;
+                                let last_grand_sum_buf = do_extended_fft(
+                                    pk,
+                                    program,
+                                    &lookup.grand_sum_poly_set[sets_len - 1],
                                     &mut allocator,
                                     &mut helper,
                                 )?;
@@ -1534,7 +1670,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(input_product_buf.as_ref())
                                     .arg(input_product_sum_buf.as_ref())
                                     .arg(&m_poly_coset_buf)
-                                    .arg(&grand_sum_coset_buf)
+                                    .arg(&first_grand_sum_buf)
+                                    .arg(&last_grand_sum_buf)
                                     .arg(&l0_buf)
                                     .arg(&l_last_buf)
                                     .arg(&l_active_row_buf)
@@ -1542,6 +1679,123 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(&(rot_scale as u32))
                                     .arg(&(size as u32))
                                     .run()?;
+
+                                let mut prev_grand_sum_buf = first_grand_sum_buf;
+                                for i in 1..sets_len - 1 {
+                                    let cur_grand_sum_buf = do_extended_fft(
+                                        pk,
+                                        program,
+                                        &lookup.grand_sum_poly_set[i],
+                                        &mut allocator,
+                                        &mut helper,
+                                    )?;
+                                    let kernel_name =
+                                        format!("{}_eval_h_logup_grand_sum", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(&values_buf)
+                                        .arg(&cur_grand_sum_buf)
+                                        .arg(&prev_grand_sum_buf)
+                                        .arg(&l0_buf)
+                                        .arg(&y_beta_gamma_buf)
+                                        .arg(&(last_rotation.0 * rot_scale + size as i32))
+                                        .arg(&(size as u32))
+                                        .run()?;
+                                    allocator.push_back(prev_grand_sum_buf);
+                                    prev_grand_sum_buf = curr_grand_sum_buf;
+                                }
+                                if sets_len > 1 {
+                                    let curr_grand_sum_buf = last_grand_sum_buf;
+                                    let kernel_name =
+                                        format!("{}_eval_h_logup_grand_sum", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(&values_buf)
+                                        .arg(curr_grand_sum_buf)
+                                        .arg(&prev_grand_sum_buf)
+                                        .arg(&l0_buf)
+                                        .arg(&y_beta_gamma_buf)
+                                        .arg(&(last_rotation.0 * rot_scale + size as i32))
+                                        .arg(&(size as u32))
+                                        .run()?;
+                                    allocator.push_back(prev_grand_sum_buf);
+                                }
+
+                                for i in 1..sets_len() {
+                                    let input_product_buf = pk.ev.gpu_lookup_expr
+                                        [lookup_idx + group_idx * group_expr_len]
+                                        .1[i]
+                                        ._eval_gpu(
+                                            pk,
+                                            program,
+                                            &advice_poly[0],
+                                            &instance_poly[0],
+                                            &mut ys,
+                                            beta,
+                                            theta,
+                                            gamma,
+                                            &mut unit_cache,
+                                            &mut allocator,
+                                            &mut helper,
+                                        )
+                                        .unwrap()
+                                        .0;
+
+                                    let input_product_sum_buf = pk.ev.gpu_lookup_expr
+                                        [lookup_idx + group_idx * group_expr_len]
+                                        .2[i]
+                                        ._eval_gpu(
+                                            pk,
+                                            program,
+                                            &advice_poly[0],
+                                            &instance_poly[0],
+                                            &mut ys,
+                                            beta,
+                                            theta,
+                                            gamma,
+                                            &mut unit_cache,
+                                            &mut allocator,
+                                            &mut helper,
+                                        )
+                                        .unwrap()
+                                        .0;
+
+                                    let grand_sum_buf = do_extended_fft(
+                                        pk,
+                                        program,
+                                        &lookup.grand_sum_poly_set[i],
+                                        &mut allocator,
+                                        &mut helper,
+                                    )?;
+
+                                    let local_work_size = 128;
+                                    let global_work_size = size / local_work_size;
+                                    let kernel_name =
+                                        format!("{}_eval_h_logups_extend", "Bn256_Fr");
+                                    let kernel = program.create_kernel(
+                                        &kernel_name,
+                                        global_work_size as usize,
+                                        local_work_size as usize,
+                                    )?;
+                                    kernel
+                                        .arg(&values_buf)
+                                        .arg(input_product_buf.as_ref())
+                                        .arg(input_product_sum_buf.as_ref())
+                                        .arg(&grand_sum_buf)
+                                        .arg(&l_active_row_buf)
+                                        .arg(&y_beta_gamma_buf)
+                                        .arg(&(rot_scale as u32))
+                                        .arg(&(size as u32))
+                                        .run()?;
+                                }
                             }
 
                             program.read_into_buffer(&values_buf, input)?;
@@ -1561,12 +1815,19 @@ impl<C: CurveAffine> Evaluator<C> {
                         })
                         .unwrap();
                     release_gpu(gpu_idx);
-                    (tmp_value, lookups.len())
+                    let y_pow = lookups
+                        .iter()
+                        .map(|lookup| {
+                            // both grand_sum check and extend input check need extra sets_len-1 times y
+                            2 * (lookup.grand_sum_poly_set.len() - 1) + 3
+                        })
+                        .sum::<usize>();
+                    (tmp_value, y_pow)
                 })
                 .collect::<Vec<_>>()
                 .iter()
-                .fold(values, |acc, (x, len)| {
-                    acc * y.pow_vartime([*len as u64 * 3, 0, 0, 0]) + x
+                .fold(values, |acc, (x, y_pow)| {
+                    acc * y.pow_vartime([*y_pow as u64, 0, 0, 0]) + x
                 });
         }
 
