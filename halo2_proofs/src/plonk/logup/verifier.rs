@@ -208,6 +208,7 @@ impl<C: CurveAffine> Evaluated<C> {
                 Some(product_expression()),
             )
             .chain(
+                // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
                 self.grand_sum_sets
                     .iter()
                     .skip(1)
@@ -215,6 +216,10 @@ impl<C: CurveAffine> Evaluated<C> {
                     .map(move |(set, last_set)| l_0 * (set.eval - &last_set.last_eval.unwrap())),
             )
             .chain(
+                // (1 - (l_last(X) + l_blind(X))) * (
+                //   Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
+                //   - ∑_i Π_{j != i} φ_j(X))
+                // ) = 0
                 self.grand_sum_sets
                     .iter()
                     .zip(argument.input_expressions_sets.iter())

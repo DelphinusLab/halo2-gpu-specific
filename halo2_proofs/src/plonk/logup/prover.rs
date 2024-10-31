@@ -113,6 +113,7 @@ impl<F: FieldExt> Argument<F> {
         // compute m(X)
         // for table has repeated elements case, mi will locate the only binary searched one.
         // e.g. table=[0,1,2,3,4,4,5], by binary search algorithm, it will locate the index=5, only count m[5]+=1,m[4]=0
+        // refer to https://github.com/scroll-tech/halo2/halo2_proofs/src/plonk/mv_lookup
         let timer = start_timer!(|| "lookup table sort");
         let mut sorted_table_with_indices = compressed_table_expression
             .par_iter()
