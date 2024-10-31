@@ -423,12 +423,8 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
     write_arguments(&cs.permutation.columns, writer)?;
     writer.write(&(cs.lookups.len() as u32).to_le_bytes())?;
     for p in cs.lookups.iter() {
-        writer.write(&(p.input_expressions_set.0.len() as u32).to_le_bytes())?;
-        for q in p.input_expressions_set.0.iter() {
-            q.store(writer)?;
-        }
-        writer.write(&(p.input_expressions_set_group.len() as u32).to_le_bytes())?;
-        for input_expressions_set in p.input_expressions_set_group.iter() {
+        writer.write(&(p.input_expressions_sets.len() as u32).to_le_bytes())?;
+        for input_expressions_set in p.input_expressions_sets.iter() {
             writer.write(&(input_expressions_set.0.len() as u32).to_le_bytes())?;
             for q in input_expressions_set.0.iter() {
                 q.store(writer)?;
@@ -481,13 +477,8 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
     let mut lookups = vec![];
     let nb_lookup = read_u32(reader)?;
     for _ in 0..nb_lookup {
-        let nb_input = read_u32(reader)?;
-        //todo check the collect to io_result correct?
-        let input_expressions = (0..nb_input)
-            .map(|_| Vec::<Expression<C::Scalar>>::fetch(reader))
-            .collect::<io::Result<Vec<_>>>()?;
-        let nb_input_group = read_u32(reader)?;
-        let input_expressions_set_group = (0..nb_input_group)
+        let nb_input_set = read_u32(reader)?;
+        let input_expressions_sets = (0..nb_input_set)
             .map(|_| {
                 let nb_input = read_u32(reader)?;
                 (0..nb_input)
@@ -502,8 +493,7 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         let table_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
         lookups.push(plonk::logup::Argument {
             name: "",
-            input_expressions_set: plonk::logup::InputExpressionSet(input_expressions),
-            input_expressions_set_group,
+            input_expressions_sets,
             table_expressions,
         });
     }

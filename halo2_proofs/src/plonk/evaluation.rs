@@ -374,14 +374,14 @@ impl<C: CurveAffine> Evaluator<C> {
         */
         for lookup in cs.lookups.iter() {
             // table coset
-            // let compressed_table_coset = evaluate_compress_challenge(&mut ev, &lookup.table_expressions);
             let compressed_table_coset = evaluate_lc(&mut ev, &lookup.table_expressions);
             let compressed_table_coset =
                 Calculation::AddChallenge(compressed_table_coset, LcChallenge::Beta);
 
             // Input coset chunks
-            let compressed_input_cosets_group = iter::once(&lookup.input_expressions_set)
-                .chain(lookup.input_expressions_set_group.iter())
+            let compressed_input_cosets_set = lookup
+                .input_expressions_sets
+                .iter()
                 .map(|set| {
                     set.0
                         .iter()
@@ -391,7 +391,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 .collect::<Vec<_>>();
 
             // Π(φ_i(X))
-            let input_coset_products_group = compressed_input_cosets_group
+            let input_coset_products_set = compressed_input_cosets_set
                 .iter()
                 .map(|compressed_input_cosets| {
                     let mut lc_product = compressed_input_cosets[0];
@@ -403,7 +403,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 .collect::<Vec<_>>();
 
             // Π(φ_i(X)) * (∑ 1/(φ_i(X))=> (abc)*[1/a+1/b+1/c] = bc+ac+ab
-            let input_coset_product_sum_group = compressed_input_cosets_group
+            let input_coset_product_sum_set = compressed_input_cosets_set
                 .iter()
                 .map(|compressed_input_cosets| {
                     if compressed_input_cosets.len() > 1 {
@@ -432,8 +432,8 @@ impl<C: CurveAffine> Evaluator<C> {
 
             ev.lookup_results.push((
                 compressed_table_coset,
-                input_coset_products_group,
-                input_coset_product_sum_group,
+                input_coset_products_set,
+                input_coset_product_sum_set,
             ));
         }
 
@@ -458,8 +458,9 @@ impl<C: CurveAffine> Evaluator<C> {
                 LcChallenge::Beta,
             );
             //input coset [input[i]+beta]
-            let input_cosets_group = iter::once(&lookup.input_expressions_set)
-                .chain(lookup.input_expressions_set_group.iter())
+            let input_cosets_set = lookup
+                .input_expressions_sets
+                .iter()
                 .map(|input_set| {
                     input_set
                         .0
@@ -475,7 +476,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 })
                 .collect::<Vec<_>>();
 
-            let input_cosets_product_group = input_cosets_group
+            let input_cosets_product_set = input_cosets_set
                 .iter()
                 .map(|input_cosets| {
                     input_cosets
@@ -491,7 +492,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 })
                 .collect::<Vec<_>>();
 
-            let input_cosets_product_sum_group = input_cosets_group
+            let input_cosets_product_sum_set = input_cosets_set
                 .iter()
                 .map(|input_cosets| {
                     if input_cosets.len() > 1 {
@@ -529,8 +530,8 @@ impl<C: CurveAffine> Evaluator<C> {
 
             ev.gpu_lookup_expr.push((
                 table_coset,
-                input_cosets_product_group,
-                input_cosets_product_sum_group,
+                input_cosets_product_set,
+                input_cosets_product_sum_set,
             ));
         }
 
@@ -807,21 +808,21 @@ impl<C: CurveAffine> Evaluator<C> {
 
         let mut values = domain.empty_extended();
 
-        // calculate total number of inputs_set groups
-        let num_lookup_input_group: usize = pk
+        // calculate total number of extra inputs set
+        let num_extra_lookup_input: usize = pk
             .vk
             .cs
             .lookups
             .iter()
-            .map(|lookup| lookup.input_expressions_set_group.len())
+            .map(|lookup| lookup.input_expressions_sets.len() - 1)
             .sum();
         let mut lookup_table_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_sum_values = vec![C::Scalar::zero(); size * num_lookups];
-        let mut lookup_input_product_group_values =
-            vec![C::Scalar::zero(); size * num_lookup_input_group];
-        let mut lookup_input_product_sum_group_values =
-            vec![C::Scalar::zero(); size * num_lookup_input_group];
+        let mut lookup_input_product_set_values =
+            vec![C::Scalar::zero(); size * num_extra_lookup_input];
+        let mut lookup_input_product_sum_set_values =
+            vec![C::Scalar::zero(); size * num_extra_lookup_input];
 
         let mut shuffle_input_values = vec![C::Scalar::zero(); size * num_shuffles];
         let mut shuffle_table_values = vec![C::Scalar::zero(); size * num_shuffles];
@@ -831,10 +832,10 @@ impl<C: CurveAffine> Evaluator<C> {
         let mut lookup_input_product_values_box = ThreadBox::wrap(&mut lookup_input_product_values);
         let mut lookup_input_product_sum_values_box =
             ThreadBox::wrap(&mut lookup_input_product_sum_values);
-        let mut lookup_input_product_group_values_box =
-            ThreadBox::wrap(&mut lookup_input_product_group_values);
-        let mut lookup_input_product_sum_group_values_box =
-            ThreadBox::wrap(&mut lookup_input_product_sum_group_values);
+        let mut lookup_input_product_set_values_box =
+            ThreadBox::wrap(&mut lookup_input_product_set_values);
+        let mut lookup_input_product_sum_set_values_box =
+            ThreadBox::wrap(&mut lookup_input_product_sum_set_values);
 
         let mut shuffle_input_box = ThreadBox::wrap(&mut shuffle_input_values);
         let mut shuffle_table_box = ThreadBox::wrap(&mut shuffle_table_values);
@@ -856,10 +857,10 @@ impl<C: CurveAffine> Evaluator<C> {
                         let lookup_input_product_values = lookup_input_product_values_box.unwrap();
                         let lookup_input_product_sum_values =
                             lookup_input_product_sum_values_box.unwrap();
-                        let lookup_input_product_group_values =
-                            lookup_input_product_group_values_box.unwrap();
-                        let lookup_input_product_sum_group_values =
-                            lookup_input_product_sum_group_values_box.unwrap();
+                        let lookup_input_product_set_values =
+                            lookup_input_product_set_values_box.unwrap();
+                        let lookup_input_product_sum_set_values =
+                            lookup_input_product_sum_set_values_box.unwrap();
 
                         let shuffle_input_values = shuffle_input_box.unwrap();
                         let shuffle_table_values = shuffle_table_box.unwrap();
@@ -904,7 +905,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             }
 
                             // Values required for the lookups
-                            let mut lookup_input_group_offset = 0;
+                            let mut lookup_extra_input_set_offset = 0;
                             for (t, table_result) in self.lookup_results.iter().enumerate() {
                                 table_values[t * size + idx] = table_result.0.evaluate(
                                     &rotations,
@@ -941,10 +942,10 @@ impl<C: CurveAffine> Evaluator<C> {
                                         &gamma,
                                         &theta,
                                     );
-                                // input groups
+                                // extra input set
                                 for i in 1..table_result.1.len() {
-                                    lookup_input_product_group_values
-                                        [lookup_input_group_offset * size + idx] =
+                                    lookup_input_product_set_values
+                                        [lookup_extra_input_set_offset * size + idx] =
                                         table_result.1[i].evaluate(
                                             &rotations,
                                             &self.constants,
@@ -956,8 +957,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                             &gamma,
                                             &theta,
                                         );
-                                    lookup_input_product_sum_group_values
-                                        [lookup_input_group_offset * size + idx] =
+                                    lookup_input_product_sum_set_values
+                                        [lookup_extra_input_set_offset * size + idx] =
                                         table_result.2[i].evaluate(
                                             &rotations,
                                             &self.constants,
@@ -969,7 +970,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                             &gamma,
                                             &theta,
                                         );
-                                    lookup_input_group_offset += 1;
+                                    lookup_extra_input_set_offset += 1;
                                 }
                             }
 
@@ -1099,9 +1100,9 @@ impl<C: CurveAffine> Evaluator<C> {
 
                     = ∑_i τ(X) * Π_{j != i} φ_j(X) - m(X) * Π(φ_i(X))        (2)
             */
-            let mut lookup_input_group_offset = 0;
+            let mut lookup_ext_input_set_offset = 0;
             for (lookup_idx, lookup) in lookups.iter().enumerate() {
-                let group_len = lookup.grand_sum_poly_set.len();
+                let sets_len = lookup.grand_sum_poly_set.len();
                 // Lookup constraints
                 let table = &lookup_table_values[lookup_idx * size..(lookup_idx + 1) * size];
                 let input_product =
@@ -1109,18 +1110,18 @@ impl<C: CurveAffine> Evaluator<C> {
                 let input_product_sum =
                     &lookup_input_product_sum_values[lookup_idx * size..(lookup_idx + 1) * size];
 
-                let mut input_product_group = vec![];
-                let mut input_product_sum_group = vec![];
-                for _ in 0..group_len - 1 {
-                    input_product_group.push(
-                        &lookup_input_product_group_values[lookup_input_group_offset * size
-                            ..(lookup_input_group_offset + 1) * size],
+                let mut ext_input_product_set = vec![];
+                let mut ext_input_product_sum_set = vec![];
+                for _ in 0..sets_len - 1 {
+                    ext_input_product_set.push(
+                        &lookup_input_product_set_values[lookup_ext_input_set_offset * size
+                            ..(lookup_ext_input_set_offset + 1) * size],
                     );
-                    input_product_sum_group.push(
-                        &lookup_input_product_sum_group_values[lookup_input_group_offset * size
-                            ..(lookup_input_group_offset + 1) * size],
+                    ext_input_product_sum_set.push(
+                        &lookup_input_product_sum_set_values[lookup_ext_input_set_offset * size
+                            ..(lookup_ext_input_set_offset + 1) * size],
                     );
-                    lookup_input_group_offset += 1;
+                    lookup_ext_input_set_offset += 1;
                 }
 
                 // Polynomials required for this lookup.
@@ -1150,7 +1151,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                         // l_last(X) * z(X) = 0
                         *value =
-                            *value * y + (grand_sum_coset_set[group_len - 1][idx] * l_last[idx]);
+                            *value * y + (grand_sum_coset_set[sets_len - 1][idx] * l_last[idx]);
 
                         // (1 - (l_last(X) + l_blind(X))) * (
                         //   τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
@@ -1165,7 +1166,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 * l_active_row[idx]);
 
                         // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-                        for i in 1..group_len {
+                        for i in 1..sets_len {
                             *value = *value * y
                                 + ((grand_sum_coset_set[i][idx]
                                     - grand_sum_coset_set[i - 1][r_last])
@@ -1176,12 +1177,12 @@ impl<C: CurveAffine> Evaluator<C> {
                         //   Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                         //   - ∑_i Π_{j != i} φ_j(X))
                         // ) = 0
-                        for i in 1..group_len {
+                        for i in 1..sets_len {
                             let z_gx_minus_z_x =
                                 grand_sum_coset_set[i][r_next] - grand_sum_coset_set[i][idx];
                             *value = *value * y
-                                + ((z_gx_minus_z_x * input_product_group[i - 1][idx]
-                                    - input_product_sum_group[i - 1][idx])
+                                + ((z_gx_minus_z_x * ext_input_product_set[i - 1][idx]
+                                    - ext_input_product_sum_set[i - 1][idx])
                                     * l_active_row[idx]);
                         }
                     }

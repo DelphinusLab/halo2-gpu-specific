@@ -57,8 +57,7 @@ impl<F: FieldExt> Argument<F> {
         multiplicity_commitment: MultiplicityCommitment<C>,
     ) -> Result<Committed<C>, Error> {
         let mut grand_sum_commitment_set = vec![];
-        grand_sum_commitment_set.push(transcript.read_point()?);
-        self.input_expressions_set_group
+        self.input_expressions_sets
             .iter()
             .try_for_each(|_| -> Result<_, Error> {
                 grand_sum_commitment_set.push(transcript.read_point()?);
@@ -151,8 +150,7 @@ impl<C: CurveAffine> Evaluated<C> {
                  LHS = (τ(X) * (ϕ(gX) - ϕ(X)) + m(x)) *Π(φ_i(X))
                  RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)))
             */
-            let mut phi = argument
-                .input_expressions_set
+            let mut phi = argument.input_expressions_sets[0]
                 .0
                 .iter()
                 .map(|express| compress_expressions(express) + &*beta)
@@ -219,8 +217,8 @@ impl<C: CurveAffine> Evaluated<C> {
             .chain(
                 self.grand_sum_sets
                     .iter()
+                    .zip(argument.input_expressions_sets.iter())
                     .skip(1)
-                    .zip(argument.input_expressions_set_group.iter())
                     .map(extend_product_expression),
             )
     }

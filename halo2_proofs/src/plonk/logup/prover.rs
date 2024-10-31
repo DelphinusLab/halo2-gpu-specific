@@ -45,8 +45,7 @@ pub(in crate::plonk) struct CompressedInputExpressionSet<C: CurveAffine>(
 #[derive(Debug)]
 pub(in crate::plonk) struct Compressed<C: CurveAffine> {
     compressed_table_expression: Polynomial<C::Scalar, LagrangeCoeff>,
-    compressed_input_expression_set: CompressedInputExpressionSet<C>,
-    compressed_input_expression_set_group: Vec<CompressedInputExpressionSet<C>>,
+    compressed_input_expression_sets: Vec<CompressedInputExpressionSet<C>>,
     pub(in crate::plonk) multiplicity_expression: Polynomial<C::Scalar, LagrangeCoeff>,
 }
 
@@ -97,15 +96,8 @@ impl<F: FieldExt> Argument<F> {
         };
 
         // Get values of input expressions involved in the lookup and compress them
-        let compressed_input_expression_set = self
-            .input_expressions_set
-            .0
-            .iter()
-            .map(|compress| compress_expressions(compress))
-            .collect::<Vec<_>>();
-
-        let compressed_input_expression_set_group = self
-            .input_expressions_set_group
+        let compressed_input_expression_sets = self
+            .input_expressions_sets
             .iter()
             .map(|set| {
                 set.0
@@ -135,10 +127,7 @@ impl<F: FieldExt> Argument<F> {
         let mut multiplicity_values: Vec<F> = {
             use std::sync::atomic::{AtomicU64, Ordering};
             let m_values: Vec<AtomicU64> = (0..params.n).map(|_| AtomicU64::new(0)).collect();
-            for compressed_input_expression in compressed_input_expression_set
-                .iter()
-                .chain(compressed_input_expression_set_group.iter().flatten())
-            {
+            for compressed_input_expression in compressed_input_expression_sets.iter().flatten() {
                 compressed_input_expression
                     .par_iter()
                     .take(usable_row)
@@ -179,10 +168,7 @@ impl<F: FieldExt> Argument<F> {
         Ok((
             Compressed {
                 compressed_table_expression,
-                compressed_input_expression_set: CompressedInputExpressionSet(
-                    compressed_input_expression_set,
-                ),
-                compressed_input_expression_set_group: compressed_input_expression_set_group
+                compressed_input_expression_sets: compressed_input_expression_sets
                     .into_iter()
                     .map(CompressedInputExpressionSet)
                     .collect::<Vec<_>>(),
@@ -212,7 +198,7 @@ impl<C: CurveAffine> Compressed<C> {
 
         let mut grand_sum = vec![C::Scalar::zero(); params.n as usize];
 
-        for input in self.compressed_input_expression_set.0.iter() {
+        for input in self.compressed_input_expression_sets[0].0.iter() {
             let mut fi_sum = vec![C::Scalar::zero(); params.n as usize];
             parallelize(&mut fi_sum, |sum, start| {
                 for (sum_value, expression_value) in sum.iter_mut().zip(input[start..].iter()) {
@@ -255,11 +241,12 @@ impl<C: CurveAffine> Compressed<C> {
         */
         let mut grand_sum_group = vec![
             vec![C::Scalar::zero(); params.n as usize];
-            self.compressed_input_expression_set_group.len()
+            self.compressed_input_expression_sets.len() - 1
         ];
         for (i, set) in self
-            .compressed_input_expression_set_group
+            .compressed_input_expression_sets
             .iter()
+            .skip(1)
             .enumerate()
         {
             for input in set.0.iter() {
@@ -322,8 +309,9 @@ impl<C: CurveAffine> Compressed<C> {
             // l_last(X) * (z_last(X)) = 0
             assert_eq!(z_last[u], C::Scalar::zero());
 
-            let mut phi_chunk_sums = iter::once(&self.compressed_input_expression_set)
-                .chain(self.compressed_input_expression_set_group.iter())
+            let mut phi_chunk_sums = self
+                .compressed_input_expression_sets
+                .iter()
                 .map(|input_expression_set| {
                     (0..u)
                         .map(|i| {
