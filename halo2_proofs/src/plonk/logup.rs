@@ -7,17 +7,17 @@ pub(crate) mod verifier;
 #[derive(Clone, Debug)]
 pub struct InputExpressionSet<F: Field>(pub Vec<Vec<Expression<F>>>);
 
-// logup: logarithmic derivative lookup feature support multiple inputs map to one shared table
+// logup: logarithmic derivative lookup feature support multiple inputs set map to one shared table
 // limited by required degree, inputs were chunked to multiple sets.
 #[derive(Clone, Debug)]
 pub struct Argument<F: Field> {
     pub name: &'static str,
     pub table_expressions: Vec<Expression<F>>,
-    // this inputs set degree sum + table degree <= required degree
-    pub input_expressions_set: InputExpressionSet<F>,
-    // more inputs set with same target table in limit degree(instead of more lookup argument instances)
-    // each inputs set degree sum <= required degree
-    pub input_expressions_set_group: Vec<InputExpressionSet<F>>,
+    // collect all inputs sets chunked by required degree
+    // specially, the first inputs set combined with table, degree sum<= required degree
+    // the extra inputs set excluding table and degree sum<= required degree
+    // [[inputs],[inputs,inputs..],..]
+    pub input_expressions_sets: Vec<InputExpressionSet<F>>,
 }
 
 impl<F: Field> Argument<F> {
@@ -29,27 +29,16 @@ impl<F: Field> Argument<F> {
     ) -> Self {
         Argument {
             name,
-            input_expressions_set: input_expressions.to_owned(),
+            input_expressions_sets: vec![input_expressions.to_owned()],
             table_expressions: table_expressions.to_owned(),
-            input_expressions_set_group: vec![],
         }
     }
 
     pub(crate) fn required_degree(&self) -> usize {
-        for input in self.input_expressions_set.0.iter() {
-            assert_eq!(input.len(), self.table_expressions.len());
-        }
-
         let mut input_degree = 1;
-        for inputs in self.input_expressions_set.0.iter() {
-            for expr in inputs {
-                input_degree = std::cmp::max(input_degree, expr.degree());
-            }
-        }
-        // for some scenario, the max inputs degree is in input_expressions_set_ext
-        // we also take the table + max inputs degree as the max lookup degree for simplicity and unity
-        for inputs_set in self.input_expressions_set_group.iter() {
+        for inputs_set in self.input_expressions_sets.iter() {
             for inputs in inputs_set.0.iter() {
+                assert_eq!(inputs.len(), self.table_expressions.len());
                 for expr in inputs {
                     input_degree = std::cmp::max(input_degree, expr.degree());
                 }
@@ -97,9 +86,11 @@ impl<F: Field> ArgumentTracer<F> {
         let mut argument = Argument {
             name: self.name,
             table_expressions: self.table_expressions.clone(),
-            input_expressions_set: InputExpressionSet(vec![self.input_expression_set[0].clone()]),
-            input_expressions_set_group: vec![],
+            input_expressions_sets: vec![InputExpressionSet(vec![
+                self.input_expression_set[0].clone()
+            ])],
         };
+        let mut extra_input_expressions_sets: Vec<InputExpressionSet<F>> = vec![];
         let table_degree = self
             .table_expressions
             .iter()
@@ -112,19 +103,18 @@ impl<F: Field> ArgumentTracer<F> {
             let mut indicator = false;
 
             // 1. table + input_expressions_set case
-            let sum: usize = argument
-                .input_expressions_set
+            let sum: usize = argument.input_expressions_sets[0]
                 .0
                 .iter()
                 .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
                 .sum();
             if table_degree + sum + new_input_degree <= degree {
-                argument.input_expressions_set.0.push(input.clone());
+                argument.input_expressions_sets[0].0.push(input.clone());
                 continue;
             }
 
-            // 2. input_expressions_set_ext case
-            for set in argument.input_expressions_set_group.iter_mut() {
+            // 2. extra input_expressions_set case
+            for set in extra_input_expressions_sets.iter_mut() {
                 let sum: usize = set
                     .0
                     .iter()
@@ -137,13 +127,14 @@ impl<F: Field> ArgumentTracer<F> {
                     break;
                 }
             }
-            // 3. new InputExpressionSet to input_expressions_set_ext
+            // 3. new InputExpressionSet to extra input_expressions_set
             if !indicator {
-                argument
-                    .input_expressions_set_group
-                    .push(InputExpressionSet(vec![input.clone()]));
+                extra_input_expressions_sets.push(InputExpressionSet(vec![input.clone()]));
             }
         }
+        argument
+            .input_expressions_sets
+            .append(&mut extra_input_expressions_sets);
 
         argument
     }
@@ -154,8 +145,8 @@ impl<F: Field> ArgumentTracer<F> {
         }
 
         let mut input_degree = 1;
-        for chunks in self.input_expression_set.iter() {
-            for expr in chunks {
+        for inputs in self.input_expression_set.iter() {
+            for expr in inputs {
                 input_degree = std::cmp::max(input_degree, expr.degree());
             }
         }

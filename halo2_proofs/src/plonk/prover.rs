@@ -323,7 +323,7 @@ pub fn create_proof_ext<
         .cs
         .lookups
         .iter()
-        .map(|lookup| lookup.input_expressions_set_group.len() + 1)
+        .map(|lookup| lookup.input_expressions_sets.len())
         .collect::<Vec<_>>();
 
     let timer = start_timer!(|| format!(

@@ -1144,20 +1144,34 @@ impl<F: FieldExt> MockVerifier<F> {
                         .clone()
                         .into_iter()
                         .filter_map(move |input_row| {
-                            let inputs: Vec<_> = lookup
-                                .input_expressions_set
-                                .0
+                            let input_sets: Vec<Vec<_>> = lookup
+                                .input_expressions_sets
                                 .iter()
-                                .map(|input| {
-                                    input.iter().map(|c| load(c, input_row)).collect::<Vec<_>>()
+                                .map(|set| {
+                                    set.0
+                                        .iter()
+                                        .map(|input| {
+                                            input
+                                                .iter()
+                                                .map(|c| load(c, input_row))
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .collect::<Vec<_>>()
                                 })
-                                .collect();
+                                .collect::<Vec<_>>();
+
                             let lookup_fail_idx =
-                                inputs.iter().position(|input| !table.contains(input));
+                                input_sets.iter().enumerate().find_map(|(set_idx, inputs)| {
+                                    inputs
+                                        .iter()
+                                        .position(|input| !table.contains(input))
+                                        .and_then(|fail_idx| Some((set_idx, fail_idx)))
+                                });
 
                             if lookup_fail_idx.is_none() {
                                 None
                             } else {
+                                let (input_set_idx, input_fail_idx) = lookup_fail_idx.unwrap();
                                 Some(VerifyFailure::Lookup {
                                     name: lookup.name,
                                     lookup_index,
@@ -1165,7 +1179,8 @@ impl<F: FieldExt> MockVerifier<F> {
                                         &self.cs,
                                         &self.regions,
                                         input_row,
-                                        lookup.input_expressions_set.0[lookup_fail_idx.unwrap()]
+                                        lookup.input_expressions_sets[input_set_idx].0
+                                            [input_fail_idx]
                                             .iter(),
                                     ),
                                 })

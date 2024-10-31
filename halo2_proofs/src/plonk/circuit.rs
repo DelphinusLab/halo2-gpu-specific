@@ -1149,7 +1149,7 @@ impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
             .entries(self.0.iter().enumerate().map(|(i, arg)| {
                 (
                     format!("lookup{}", i),
-                    &arg.input_expressions_set,
+                    &arg.input_expressions_sets,
                     &arg.table_expressions,
                 )
             }))
@@ -1634,10 +1634,9 @@ impl<F: Field> ConstraintSystem<F> {
         // lookup expressions
         for expr in self.lookups.iter_mut().flat_map(|lookup| {
             lookup
-                .input_expressions_set
-                .0
+                .input_expressions_sets
                 .iter_mut()
-                .flatten()
+                .flat_map(|set| set.0.iter_mut().flat_map(|v| v.iter_mut()))
                 .chain(lookup.table_expressions.iter_mut())
         }) {
             replace_selectors(expr, &selector_replacements, true);
