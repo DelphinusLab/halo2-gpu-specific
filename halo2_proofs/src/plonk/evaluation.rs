@@ -1291,6 +1291,8 @@ impl<C: CurveAffine> Evaluator<C> {
         let l0 = &pk.l0;
         let l_last = &pk.l_last;
         let l_active_row = &pk.l_active_row;
+        let blinding_factors = pk.vk.cs.blinding_factors();
+        let last_rotation = Rotation(-((blinding_factors + 1) as i32));
         let p = &pk.vk.cs.permutation;
 
         let timer = ark_std::start_timer!(|| "permutations");
@@ -1298,8 +1300,6 @@ impl<C: CurveAffine> Evaluator<C> {
         let permutation = &permutations[0];
         let sets = &permutation.sets;
         if !sets.is_empty() {
-            let blinding_factors = pk.vk.cs.blinding_factors();
-            let last_rotation = Rotation(-((blinding_factors + 1) as i32));
             let chunk_len = pk.vk.cs.degree() - 2;
             let delta_start = beta * &C::Scalar::ZETA;
 
@@ -1670,7 +1670,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(table_buf.as_ref())
                                     .arg(input_product_buf.as_ref())
                                     .arg(input_product_sum_buf.as_ref())
-                                    .arg(&m_poly_coset_buf)
+                                    .arg(&m_poly_buf)
                                     .arg(&first_grand_sum_buf)
                                     .arg(&last_grand_sum_buf)
                                     .arg(&l0_buf)
@@ -1683,7 +1683,7 @@ impl<C: CurveAffine> Evaluator<C> {
 
                                 let mut prev_grand_sum_buf = first_grand_sum_buf;
                                 for i in 1..sets_len - 1 {
-                                    let cur_grand_sum_buf = do_extended_fft(
+                                    let curr_grand_sum_buf = do_extended_fft(
                                         pk,
                                         program,
                                         &lookup.grand_sum_poly_set[i],
@@ -1699,7 +1699,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )?;
                                     kernel
                                         .arg(&values_buf)
-                                        .arg(&cur_grand_sum_buf)
+                                        .arg(&curr_grand_sum_buf)
                                         .arg(&prev_grand_sum_buf)
                                         .arg(&l0_buf)
                                         .arg(&y_beta_gamma_buf)
@@ -1720,7 +1720,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )?;
                                     kernel
                                         .arg(&values_buf)
-                                        .arg(curr_grand_sum_buf)
+                                        .arg(&curr_grand_sum_buf)
                                         .arg(&prev_grand_sum_buf)
                                         .arg(&l0_buf)
                                         .arg(&y_beta_gamma_buf)
@@ -1730,7 +1730,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                     allocator.push_back(prev_grand_sum_buf);
                                 }
 
-                                for i in 1..sets_len() {
+                                for i in 1..sets_len {
                                     let input_product_buf = pk.ev.gpu_lookup_expr
                                         [lookup_idx + group_idx * group_expr_len]
                                         .1[i]
