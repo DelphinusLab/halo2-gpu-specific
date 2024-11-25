@@ -3,7 +3,7 @@ use std::iter;
 use super::super::{
     circuit::Expression, ChallengeBeta, ChallengeGamma, ChallengeTheta, ChallengeX,
 };
-use super::ArgumentGroup;
+use super::Argument;
 use crate::{
     arithmetic::{BaseExt, CurveAffine, FieldExt},
     plonk::{Error, VerifyingKey},
@@ -24,7 +24,7 @@ pub struct Evaluated<C: CurveAffine> {
     pub product_next_eval: C::Scalar,
 }
 
-impl<F: FieldExt> ArgumentGroup<F> {
+impl<F: FieldExt> Argument<F> {
     pub fn read_product_commitment<
         C: CurveAffine,
         E: EncodedChallenge<C>,
@@ -61,7 +61,7 @@ impl<C: CurveAffine> Evaluated<C> {
         l_0: C::Scalar,
         l_last: C::Scalar,
         l_blind: C::Scalar,
-        argument: &'a ArgumentGroup<C::Scalar>,
+        argument: &'a Argument<C::Scalar>,
         theta: ChallengeTheta<C>,
         beta: ChallengeBeta<C>,
         advice_evals: &[C::Scalar],
