@@ -1108,7 +1108,9 @@ pub struct ConstraintSystem<F: Field> {
 
     // Vector of shuffle arguments, where each corresponds to a sequence of
     // input expressions and a sequence of table expressions involved in the shuffle.
-    pub shuffles: shuffle::Argument<F>,
+    pub shuffles: Vec<shuffle::Argument<F>>,
+    // trace all the shuffle argument in configure stage, and then chunk them
+    pub shuffle_tracer: Vec<shuffle::ArgumentUnit<F>>,
 
     // Vector of range check arguments based on shuffle, where each corresponds to an
     // input advice column and a table advice column.
@@ -1157,17 +1159,19 @@ impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
     }
 }
 
-struct PinnedShuffles<'a, F: Field>(&'a shuffle::Argument<F>);
+struct PinnedShuffles<'a, F: Field>(&'a Vec<shuffle::Argument<F>>);
 
 impl<'a, F: Field> std::fmt::Debug for PinnedShuffles<'a, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_list()
-            .entries(self.0 .0.iter().enumerate().map(|(i, arg)| {
-                (
-                    format!("shuffle{}", i),
-                    &arg.input_expressions,
-                    &arg.shuffle_expressions,
-                )
+            .entries(self.0.iter().enumerate().map(|(i, group)| {
+                group.0.iter().enumerate().map(move |(j, arg)| {
+                    (
+                        format!("shuffle {}-{}", i, j),
+                        &arg.input_expressions,
+                        &arg.shuffle_expressions,
+                    )
+                })
             }))
             .finish()
     }
@@ -1200,7 +1204,8 @@ impl<F: Field> Default for ConstraintSystem<F> {
             permutation: permutation::Argument::new(),
             lookups: Vec::new(),
             lookup_tracer: Some(BTreeMap::new()),
-            shuffles: shuffle::Argument::new(),
+            shuffles: Vec::new(),
+            shuffle_tracer: Vec::new(),
             range_check: range_check::Argument::new(),
             constants: vec![],
             minimum_degree: None,
@@ -1255,8 +1260,8 @@ impl<F: Field> ConstraintSystem<F> {
         mut self,
     ) -> (ConcreteCircuit::Config, Self) {
         let config = ConcreteCircuit::configure(&mut self);
-        // chunk lookups by degree
-        let cs = self.chunk_lookups();
+        // chunk lookups and shuffles by degree
+        let cs = self.chunk_lookups().chunk_shuffles();
 
         (config, cs)
     }
@@ -1367,11 +1372,19 @@ impl<F: Field> ConstraintSystem<F> {
         let mut cells = VirtualCells::new(self);
         let table_map = table_map(&mut cells);
 
-        let index = self.shuffles.0.len();
-        self.shuffles
-            .0
-            .push(shuffle::ArgumentElement::new(name, table_map));
+        let index = self.shuffle_tracer.len();
+        self.shuffle_tracer
+            .push(shuffle::ArgumentUnit::new(name, table_map));
         index
+    }
+
+    // chunk shuffles by degree
+    pub fn chunk_shuffles(mut self) -> Self {
+        if self.shuffle_tracer.len() == 0 {
+            return self;
+        }
+        self.shuffles = shuffle::chunk(&self.shuffle_tracer[..], self.degree());
+        self
     }
 
     fn query_fixed_index(&mut self, column: Column<Fixed>, at: Rotation) -> usize {
@@ -1644,11 +1657,13 @@ impl<F: Field> ConstraintSystem<F> {
 
         // Substitute non-simple selectors for the real fixed columns in all
         // shuffle expressions
-        for expr in self.shuffles.0.iter_mut().flat_map(|shuffle| {
-            shuffle
-                .input_expressions
-                .iter_mut()
-                .chain(shuffle.shuffle_expressions.iter_mut())
+        for expr in self.shuffles.iter_mut().flat_map(|group| {
+            group.0.iter_mut().flat_map(|shuffle| {
+                shuffle
+                    .input_expressions
+                    .iter_mut()
+                    .chain(shuffle.shuffle_expressions.iter_mut())
+            })
         }) {
             replace_selectors(expr, &selector_replacements, true);
         }
@@ -1806,15 +1821,21 @@ impl<F: Field> ConstraintSystem<F> {
                 .unwrap_or(1)
         };
         degree = std::cmp::max(degree, lookup_degree);
-        degree = std::cmp::max(
-            degree,
-            self.shuffles
-                .0
+
+        let shuffle_degree = if self.shuffle_tracer.len() > 0 {
+            self.shuffle_tracer
                 .iter()
                 .map(|l| l.required_degree())
                 .max()
-                .unwrap_or(1),
-        );
+                .unwrap_or(1)
+        } else {
+            self.shuffles
+                .iter()
+                .flat_map(|group| group.0.iter().map(|l| l.required_degree()))
+                .max()
+                .unwrap_or(1)
+        };
+        degree = std::cmp::max(degree, shuffle_degree);
 
         // Account for each gate to ensure our quotient polynomial is the
         // correct degree and that our extended domain is the right size.

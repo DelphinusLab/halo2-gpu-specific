@@ -5,84 +5,28 @@ pub(crate) mod prover;
 pub(crate) mod verifier;
 
 #[derive(Clone, Debug)]
-pub struct Argument<F: Field>(pub Vec<ArgumentElement<F>>);
+pub struct Argument<F: Field>(pub Vec<ArgumentUnit<F>>);
 
 impl<F: Field> Argument<F> {
-    pub(crate) fn new() -> Self {
-        Argument(vec![])
-    }
-
-    pub fn group(&self, degree: usize) -> Vec<ArgumentGroup<F>> {
-        assert!(degree > 2, "Invalid degree");
-        //(1 - (l_last + l_blind)) * z(\omega X) has 2 degree
-        let reserve_degree = 2;
-        let mut degree_arguments: BTreeMap<usize, Vec<ArgumentElement<F>>> = BTreeMap::default();
-
-        self.0.iter().for_each(|v| {
-            degree_arguments
-                .entry(v.degree())
-                .or_default()
-                .push(v.clone())
-        });
-
-        let mut degree_set = vec![];
-        degree_arguments
-            .iter()
-            .for_each(|(k, v)| degree_set.extend(vec![*k; v.len()]));
-        degree_set.reverse();
-
-        let buckets = min_buckets(&degree_set, degree - reserve_degree);
-        let mut group: Vec<ArgumentGroup<F>> = Vec::new();
-        for bucket in buckets.into_iter() {
-            let mut argument = vec![];
-            bucket.into_iter().for_each(|k| {
-                argument.push(degree_arguments.get_mut(&k).unwrap().pop().unwrap());
-            });
-            group.push(ArgumentGroup(argument));
-        }
-        degree_arguments
-            .keys()
-            .for_each(|k| assert!(degree_arguments.get(k).unwrap().is_empty()));
-        group
+    //get the degree sum to group's all elements
+    pub(crate) fn degree_sum(&self) -> usize {
+        self.0.iter().map(|arg| arg.degree()).sum::<usize>()
     }
 }
 
-fn min_buckets(sets: &[usize], volume: usize) -> Vec<Vec<usize>> {
-    let mut buckets: Vec<Vec<usize>> = Vec::new();
-
-    for &num in sets {
-        let mut placed = false;
-
-        for bucket in buckets.iter_mut() {
-            if bucket.iter().sum::<usize>() + num <= volume {
-                bucket.push(num);
-                placed = true;
-                break;
-            }
-        }
-        if !placed {
-            buckets.push(vec![num]);
-        }
-    }
-    buckets
-}
-
 #[derive(Clone, Debug)]
-pub struct ArgumentGroup<F: Field>(pub Vec<ArgumentElement<F>>);
-
-#[derive(Clone, Debug)]
-pub struct ArgumentElement<F: Field> {
+pub struct ArgumentUnit<F: Field> {
     pub name: &'static str,
     pub input_expressions: Vec<Expression<F>>,
     pub shuffle_expressions: Vec<Expression<F>>,
 }
 
-impl<F: Field> ArgumentElement<F> {
+impl<F: Field> ArgumentUnit<F> {
     /// Constructs a new shuffle lookup argument.
     /// `shuffle_map` is a sequence of `(input, shuffle)` tuples.
     pub fn new(name: &'static str, shuffle_map: Vec<(Expression<F>, Expression<F>)>) -> Self {
         let (input_expressions, shuffle_expressions) = shuffle_map.into_iter().unzip();
-        ArgumentElement {
+        ArgumentUnit {
             name,
             input_expressions,
             shuffle_expressions,
@@ -118,4 +62,41 @@ impl<F: Field> ArgumentElement<F> {
         }
         std::cmp::max(2 + shuffle_degree, 2 + input_degree)
     }
+}
+
+// compact little degree shuffle argument to one group according to max_degree and reduce the final shuffle poly amount.
+// (1 - (l_last + l_blind)) (z(\omega X)*(s1(X) + \beta)*(s2(X) + \beta^2).. - z(X)*(a1(X) + \beta)*(a2(X) + \beta^2)..)
+pub(crate) fn chunk<F: Field>(
+    tracer: &[ArgumentUnit<F>],
+    global_degree: usize,
+) -> Vec<Argument<F>> {
+    assert!(tracer.len() > 0, "shuffle tracer is 0");
+    assert!(global_degree > 2, "Invalid degree");
+    //(1 - (l_last + l_blind)) * z(\omega X) has 2 degree
+    let max_degree = global_degree - 2;
+    let mut groups = vec![Argument(vec![tracer[0].clone()])];
+    for arg in tracer.iter().skip(1) {
+        let new_deg = arg.degree();
+        let mut hit = false;
+        for group in groups.iter_mut() {
+            if group.degree_sum() + new_deg <= max_degree {
+                group.0.push(arg.clone());
+                hit = true;
+                break;
+            }
+        }
+        //not hit, create new group
+        if !hit {
+            groups.push(Argument(vec![arg.clone()]));
+        }
+    }
+    assert_eq!(
+        groups.iter().map(|group| group.0.len()).sum::<usize>(),
+        tracer.len()
+    );
+    assert_eq!(
+        groups.iter().all(|group| group.degree_sum() <= max_degree),
+        true
+    );
+    groups
 }

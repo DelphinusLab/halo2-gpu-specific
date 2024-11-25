@@ -195,9 +195,9 @@ pub enum VerifyFailure {
     Shuffle {
         /// The name of the shuffle that is not satisfied.
         name: &'static str,
-        /// The index of the shuffle that is not satisfied. These indices are assigned in
-        /// the order in which `ConstraintSystem::shuffle` is called during
-        /// `Circuit::configure`.
+        /// The index of the shuffle group that is not satisfied.
+        group_index: usize,
+        /// The index of the shuffle in group that is not satisfied.
         shuffle_index: usize,
         /// The location at which the shuffle is not satisfied.
         location: FailureLocation,
@@ -257,13 +257,14 @@ impl fmt::Display for VerifyFailure {
             }
             Self::Shuffle {
                 name,
+                group_index,
                 shuffle_index,
                 location,
             } => {
                 write!(
                     f,
-                    "Shuffle {}(index: {}) is not satisfied {}",
-                    name, shuffle_index, location
+                    "Shuffle {}(group:{},index: {}) is not satisfied {}",
+                    name, group_index, shuffle_index, location
                 )
             }
             Self::Permutation { column, row } => {
@@ -1192,58 +1193,68 @@ impl<F: FieldExt> MockVerifier<F> {
         let shuffle_errors =
             self.cs
                 .shuffles
-                .0
                 .iter()
                 .enumerate()
-                .flat_map(|(shuffle_index, shuffle)| {
-                    assert!(shuffle.shuffle_expressions.len() == shuffle.input_expressions.len());
-                    assert!(self.usable_rows.end > 0);
-
-                    let mut shuffles: Vec<Vec<_>> = self
-                        .usable_rows
-                        .clone()
-                        .map(|table_row| {
-                            shuffle
-                                .shuffle_expressions
-                                .iter()
-                                .map(move |c| load(c, table_row))
-                                .collect::<Vec<_>>()
-                        })
-                        .collect();
-                    shuffles.sort();
-
-                    let mut inputs: Vec<(Vec<_>, usize)> = self
-                        .usable_rows
-                        .clone()
-                        .map(|input_row| {
-                            let v = shuffle
-                                .input_expressions
-                                .iter()
-                                .map(move |c| load(c, input_row))
-                                .collect::<Vec<_>>();
-                            (v, input_row)
-                        })
-                        .collect();
-                    inputs.sort();
-
-                    inputs
+                .flat_map(|(group_index, shuffle_group)| {
+                    shuffle_group
+                        .0
                         .iter()
-                        .zip(shuffles.iter())
-                        .flat_map(|((input_value, row), shuffle_value)| {
-                            if input_value != shuffle_value {
-                                Some(VerifyFailure::Shuffle {
-                                    name: shuffle.name.clone(),
-                                    shuffle_index,
-                                    location: FailureLocation::find_expressions(
-                                        &self.cs,
-                                        &self.regions,
-                                        *row,
-                                        shuffle.input_expressions.iter(),
-                                    ),
+                        .enumerate()
+                        .flat_map(|(shuffle_index, shuffle)| {
+                            assert!(
+                                shuffle.shuffle_expressions.len()
+                                    == shuffle.input_expressions.len()
+                            );
+                            assert!(self.usable_rows.end > 0);
+
+                            let mut shuffles: Vec<Vec<_>> = self
+                                .usable_rows
+                                .clone()
+                                .map(|table_row| {
+                                    shuffle
+                                        .shuffle_expressions
+                                        .iter()
+                                        .map(move |c| load(c, table_row))
+                                        .collect::<Vec<_>>()
                                 })
-                            } else {
-                                None
-                            }
+                                .collect();
+                            shuffles.sort();
+
+                            let mut inputs: Vec<(Vec<_>, usize)> = self
+                                .usable_rows
+                                .clone()
+                                .map(|input_row| {
+                                    let v = shuffle
+                                        .input_expressions
+                                        .iter()
+                                        .map(move |c| load(c, input_row))
+                                        .collect::<Vec<_>>();
+                                    (v, input_row)
+                                })
+                                .collect();
+                            inputs.sort();
+
+                            inputs
+                                .iter()
+                                .zip(shuffles.iter())
+                                .flat_map(|((input_value, row), shuffle_value)| {
+                                    if input_value != shuffle_value {
+                                        Some(VerifyFailure::Shuffle {
+                                            name: shuffle.name.clone(),
+                                            group_index,
+                                            shuffle_index,
+                                            location: FailureLocation::find_expressions(
+                                                &self.cs,
+                                                &self.regions,
+                                                *row,
+                                                shuffle.input_expressions.iter(),
+                                            ),
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .collect::<Vec<_>>()
                         })
                         .collect::<Vec<_>>()
                 });

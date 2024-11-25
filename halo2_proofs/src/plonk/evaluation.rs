@@ -532,7 +532,7 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         // Shuffles
-        for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
+        for shuffle_group in cs.shuffles.iter() {
             let (inputs, shuffles): (Vec<ValueSource>, Vec<ValueSource>) = shuffle_group
                 .0
                 .iter()
@@ -574,7 +574,7 @@ impl<C: CurveAffine> Evaluator<C> {
         }
 
         // Lookups in GPU
-        for shuffle_group in cs.shuffles.group(cs.degree()).iter() {
+        for shuffle_group in cs.shuffles.iter() {
             let (inputs, shuffles): (
                 Vec<LookupProveExpression<C::Scalar>>,
                 Vec<LookupProveExpression<C::Scalar>>,
@@ -794,7 +794,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let fixed = &pk.fixed_cosets[..];
         let extended_omega = domain.get_extended_omega();
         let num_lookups = pk.vk.cs.lookups.len();
-        let num_shuffles = pk.vk.cs.shuffles.group(pk.vk.cs.degree()).len();
+        let num_shuffles = pk.vk.cs.shuffles.len();
         let isize = size as i32;
         let one = C::ScalarExt::one();
         let l0 = &pk.l0;

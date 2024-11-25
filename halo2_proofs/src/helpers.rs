@@ -432,10 +432,13 @@ pub(crate) fn write_cs<C: CurveAffine, W: io::Write>(
         }
         p.table_expressions.store(writer)?;
     }
-    writer.write(&(cs.shuffles.0.len() as u32).to_le_bytes())?;
-    for p in cs.shuffles.0.iter() {
-        p.input_expressions.store(writer)?;
-        p.shuffle_expressions.store(writer)?;
+    writer.write(&(cs.shuffles.len() as u32).to_le_bytes())?;
+    for s in cs.shuffles.iter() {
+        writer.write(&(s.0.len() as u32).to_le_bytes())?;
+        for p in s.0.iter() {
+            p.input_expressions.store(writer)?;
+            p.shuffle_expressions.store(writer)?;
+        }
     }
 
     write_u32(cs.range_check.0.len() as u32, writer)?;
@@ -497,16 +500,21 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
             table_expressions,
         });
     }
-    let mut shuffles = plonk::shuffle::Argument(vec![]);
+    let mut shuffles = vec![];
     let nb_shuffle = read_u32(reader)?;
     for _ in 0..nb_shuffle {
-        let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
-        let shuffle_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
-        shuffles.0.push(plonk::shuffle::ArgumentElement {
-            name: "",
-            input_expressions,
-            shuffle_expressions,
-        });
+        let nb_unit = read_u32(reader)?;
+        let mut group = plonk::shuffle::Argument(vec![]);
+        for _ in 0..nb_unit {
+            let input_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+            let shuffle_expressions = Vec::<Expression<C::Scalar>>::fetch(reader)?;
+            group.0.push(plonk::shuffle::ArgumentUnit {
+                name: "",
+                input_expressions,
+                shuffle_expressions,
+            });
+        }
+        shuffles.push(group);
     }
 
     let mut range_check = plonk::range_check::Argument::new();
@@ -545,6 +553,7 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         lookups,
         lookup_tracer: None,
         shuffles,
+        shuffle_tracer: vec![],
         range_check,
         constants,
         minimum_degree: None,

@@ -150,14 +150,14 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize
     fn synthesize(
         &self,
         config: Self::Config,
-        mut layouter: impl Layouter<F>,
+        layouter: impl Layouter<F>,
     ) -> Result<(), Error> {
         let theta = F::from(T as u64);
         let beta = F::from(B as u64);
 
         layouter.assign_region(
             || "Shuffle original into shuffled",
-            |mut region| {
+            |region| {
                 region.assign_fixed(|| "", config.q_first, 0, || Ok(F::one()))?;
                 region.assign_fixed(|| "", config.q_last, H, || Ok(F::one()))?;
                 for offset in 0..H {
