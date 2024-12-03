@@ -25,12 +25,12 @@ use group::{
 use rand_core::RngCore;
 use rayon::prelude::{
     IndexedParallelIterator, IntoParallelIterator, IntoParallelRefIterator,
-    IntoParallelRefMutIterator, ParallelIterator, ParallelSliceMut,
+    IntoParallelRefMutIterator, ParallelIterator, ParallelSlice, ParallelSliceMut,
 };
 use std::any::TypeId;
 use std::convert::TryInto;
 use std::num::ParseIntError;
-use std::ops::Index;
+use std::ops::{Deref, Index};
 use std::{
     collections::BTreeMap,
     iter,
@@ -125,35 +125,92 @@ impl<F: FieldExt> Argument<F> {
         end_timer!(timer);
 
         let timer = start_timer!(|| "lookup construct m(X) values");
-        let mut multiplicity_values: Vec<F> = {
-            use std::sync::atomic::{AtomicU64, Ordering};
-            let m_values: Vec<AtomicU64> = (0..params.n).map(|_| AtomicU64::new(0)).collect();
-            for compressed_input_expression in compressed_input_expression_sets.iter().flatten() {
-                compressed_input_expression
-                    .par_iter()
-                    .take(usable_row)
-                    .try_for_each(|fi| -> Result<(), Error> {
-                        let index = sorted_table_with_indices
-                            .binary_search_by_key(&fi, |&(t, _)| t)
-                            .map_err(|_| Error::ConstraintSystemFailure)?;
-                        let index = sorted_table_with_indices[index].1;
-                        m_values[index].fetch_add(1, Ordering::Relaxed);
-                        Ok(())
-                    })?;
-            }
+        let mut multiplicity_values: Vec<F> =
+            (0..params.n).into_par_iter().map(|_| F::zero()).collect();
+        let num_threads = rayon::current_num_threads();
+        let chunk_size = (sorted_table_with_indices.len() + num_threads - 1) / num_threads;
+        let res = compressed_input_expression_sets
+            .iter()
+            .flatten()
+            .map(|input_expression| {
+                input_expression.deref()[0..usable_row]
+                    .par_chunks(chunk_size)
+                    .map(|values| {
+                        let mut map_count: BTreeMap<usize, usize> = BTreeMap::new();
+                        let mut map_cache: BTreeMap<_, usize> = BTreeMap::new();
+                        let mut hit_count = 0;
+                        for fi in values {
+                            let index = if let Some(idx) = map_cache.get(fi) {
+                                hit_count += 1;
+                                *idx
+                            } else {
+                                let index = sorted_table_with_indices
+                                    .binary_search_by_key(&fi, |&(t, _)| t)
+                                    .expect("logup binary_search_by_key should hit");
+                                let index = sorted_table_with_indices[index].1;
+                                map_cache.insert(fi, index);
+                                index
+                            };
+                            map_count
+                                .entry(index)
+                                .and_modify(|count| *count += 1)
+                                .or_insert(1);
+                        }
+                        (map_count, hit_count, values.len())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
 
-            m_values
-                .par_iter()
-                .map(|mi| F::from(mi.load(Ordering::Relaxed)))
-                .collect()
-        };
-        end_timer!(timer);
+        let mut total_count = 0;
+        let mut total_hit_count = 0;
+        res.iter().for_each(|trees| {
+            trees.iter().for_each(|(tree, hit_count, total)| {
+                tree.iter().for_each(|(index, count)| {
+                    multiplicity_values[*index] += F::from(*count as u64);
+                    total_hit_count += *hit_count;
+                    total_count += *total;
+                })
+            })
+        });
+        end_timer!(timer, || format!(
+            "cache ratio:{}%",
+            total_hit_count * 100 / total_count
+        ));
+
         // Closure to construct commitment to vector of values
         let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>, max_bits: usize| {
             params
                 .commit_lagrange_with_bound(values, max_bits)
                 .to_affine()
         };
+
+        #[cfg(feature = "sanity-checks")]
+        {
+            let random = F::random(&mut rng);
+            let res = (0..usable_row)
+                .into_par_iter()
+                .map(|r| {
+                    let inputs =
+                        compressed_input_expression_sets
+                            .iter()
+                            .fold(F::zero(), |acc, set| {
+                                // ∑ 1/(f_i(X)+beta)
+                                let sum = set.iter().fold(F::zero(), |acc, input| {
+                                    acc + (input[r] + random).invert().unwrap()
+                                });
+                                acc + sum
+                            });
+                    // ∑ 1/(φ_i(X)) - m(X) / τ(X)))
+                    inputs
+                        - ((compressed_table_expression[r] + random).invert().unwrap()
+                            * multiplicity_values[r])
+                })
+                .collect::<Vec<_>>();
+            let last_z = res.iter().fold(F::zero(), |acc, v| acc + v);
+            assert_eq!(last_z, F::zero());
+        }
+
         multiplicity_values.truncate(usable_row);
 
         let m_max_bits = expression_max_bits::<C>(&multiplicity_values);
