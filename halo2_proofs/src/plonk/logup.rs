@@ -81,7 +81,7 @@ impl<F: Field> ArgumentTracer<F> {
     pub fn chunks(&self, global_degree: usize) -> Argument<F> {
         //reserve degree 2: (1 - (l_last + l_blind)) (z(wx)-z(x))
         assert!(global_degree > 2);
-        let degree = global_degree - 2;
+        let max_degree = global_degree - 2;
         //the degree covered table+max(inputs), degree(inputs[0])<=max(inputs) so the input[0] is ok
         let mut argument = Argument {
             name: self.name,
@@ -108,7 +108,7 @@ impl<F: Field> ArgumentTracer<F> {
                 .iter()
                 .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
                 .sum();
-            if table_degree + sum + new_input_degree <= degree {
+            if table_degree + sum + new_input_degree <= max_degree {
                 argument.input_expressions_sets[0].0.push(input.clone());
                 continue;
             }
@@ -121,7 +121,7 @@ impl<F: Field> ArgumentTracer<F> {
                     .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
                     .sum();
                 // inputs set extension degree only care the inputs degree, no table degree
-                if sum + new_input_degree <= degree {
+                if sum + new_input_degree <= max_degree {
                     set.0.push(input.clone());
                     indicator = true;
                     break;
@@ -135,6 +135,24 @@ impl<F: Field> ArgumentTracer<F> {
         argument
             .input_expressions_sets
             .append(&mut extra_input_expressions_sets);
+
+        // argument's chunked input_expressions count == tracer's input_expressions count
+        assert_eq!(
+            argument
+                .input_expressions_sets
+                .iter()
+                .map(|set| set.0.len())
+                .sum::<usize>(),
+            self.input_expression_set.len()
+        );
+
+        // each single set's degree sum <= max_degree
+        assert!(argument.input_expressions_sets.iter().all(|set| set
+            .0
+            .iter()
+            .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
+            .sum::<usize>()
+            <= max_degree));
 
         argument
     }
@@ -186,9 +204,9 @@ fn test_chunks_normal() {
 
     //degree=4
     let mut cs = cs.chunk_lookups();
-    assert_eq!(cs.lookups.len(), 2);
+    assert_eq!(cs.lookups.len(), 1);
     assert_eq!(cs.lookups[0].table_expressions.len(), 1);
-    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 1);
+    assert_eq!(cs.lookups[0].input_expressions_sets.len(), 2);
 
     //degree=5
     cs.lookup_any("table3", |meta| {
@@ -202,9 +220,9 @@ fn test_chunks_normal() {
     let mut cs = cs.chunk_lookups();
     assert_eq!(cs.lookups.len(), 2);
     assert_eq!(cs.lookups[0].table_expressions.len(), 1);
-    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 2);
+    assert_eq!(cs.lookups[0].input_expressions_sets.len(), 1);
     assert_eq!(cs.lookups[1].table_expressions.len(), 2);
-    assert_eq!(cs.lookups[1].input_expressions_set.0.len(), 1);
+    assert_eq!(cs.lookups[1].input_expressions_sets.len(), 1);
 }
 
 //test the big degree expression head
@@ -239,9 +257,7 @@ fn test_chunks_order() {
     });
 
     let mut cs = cs.chunk_lookups();
-    assert_eq!(cs.lookups.len(), 2);
+    assert_eq!(cs.lookups.len(), 1);
     assert_eq!(cs.lookups[0].table_expressions.len(), 1);
-    assert_eq!(cs.lookups[0].input_expressions_set.0.len(), 2);
-    assert_eq!(cs.lookups[1].table_expressions.len(), 1);
-    assert_eq!(cs.lookups[1].input_expressions_set.0.len(), 1);
+    assert_eq!(cs.lookups[0].input_expressions_sets.len(), 2);
 }

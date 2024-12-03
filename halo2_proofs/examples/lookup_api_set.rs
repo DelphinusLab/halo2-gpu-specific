@@ -22,9 +22,7 @@ struct SimpleChip<F: FieldExt> {
 
 #[derive(Clone, Debug)]
 struct SimpleConfig {
-    input_0: Column<Advice>,
-    input_1: Column<Advice>,
-    input_2: Column<Advice>,
+    inputs: [Column<Advice>; 6],
     s_0: Column<Fixed>,
     s_1: Column<Fixed>,
     table: TableColumn,
@@ -52,51 +50,52 @@ impl<F: FieldExt> SimpleChip<F> {
 
     fn configure(
         meta: &mut ConstraintSystem<F>,
-        input_0: Column<Advice>,
-        input_1: Column<Advice>,
-        input_2: Column<Advice>,
+        inputs: [Column<Advice>; 6],
         s_0: Column<Fixed>,
         s_1: Column<Fixed>,
         table: TableColumn,
     ) -> SimpleConfig {
         meta.create_gate("", |meta| {
-            let input_0 = meta.query_advice(input_0, Rotation::cur());
-            let input_1 = meta.query_advice(input_1, Rotation::cur());
+            let input_0 = meta.query_advice(inputs[0], Rotation::cur());
+            let input_1 = meta.query_advice(inputs[1], Rotation::cur());
             let s0 = meta.query_fixed(s_0, Rotation::cur());
             vec![s0 * (input_0 * F::from(1) - input_1)]
         });
 
-        meta.lookup("table1", |meta| {
-            let input_0 = meta.query_advice(input_0, Rotation::cur());
+        //set 1
+        meta.lookup("table0", |meta| {
+            let input_0 = meta.query_advice(inputs[0], Rotation::cur());
             [(input_0, table)].to_vec()
         });
-        meta.lookup("table2", |meta| {
-            let input_1 = meta.query_advice(input_1, Rotation::cur());
+
+        //set 2
+        meta.lookup("table1", |meta| {
+            let input_1 = meta.query_advice(inputs[1], Rotation::cur());
             [(input_1 * F::from(2), table)].to_vec()
         });
-        meta.lookup("table3", |meta| {
-            let input_2 = meta.query_advice(input_2, Rotation::cur());
+        meta.lookup("table2", |meta| {
+            let input_2 = meta.query_advice(inputs[2], Rotation::cur());
             [(input_2, table)].to_vec()
         });
 
-        meta.lookup_any("any", |meta| {
-            let input_0 = meta.query_advice(input_0, Rotation::cur());
-            let input_1 = meta.query_advice(input_1, Rotation::cur());
-            let input_2 = meta.query_advice(input_2, Rotation::cur());
-            let s0 = meta.query_fixed(s_0, Rotation::cur());
-            let s1 = meta.query_fixed(s_1, Rotation::cur());
+        //set 3
+        meta.lookup("table3", |meta| {
+            let input_3 = meta.query_advice(inputs[3], Rotation::cur());
+            [(input_3 * F::from(10), table)].to_vec()
+        });
+        meta.lookup("table4", |meta| {
+            let input_4 = meta.query_advice(inputs[4], Rotation::cur());
+            [(input_4, table)].to_vec()
+        });
 
-            [
-                (s0.clone() * input_0.clone(), s0 * input_1),
-                (s1.clone() * input_0, s1 * input_2),
-            ]
-            .to_vec()
+        //set 4
+        meta.lookup("table5", |meta| {
+            let input_5 = meta.query_advice(inputs[5], Rotation::cur());
+            [(input_5, table)].to_vec()
         });
 
         SimpleConfig {
-            input_0,
-            input_1,
-            input_2,
+            inputs,
             s_0,
             s_1,
             table,
@@ -118,10 +117,10 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
     }
 
     fn configure(meta: &mut ConstraintSystem<F>) -> Self::Config {
-        let [input_0, input_1, input_2] = [(); 3].map(|_| meta.advice_column());
+        let inputs = [(); 6].map(|_| meta.advice_column());
         let [s_0, s_1] = [(); 2].map(|_| meta.fixed_column());
         let [table] = [(); 1].map(|_| meta.lookup_table_column());
-        SimpleChip::configure(meta, input_0, input_1, input_2, s_0, s_1, table)
+        SimpleChip::configure(meta, inputs, s_0, s_1, table)
     }
 
     fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error> {
@@ -130,12 +129,24 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         layouter.assign_region(
             || "inputs",
             |region: &Region<'_, F>| {
-                region.assign_advice(|| "", ch.config.input_0, 0, || Ok(F::from(1 as u64)))?;
-                region.assign_advice(|| "", ch.config.input_1, 0, || Ok(F::from(1 as u64)))?;
+                for i in 0..6 {
+                    region.assign_advice(
+                        || "",
+                        ch.config.inputs[i],
+                        0,
+                        || Ok(F::from(1 as u64)),
+                    )?;
+                }
                 region.assign_fixed(|| "", ch.config.s_0, 0, || Ok(F::from(1)))?;
 
-                region.assign_advice(|| "", ch.config.input_0, 1, || Ok(F::from(3 as u64)))?;
-                region.assign_advice(|| "", ch.config.input_2, 1, || Ok(F::from(3 as u64)))?;
+                for i in 0..6 {
+                    region.assign_advice(
+                        || "",
+                        ch.config.inputs[i],
+                        1,
+                        || Ok(F::from(3 as u64)),
+                    )?;
+                }
                 region.assign_fixed(|| "", ch.config.s_1, 1, || Ok(F::from(1)))?;
 
                 Ok(())
@@ -144,7 +155,7 @@ impl<F: FieldExt> Circuit<F> for MyCircuit<F> {
         layouter.assign_table(
             || "common range table",
             |table| {
-                for i in 0..9 {
+                for i in 0..100 {
                     table.assign_cell(
                         || "range tag",
                         ch.config.table,
