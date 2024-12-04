@@ -4,19 +4,22 @@ use ff::Field;
 pub(crate) mod prover;
 pub(crate) mod verifier;
 
+// inputs expressions' set, the degree sum <= required degree
 #[derive(Clone, Debug)]
 pub struct InputExpressionSet<F: Field>(pub Vec<Vec<Expression<F>>>);
 
-// logup: logarithmic derivative lookup feature support multiple inputs set map to one shared table
-// limited by required degree, inputs were chunked to multiple sets.
+// logup: lookup feature base on logarithmic derivative, refer to "https://eprint.iacr.org/2022/1530"
+// support to collect multiple inputs to sets for their shared table to reduce lookup argument scale
+// limited by system required degree, inputs were chunked to multiple sets.
 #[derive(Clone, Debug)]
 pub struct Argument<F: Field> {
     pub name: &'static str,
+    // shared table
     pub table_expressions: Vec<Expression<F>>,
-    // collect all inputs sets chunked by required degree
+    // chunk all inputs to sets by required degree
     // specially, the first inputs set combined with table, degree sum<= required degree
     // the extra inputs set excluding table and degree sum<= required degree
-    // [[inputs],[inputs,inputs..],..]
+    // [[table,inputs],[inputs,inputs..],[inputs,inputs..]..]
     pub input_expressions_sets: Vec<InputExpressionSet<F>>,
 }
 
@@ -50,13 +53,14 @@ impl<F: Field> Argument<F> {
         }
 
         std::cmp::max(
-            // (1 - (l_last + l_blind)) τ(X) * f_i(X) * ((ϕ(gX) - ϕ(X))-( 1/f_i(X) - m(X) / τ(X)))
+            // (1 - (l_last + l_blind)) τ(X) * n[f_i(X)] * ((ϕ(gX) - ϕ(X))-( n[1/f_i(X)] - m(X) / τ(X)))
             4,
             2 + input_degree + table_degree,
         )
     }
 }
 
+// tracer the lookups from lookup API
 #[derive(Clone, Debug)]
 pub struct ArgumentTracer<F: Field> {
     pub name: &'static str,
@@ -77,12 +81,12 @@ impl<F: Field> ArgumentTracer<F> {
         }
     }
 
-    //group the argument tracer's input expressions by required global degree
+    // chunk the argument tracer's input expressions to sets by required global degree
     pub fn chunks(&self, global_degree: usize) -> Argument<F> {
         //reserve degree 2: (1 - (l_last + l_blind)) (z(wx)-z(x))
         assert!(global_degree > 2);
         let max_degree = global_degree - 2;
-        //the degree covered table+max(inputs), degree(inputs[0])<=max(inputs) so the input[0] is ok
+        //the degree covered table + max(inputs), degree(inputs[0]) <= max(inputs) so the input[0] is ok
         let mut argument = Argument {
             name: self.name,
             table_expressions: self.table_expressions.clone(),
@@ -146,7 +150,7 @@ impl<F: Field> ArgumentTracer<F> {
             self.input_expression_set.len()
         );
 
-        // each single set's degree sum <= max_degree
+        // each set's degree sum <= max_degree
         assert!(argument.input_expressions_sets.iter().all(|set| set
             .0
             .iter()
@@ -174,7 +178,7 @@ impl<F: Field> ArgumentTracer<F> {
         }
 
         std::cmp::max(
-            // (1 - (l_last + l_blind)) τ(X) * f_i(X) * ((ϕ(gX) - ϕ(X))-( 1/f_i(X) - m(X) / τ(X)))
+            // (1 - (l_last + l_blind)) τ(X) * n[f_i(X)] * ((ϕ(gX) - ϕ(X))-( n[1/f_i(X)] - m(X) / τ(X)))
             4,
             2 + input_degree + table_degree,
         )

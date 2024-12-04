@@ -429,7 +429,7 @@ pub fn create_proof_ext<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .map(|lookup| lookup.commit_grand_sum(pk, params, beta).unwrap())
+                    .map(|lookup| lookup.commit_z(pk, params, beta).unwrap())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -465,16 +465,16 @@ pub fn create_proof_ext<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (grand_sum_poly_set, zs): (Vec<_>, Vec<_>) =
+                        let (z_poly_set, zs): (Vec<_>, Vec<_>) =
                             l.1.into_par_iter()
                                 .map(|z| {
-                                    let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                                    let (z_poly, c) = params.commit_lagrange_and_ifft(
                                         z,
                                         &pk.vk.domain.get_omega_inv(),
                                         &pk.vk.domain.ifft_divisor,
                                     );
                                     let c = c.to_affine();
-                                    (grand_sum_poly, c)
+                                    (z_poly, c)
                                 })
                                 .unzip();
 
@@ -482,7 +482,7 @@ pub fn create_proof_ext<
                             zs,
                             logup::prover::Committed::<C> {
                                 multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                grand_sum_poly_set,
+                                z_poly_set,
                             },
                         )
                     })
@@ -1096,7 +1096,7 @@ pub fn create_proof_from_witness<
             .map(|lookups| {
                 lookups
                     .into_par_iter()
-                    .map(|lookup| lookup.commit_grand_sum(pk, params, beta).unwrap())
+                    .map(|lookup| lookup.commit_z(pk, params, beta).unwrap())
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -1132,16 +1132,16 @@ pub fn create_proof_from_witness<
                 lookups
                     .into_par_iter()
                     .map(|l| {
-                        let (grand_sum_poly_set, zs): (Vec<_>, Vec<_>) =
+                        let (z_poly_set, zs): (Vec<_>, Vec<_>) =
                             l.1.into_par_iter()
                                 .map(|z| {
-                                    let (grand_sum_poly, c) = params.commit_lagrange_and_ifft(
+                                    let (z_poly, c) = params.commit_lagrange_and_ifft(
                                         z,
                                         &pk.vk.domain.get_omega_inv(),
                                         &pk.vk.domain.ifft_divisor,
                                     );
                                     let c = c.to_affine();
-                                    (grand_sum_poly, c)
+                                    (z_poly, c)
                                 })
                                 .unzip();
 
@@ -1149,7 +1149,7 @@ pub fn create_proof_from_witness<
                             zs,
                             logup::prover::Committed {
                                 multiplicity_poly: pk.vk.domain.lagrange_to_coeff_st(l.0),
-                                grand_sum_poly_set,
+                                z_poly_set,
                             },
                         )
                     })
