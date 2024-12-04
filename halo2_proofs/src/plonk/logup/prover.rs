@@ -52,7 +52,8 @@ pub(in crate::plonk) struct Compressed<C: CurveAffine> {
 #[derive(Debug)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     pub(in crate::plonk) multiplicity_poly: Polynomial<C::Scalar, Coeff>,
-    pub(in crate::plonk) grand_sum_poly_set: Vec<Polynomial<C::Scalar, Coeff>>,
+    // grand sum poly
+    pub(in crate::plonk) z_poly_set: Vec<Polynomial<C::Scalar, Coeff>>,
 }
 
 pub(in crate::plonk) struct Evaluated<C: CurveAffine> {
@@ -63,7 +64,7 @@ impl<F: FieldExt> Argument<F> {
     /// Given a Lookup with input expressions set [[A_0, A_1, ..., A_{m-1}]..]  and table expressions
     /// [S_0, S_1, ..., S_{m-1}], this method
     /// - constructs A_compressed_1 = \theta^{m-1} A_0 + theta^{m-2} A_1 + ... + \theta A_{m-2} + A_{m-1}
-    ///   A_compressed_2...
+    ///              A_compressed_2 = ...
     /// - constructs S_compressed = \theta^{m-1} S_0 + theta^{m-2} S_1 + ... + \theta S_{m-2} + S_{m-1}
     /// - constructs Multiplicity expression to count input expressions set's multiplicity in table expression
     pub(in crate::plonk) fn compress<'a, C, R: RngCore>(
@@ -82,7 +83,6 @@ impl<F: FieldExt> Argument<F> {
     {
         let blinding_factors = pk.vk.cs.blinding_factors();
         let usable_row = params.n as usize - blinding_factors - 1;
-        // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
             pk.vk.domain.lagrange_from_vec(evaluate_with_theta(
                 expressions,
@@ -128,12 +128,12 @@ impl<F: FieldExt> Argument<F> {
         let mut multiplicity_values: Vec<F> =
             (0..params.n).into_par_iter().map(|_| F::zero()).collect();
         let num_threads = rayon::current_num_threads();
-        let chunk_size = (sorted_table_with_indices.len() + num_threads - 1) / num_threads;
+        let chunk_size = (usable_row + num_threads - 1) / num_threads;
         let res = compressed_input_expression_sets
             .iter()
             .flatten()
             .map(|input_expression| {
-                input_expression.deref()[0..usable_row]
+                input_expression.as_ref()[0..usable_row]
                     .par_chunks(chunk_size)
                     .map(|values| {
                         let mut map_count: BTreeMap<usize, usize> = BTreeMap::new();
@@ -178,13 +178,6 @@ impl<F: FieldExt> Argument<F> {
             total_hit_count * 100 / total_count
         ));
 
-        // Closure to construct commitment to vector of values
-        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>, max_bits: usize| {
-            params
-                .commit_lagrange_with_bound(values, max_bits)
-                .to_affine()
-        };
-
         #[cfg(feature = "sanity-checks")]
         {
             let random = F::random(&mut rng);
@@ -211,9 +204,16 @@ impl<F: FieldExt> Argument<F> {
             assert_eq!(last_z, F::zero());
         }
 
+        // Closure to construct commitment to vector of values
+        let commit_values = |values: &Polynomial<C::Scalar, LagrangeCoeff>, max_bits: usize| {
+            params
+                .commit_lagrange_with_bound(values, max_bits)
+                .to_affine()
+        };
+
         multiplicity_values.truncate(usable_row);
 
-        let m_max_bits = expression_max_bits::<C>(&multiplicity_values);
+        let m_max_bits = expression_max_bits::<C>(&multiplicity_values[..]);
         multiplicity_values.extend(
             (0..(blinding_factors + 1)).map(|_| C::Scalar::from(u16::rand(&mut rng) as u64)),
         );
@@ -240,7 +240,7 @@ impl<F: FieldExt> Argument<F> {
 impl<C: CurveAffine> Compressed<C> {
     /// Given a Lookup with input expressions, table expressions, and the multiplicity
     /// expression, this method constructs the grand sum polynomial over the lookup.
-    pub(in crate::plonk) fn commit_grand_sum(
+    pub(in crate::plonk) fn commit_z(
         self,
         pk: &ProvingKey<C>,
         params: &Params<C>,
@@ -254,50 +254,50 @@ impl<C: CurveAffine> Compressed<C> {
             RHS = τ(X) * Π(φ_i(X)) * (∑ 1/(φ_i(X)) - m(X) / τ(X))))
         */
 
-        let mut grand_sum = vec![C::Scalar::zero(); params.n as usize];
+        let mut grand_sum_base = vec![C::Scalar::zero(); params.n as usize];
 
         for input in self.compressed_input_expression_sets[0].0.iter() {
             let mut fi_sum = vec![C::Scalar::zero(); params.n as usize];
-            parallelize(&mut fi_sum, |sum, start| {
-                for (sum_value, expression_value) in sum.iter_mut().zip(input[start..].iter()) {
-                    *sum_value += &(*beta + expression_value);
+            parallelize(&mut fi_sum, |sum_values, start| {
+                for (sum, input_value) in sum_values.iter_mut().zip(input[start..].iter()) {
+                    *sum += &(*beta + input_value);
                 }
             });
             batch_invert(&mut fi_sum);
-            parallelize(&mut grand_sum, |sum, start| {
-                for (sum_value, expression_value) in sum.iter_mut().zip(fi_sum[start..].iter()) {
-                    *sum_value += expression_value;
+            parallelize(&mut grand_sum_base, |sum_values, start| {
+                for (sum, fi) in sum_values.iter_mut().zip(fi_sum[start..].iter()) {
+                    *sum += fi;
                 }
             });
         }
 
         let mut table_sum = vec![C::Scalar::zero(); params.n as usize];
-        parallelize(&mut table_sum, |sum, start| {
-            for (sum_value, expression_value) in sum
+        parallelize(&mut table_sum, |sum_values, start| {
+            for (sum, table) in sum_values
                 .iter_mut()
                 .zip(self.compressed_table_expression[start..].iter())
             {
-                *sum_value += &(*beta + expression_value);
+                *sum += &(*beta + table);
             }
         });
         batch_invert(&mut table_sum);
-        parallelize(&mut grand_sum, |sum, start| {
-            for ((sum_value, table_value), m_value) in sum
+        parallelize(&mut grand_sum_base, |sum_values, start| {
+            for ((sum, table), m) in sum_values
                 .iter_mut()
                 .zip(table_sum[start..].iter())
                 .zip(self.multiplicity_expression[start..].iter())
             {
                 // (Σ 1/(φ_i(X)) - m(X) / τ(X))
-                *sum_value = *sum_value - &(*table_value * m_value);
+                *sum = *sum - &(*table * m);
             }
         });
         /*
-             omit table case in group
+             omit table in extra input set
              φ_i(X) = f_i(X) + beta
              LHS = Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
              RHS = Π(φ_i(X)) * (∑ 1/(φ_i(X)))
         */
-        let mut grand_sum_group = vec![
+        let mut grand_sum_extra_set = vec![
             vec![C::Scalar::zero(); params.n as usize];
             self.compressed_input_expression_sets.len() - 1
         ];
@@ -309,16 +309,16 @@ impl<C: CurveAffine> Compressed<C> {
         {
             for input in set.0.iter() {
                 let mut fi_sum = vec![C::Scalar::zero(); params.n as usize];
-                parallelize(&mut fi_sum, |sum, start| {
-                    for (sum_value, expression_value) in sum.iter_mut().zip(input[start..].iter()) {
-                        *sum_value += &(*beta + expression_value);
+                parallelize(&mut fi_sum, |sum_values, start| {
+                    for (sum, input) in sum_values.iter_mut().zip(input[start..].iter()) {
+                        *sum += &(*beta + input);
                     }
                 });
                 batch_invert(&mut fi_sum);
-                parallelize(&mut grand_sum_group[i], |sum, start| {
-                    for (sum_value, expression_value) in sum.iter_mut().zip(fi_sum[start..].iter())
+                parallelize(&mut grand_sum_extra_set[i], |sum_values, start| {
+                    for (sum, expression_value) in sum_values.iter_mut().zip(fi_sum[start..].iter())
                     {
-                        *sum_value += expression_value;
+                        *sum += expression_value;
                     }
                 });
             }
@@ -329,8 +329,8 @@ impl<C: CurveAffine> Compressed<C> {
         // { |--- usable rows --|z[last]|-- blinding rows --| }
         let u = (params.n as usize) - (blinding_factors + 1);
         let mut last_z = C::Scalar::zero();
-        let raw_zs = iter::once(&grand_sum)
-            .chain(grand_sum_group.iter().map(|inner| inner))
+        let raw_zs = iter::once(&grand_sum_base)
+            .chain(grand_sum_extra_set.iter())
             .map(|grand_sum| {
                 let z = iter::once(&last_z)
                     .chain(grand_sum)
@@ -367,11 +367,12 @@ impl<C: CurveAffine> Compressed<C> {
             // l_last(X) * (z_last(X)) = 0
             assert_eq!(z_last[u], C::Scalar::zero());
 
-            let mut phi_chunk_sums = self
+            let mut inputs_set_sums = self
                 .compressed_input_expression_sets
                 .iter()
                 .map(|input_expression_set| {
                     (0..u)
+                        .into_par_iter()
                         .map(|i| {
                             input_expression_set
                                 .0
@@ -383,19 +384,25 @@ impl<C: CurveAffine> Compressed<C> {
                 })
                 .collect::<Vec<_>>();
 
-            for ((phi, table), m) in phi_chunk_sums[0]
-                .iter_mut()
-                .zip(self.compressed_table_expression.iter())
-                .zip(self.multiplicity_expression.iter())
-            {
-                *phi = *phi - *m * &(*table + *beta).invert().unwrap();
-            }
+            inputs_set_sums[0]
+                .par_iter_mut()
+                .zip(self.compressed_table_expression.par_iter())
+                .zip(self.multiplicity_expression.par_iter())
+                .for_each(|((phi, table), m)| {
+                    *phi = *phi - *m * &(*beta + table).invert().unwrap()
+                });
 
-            for (j, phi_chunk_sum) in phi_chunk_sums.iter().enumerate() {
-                for (i, phi_sum) in phi_chunk_sum.iter().enumerate() {
-                    assert_eq!(raw_zs[j][i + 1], *phi_sum + raw_zs[j][i]);
-                }
-            }
+            inputs_set_sums
+                .par_iter()
+                .enumerate()
+                .for_each(|(i, inputs_set_sum)| {
+                    inputs_set_sum
+                        .par_iter()
+                        .enumerate()
+                        .for_each(|(j, phi_sum)| {
+                            assert_eq!(raw_zs[i][j + 1], *phi_sum + raw_zs[i][j]);
+                        })
+                });
 
             raw_zs
                 .iter()
@@ -421,7 +428,7 @@ impl<C: CurveAffine> Committed<C> {
 
         let mut eval_set = vec![(&self.multiplicity_poly, *x)];
 
-        let mut iter = self.grand_sum_poly_set.iter();
+        let mut iter = self.z_poly_set.iter();
         while let Some(poly) = iter.next() {
             eval_set.push((poly, *x));
             eval_set.push((poly, x_next));
@@ -459,41 +466,36 @@ impl<C: CurveAffine> Evaluated<C> {
                 rotation: Rotation::cur(),
                 poly: &self.constructed.multiplicity_poly,
             }))
+            .chain(self.constructed.z_poly_set.iter().flat_map(move |z_poly| {
+                iter::empty() // Open lookup grand sum commitments at x
+                    .chain(Some(ProverQuery {
+                        point: *x,
+                        rotation: Rotation::cur(),
+                        poly: z_poly,
+                    }))
+                    // Open lookup grand sum commitments at x_next
+                    .chain(Some(ProverQuery {
+                        point: x_next,
+                        rotation: Rotation::next(),
+                        poly: z_poly,
+                    }))
+            }))
             .chain(
                 self.constructed
-                    .grand_sum_poly_set
-                    .iter()
-                    .flat_map(move |grand_sum_poly| {
-                        iter::empty() // Open lookup grand sum commitments at x
-                            .chain(Some(ProverQuery {
-                                point: *x,
-                                rotation: Rotation::cur(),
-                                poly: grand_sum_poly,
-                            }))
-                            // Open lookup grand sum commitments at x_next
-                            .chain(Some(ProverQuery {
-                                point: x_next,
-                                rotation: Rotation::next(),
-                                poly: grand_sum_poly,
-                            }))
-                    }),
-            )
-            .chain(
-                self.constructed
-                    .grand_sum_poly_set
+                    .z_poly_set
                     .iter()
                     .rev()
                     .skip(1)
-                    .map(move |grand_sum_poly| ProverQuery {
+                    .map(move |z_poly| ProverQuery {
                         point: x_last,
                         rotation: Rotation(-((blinding_factors + 1) as i32)),
-                        poly: grand_sum_poly,
+                        poly: z_poly,
                     }),
             )
     }
 }
 
-fn expression_max_bits<C: CurveAffine>(expression: &Vec<C::Scalar>) -> usize {
+fn expression_max_bits<C: CurveAffine>(expression: &[C::Scalar]) -> usize {
     let max_val = *expression.iter().reduce(|a, b| a.max(b)).unwrap();
 
     let get_scalar_bits = |x: C::Scalar| {

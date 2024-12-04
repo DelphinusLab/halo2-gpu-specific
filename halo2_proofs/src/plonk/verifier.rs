@@ -218,7 +218,7 @@ pub fn verify_proof_ext<
                 .iter()
                 .zip(multiplicity_commiments)
                 .map(|(argument, multiplicity_commitment)| {
-                    argument.read_grand_sum_commitment(transcript, multiplicity_commitment)
+                    argument.read_z_commitment(transcript, multiplicity_commitment)
                 })
                 .collect::<Result<Vec<_>, _>>()
         })

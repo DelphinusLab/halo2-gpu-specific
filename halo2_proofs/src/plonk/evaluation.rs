@@ -505,19 +505,15 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .map(|(_, v)| v.clone())
                                     .reduce(|acc, e| {
                                         LookupProveExpression::Op(
-                                            Box::new(acc.clone()),
-                                            Box::new(e.clone()),
+                                            Box::new(acc),
+                                            Box::new(e),
                                             Bop::Product,
                                         )
                                     })
                                     .unwrap()
                             })
                             .reduce(|acc, e| {
-                                LookupProveExpression::Op(
-                                    Box::new(acc),
-                                    Box::new(e.clone()),
-                                    Bop::Sum,
-                                )
+                                LookupProveExpression::Op(Box::new(acc), Box::new(e), Bop::Sum)
                             })
                             .unwrap()
                     } else {
@@ -809,7 +805,7 @@ impl<C: CurveAffine> Evaluator<C> {
         let mut values = domain.empty_extended();
 
         // calculate total number of extra inputs set
-        let num_extra_lookup_input: usize = pk
+        let num_total_extra_lookup_set: usize = pk
             .vk
             .cs
             .lookups
@@ -820,9 +816,9 @@ impl<C: CurveAffine> Evaluator<C> {
         let mut lookup_input_product_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_sum_values = vec![C::Scalar::zero(); size * num_lookups];
         let mut lookup_input_product_set_values =
-            vec![C::Scalar::zero(); size * num_extra_lookup_input];
+            vec![C::Scalar::zero(); size * num_total_extra_lookup_set];
         let mut lookup_input_product_sum_set_values =
-            vec![C::Scalar::zero(); size * num_extra_lookup_input];
+            vec![C::Scalar::zero(); size * num_total_extra_lookup_set];
 
         let mut shuffle_input_values = vec![C::Scalar::zero(); size * num_shuffles];
         let mut shuffle_table_values = vec![C::Scalar::zero(); size * num_shuffles];
@@ -1102,7 +1098,7 @@ impl<C: CurveAffine> Evaluator<C> {
             */
             let mut lookup_ext_input_set_offset = 0;
             for (lookup_idx, lookup) in lookups.iter().enumerate() {
-                let sets_len = lookup.grand_sum_poly_set.len();
+                let sets_len = lookup.z_poly_set.len();
                 // Lookup constraints
                 let table = &lookup_table_values[lookup_idx * size..(lookup_idx + 1) * size];
                 let input_product =
@@ -1127,8 +1123,8 @@ impl<C: CurveAffine> Evaluator<C> {
                 // Polynomials required for this lookup.
                 // Calculated here so these only have to be kept in memory for the short time
                 // they are actually needed.
-                let grand_sum_coset_set = lookup
-                    .grand_sum_poly_set
+                let z_coset_set = lookup
+                    .z_poly_set
                     .iter()
                     .map(|poly| pk.vk.domain.coeff_to_extended(poly.clone()))
                     .collect::<Vec<_>>();
@@ -1146,19 +1142,18 @@ impl<C: CurveAffine> Evaluator<C> {
                         let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
                         let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
-                        // l_0(X) * z(X) = 0
-                        *value = *value * y + (grand_sum_coset_set[0][idx] * l0[idx]);
+                        // l_0(X) * z_first(X) = 0
+                        *value = *value * y + (z_coset_set[0][idx] * l0[idx]);
 
-                        // l_last(X) * z(X) = 0
-                        *value =
-                            *value * y + (grand_sum_coset_set[sets_len - 1][idx] * l_last[idx]);
+                        // l_last(X) * z_last(X) = 0
+                        *value = *value * y + (z_coset_set[sets_len - 1][idx] * l_last[idx]);
 
+                        // lookup first table + input set
                         // (1 - (l_last(X) + l_blind(X))) * (
                         //   τ(X) * Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                         //   - ∑_i τ(X) * Π_{j != i} φ_j(X) + m(X) * Π(φ_i(X))
                         // ) = 0
-                        let z_gx_minus_z_x =
-                            grand_sum_coset_set[0][r_next] - grand_sum_coset_set[0][idx];
+                        let z_gx_minus_z_x = z_coset_set[0][r_next] - z_coset_set[0][idx];
                         *value = *value * y
                             + (((z_gx_minus_z_x * table[idx] + m_poly_coset[idx])
                                 * input_product[idx]
@@ -1168,18 +1163,16 @@ impl<C: CurveAffine> Evaluator<C> {
                         // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
                         for i in 1..sets_len {
                             *value = *value * y
-                                + ((grand_sum_coset_set[i][idx]
-                                    - grand_sum_coset_set[i - 1][r_last])
-                                    * l0[idx]);
+                                + ((z_coset_set[i][idx] - z_coset_set[i - 1][r_last]) * l0[idx]);
                         }
 
+                        // lookup extra inputs set
                         // (1 - (l_last(X) + l_blind(X))) * (
                         //   Π(φ_i(X)) * (ϕ(gX) - ϕ(X))
                         //   - ∑_i Π_{j != i} φ_j(X))
                         // ) = 0
                         for i in 1..sets_len {
-                            let z_gx_minus_z_x =
-                                grand_sum_coset_set[i][r_next] - grand_sum_coset_set[i][idx];
+                            let z_gx_minus_z_x = z_coset_set[i][r_next] - z_coset_set[i][idx];
                             *value = *value * y
                                 + ((z_gx_minus_z_x * ext_input_product_set[i - 1][idx]
                                     - ext_input_product_sum_set[i - 1][idx])
@@ -1576,7 +1569,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                 .expect("Invalid HALO2_PROOF_GPU_EVAL_CACHE");
                             let mut unit_cache = super::evaluation_gpu::Cache::new(cache_size);
                             for (lookup_idx, lookup) in lookups.iter().enumerate() {
-                                let sets_len = lookup.grand_sum_poly_set.len();
+                                let sets_len = lookup.z_poly_set.len();
                                 let mut ys = vec![C::ScalarExt::one(), y];
                                 let table_buf = pk.ev.gpu_lookup_expr
                                     [lookup_idx + group_idx * group_expr_len]
@@ -1642,24 +1635,24 @@ impl<C: CurveAffine> Evaluator<C> {
                                     &mut allocator,
                                     &mut helper,
                                 )?;
-                                let first_grand_sum_buf = do_extended_fft(
+                                let first_z_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.grand_sum_poly_set[0],
+                                    &lookup.z_poly_set[0],
                                     &mut allocator,
                                     &mut helper,
                                 )?;
-                                let last_grand_sum_buf = do_extended_fft(
+                                let last_z_buf = do_extended_fft(
                                     pk,
                                     program,
-                                    &lookup.grand_sum_poly_set[sets_len - 1],
+                                    &lookup.z_poly_set[sets_len - 1],
                                     &mut allocator,
                                     &mut helper,
                                 )?;
 
                                 let local_work_size = 128;
                                 let global_work_size = size / local_work_size;
-                                let kernel_name = format!("{}_eval_h_logups", "Bn256_Fr");
+                                let kernel_name = format!("{}_eval_h_logup", "Bn256_Fr");
                                 let kernel = program.create_kernel(
                                     &kernel_name,
                                     global_work_size as usize,
@@ -1671,8 +1664,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(input_product_buf.as_ref())
                                     .arg(input_product_sum_buf.as_ref())
                                     .arg(&m_poly_buf)
-                                    .arg(&first_grand_sum_buf)
-                                    .arg(&last_grand_sum_buf)
+                                    .arg(&first_z_buf)
+                                    .arg(&last_z_buf)
                                     .arg(&l0_buf)
                                     .arg(&l_last_buf)
                                     .arg(&l_active_row_buf)
@@ -1681,17 +1674,16 @@ impl<C: CurveAffine> Evaluator<C> {
                                     .arg(&(size as u32))
                                     .run()?;
 
-                                let mut prev_grand_sum_buf = first_grand_sum_buf;
+                                let mut prev_z_buf = first_z_buf;
                                 for i in 1..sets_len - 1 {
-                                    let curr_grand_sum_buf = do_extended_fft(
+                                    let curr_z_buf = do_extended_fft(
                                         pk,
                                         program,
-                                        &lookup.grand_sum_poly_set[i],
+                                        &lookup.z_poly_set[i],
                                         &mut allocator,
                                         &mut helper,
                                     )?;
-                                    let kernel_name =
-                                        format!("{}_eval_h_logup_grand_sum", "Bn256_Fr");
+                                    let kernel_name = format!("{}_eval_h_logup_z", "Bn256_Fr");
                                     let kernel = program.create_kernel(
                                         &kernel_name,
                                         global_work_size as usize,
@@ -1699,20 +1691,19 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )?;
                                     kernel
                                         .arg(&values_buf)
-                                        .arg(&curr_grand_sum_buf)
-                                        .arg(&prev_grand_sum_buf)
+                                        .arg(&curr_z_buf)
+                                        .arg(&prev_z_buf)
                                         .arg(&l0_buf)
                                         .arg(&y_beta_gamma_buf)
                                         .arg(&(last_rotation.0 * rot_scale + size as i32))
                                         .arg(&(size as u32))
                                         .run()?;
-                                    allocator.push_back(prev_grand_sum_buf);
-                                    prev_grand_sum_buf = curr_grand_sum_buf;
+                                    allocator.push_back(prev_z_buf);
+                                    prev_z_buf = curr_z_buf;
                                 }
                                 if sets_len > 1 {
-                                    let curr_grand_sum_buf = last_grand_sum_buf;
-                                    let kernel_name =
-                                        format!("{}_eval_h_logup_grand_sum", "Bn256_Fr");
+                                    let curr_z_buf = last_z_buf;
+                                    let kernel_name = format!("{}_eval_h_logup_z", "Bn256_Fr");
                                     let kernel = program.create_kernel(
                                         &kernel_name,
                                         global_work_size as usize,
@@ -1720,14 +1711,14 @@ impl<C: CurveAffine> Evaluator<C> {
                                     )?;
                                     kernel
                                         .arg(&values_buf)
-                                        .arg(&curr_grand_sum_buf)
-                                        .arg(&prev_grand_sum_buf)
+                                        .arg(&curr_z_buf)
+                                        .arg(&prev_z_buf)
                                         .arg(&l0_buf)
                                         .arg(&y_beta_gamma_buf)
                                         .arg(&(last_rotation.0 * rot_scale + size as i32))
                                         .arg(&(size as u32))
                                         .run()?;
-                                    allocator.push_back(prev_grand_sum_buf);
+                                    allocator.push_back(prev_z_buf);
                                 }
 
                                 for i in 1..sets_len {
@@ -1769,18 +1760,17 @@ impl<C: CurveAffine> Evaluator<C> {
                                         .unwrap()
                                         .0;
 
-                                    let grand_sum_buf = do_extended_fft(
+                                    let z_buf = do_extended_fft(
                                         pk,
                                         program,
-                                        &lookup.grand_sum_poly_set[i],
+                                        &lookup.z_poly_set[i],
                                         &mut allocator,
                                         &mut helper,
                                     )?;
 
                                     let local_work_size = 128;
                                     let global_work_size = size / local_work_size;
-                                    let kernel_name =
-                                        format!("{}_eval_h_logups_extend", "Bn256_Fr");
+                                    let kernel_name = format!("{}_eval_h_logup_extra", "Bn256_Fr");
                                     let kernel = program.create_kernel(
                                         &kernel_name,
                                         global_work_size as usize,
@@ -1790,7 +1780,7 @@ impl<C: CurveAffine> Evaluator<C> {
                                         .arg(&values_buf)
                                         .arg(input_product_buf.as_ref())
                                         .arg(input_product_sum_buf.as_ref())
-                                        .arg(&grand_sum_buf)
+                                        .arg(&z_buf)
                                         .arg(&l_active_row_buf)
                                         .arg(&y_beta_gamma_buf)
                                         .arg(&(rot_scale as u32))
@@ -1816,19 +1806,19 @@ impl<C: CurveAffine> Evaluator<C> {
                         })
                         .unwrap();
                     release_gpu(gpu_idx);
-                    let y_pow = lookups
+                    let y_times = lookups
                         .iter()
                         .map(|lookup| {
-                            // both grand_sum check and extend input check need extra sets_len-1 times y
-                            2 * (lookup.grand_sum_poly_set.len() - 1) + 3
+                            // base :3 + extra z and input set: 2*(sets_len-1)
+                            3 + 2 * (lookup.z_poly_set.len() - 1)
                         })
                         .sum::<usize>();
-                    (tmp_value, y_pow)
+                    (tmp_value, y_times)
                 })
                 .collect::<Vec<_>>()
                 .iter()
-                .fold(values, |acc, (x, y_pow)| {
-                    acc * y.pow_vartime([*y_pow as u64, 0, 0, 0]) + x
+                .fold(values, |acc, (x, y_times)| {
+                    acc * y.pow_vartime([*y_times as u64, 0, 0, 0]) + x
                 });
         }
 
