@@ -147,11 +147,7 @@ impl<F: FieldExt, const W: usize, const H: usize, const T: usize, const B: usize
         MyConfig::configure(meta)
     }
 
-    fn synthesize(
-        &self,
-        config: Self::Config,
-        layouter: impl Layouter<F>,
-    ) -> Result<(), Error> {
+    fn synthesize(&self, config: Self::Config, layouter: impl Layouter<F>) -> Result<(), Error> {
         let theta = F::from(T as u64);
         let beta = F::from(B as u64);
 

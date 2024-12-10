@@ -1101,15 +1101,16 @@ pub struct ConstraintSystem<F: Field> {
     // Permutation argument for performing equality constraints
     pub permutation: permutation::Argument,
 
-    // Vector of lookup arguments, where each corresponds to a sequence of
+    // Vector of lookup arguments, where each corresponds to a group of sequence of
     // input expressions and a sequence of table expressions involved in the lookup.
     pub lookups: Vec<logup::Argument<F>>,
+    // Vector to record all the lookup arguments applied by lookup api in configure stage
     pub lookup_tracer: Option<BTreeMap<String, logup::ArgumentTracer<F>>>,
 
-    // Vector of shuffle arguments, where each corresponds to a sequence of
-    // input expressions and a sequence of table expressions involved in the shuffle.
+    // Vector of shuffle arguments, where each corresponds to a group of a sequence of
+    // input expressions and table expressions involved in the shuffle.
     pub shuffles: Vec<shuffle::Argument<F>>,
-    // trace all the shuffle argument in configure stage, and then chunk them
+    // trace all the unit shuffle argument in configure stage, and then group them to shuffles
     pub shuffle_tracer: Vec<shuffle::ArgumentUnit<F>>,
 
     // Vector of range check arguments based on shuffle, where each corresponds to an
@@ -1298,7 +1299,10 @@ impl<F: Field> ConstraintSystem<F> {
             .as_mut()
             .unwrap()
             .entry(table_identifier)
-            .and_modify(|e| e.input_expression_set.push(input_expressions.clone()))
+            .and_modify(|e| {
+                e.input_expression_set
+                    .push((name.into(), input_expressions.clone()))
+            })
             .or_insert(logup::ArgumentTracer::new(
                 name,
                 input_expressions,
@@ -1332,7 +1336,10 @@ impl<F: Field> ConstraintSystem<F> {
             .as_mut()
             .unwrap()
             .entry(table_identifier)
-            .and_modify(|e| e.input_expression_set.push(input_expressions.clone()))
+            .and_modify(|e| {
+                e.input_expression_set
+                    .push((name.into(), input_expressions.clone()))
+            })
             .or_insert(logup::ArgumentTracer::new(
                 name,
                 input_expressions,

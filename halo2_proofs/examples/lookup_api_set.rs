@@ -62,13 +62,13 @@ impl<F: FieldExt> SimpleChip<F> {
             vec![s0 * (input_0 * F::from(1) - input_1)]
         });
 
-        //set 1
+        //set 0
         meta.lookup("table0", |meta| {
             let input_0 = meta.query_advice(inputs[0], Rotation::cur());
             [(input_0, table)].to_vec()
         });
 
-        //set 2
+        //set 1
         meta.lookup("table1", |meta| {
             let input_1 = meta.query_advice(inputs[1], Rotation::cur());
             [(input_1 * F::from(2), table)].to_vec()
@@ -78,7 +78,7 @@ impl<F: FieldExt> SimpleChip<F> {
             [(input_2, table)].to_vec()
         });
 
-        //set 3
+        //set 2
         meta.lookup("table3", |meta| {
             let input_3 = meta.query_advice(inputs[3], Rotation::cur());
             [(input_3 * F::from(10), table)].to_vec()
@@ -88,7 +88,7 @@ impl<F: FieldExt> SimpleChip<F> {
             [(input_4, table)].to_vec()
         });
 
-        //set 4
+        //set 3
         meta.lookup("table5", |meta| {
             let input_5 = meta.query_advice(inputs[5], Rotation::cur());
             [(input_5, table)].to_vec()

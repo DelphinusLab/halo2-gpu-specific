@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 pub(crate) mod prover;
 pub(crate) mod verifier;
 
+// group of shuffle ArgumentUnit
 #[derive(Clone, Debug)]
 pub struct Argument<F: Field>(pub Vec<ArgumentUnit<F>>);
 

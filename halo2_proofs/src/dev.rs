@@ -173,10 +173,15 @@ pub enum VerifyFailure {
     Lookup {
         /// The name of the lookup that is not satisfied.
         name: &'static str,
-        /// The index of the lookup that is not satisfied. These indices are assigned in
+        /// The index of the lookup that is not satisfied. the lookup contains one table and multiple inputs set
+        /// This index are not originally assigned in
         /// the order in which `ConstraintSystem::lookup` is called during
         /// `Circuit::configure`.
         lookup_index: usize,
+        /// the failed input set index in lookup index
+        input_set_index: usize,
+        /// the failed input index in input set
+        input_fail_index: usize,
         /// The location at which the lookup is not satisfied.
         ///
         /// `FailureLocation::InRegion` is most common, and may be due to the intentional
@@ -247,12 +252,14 @@ impl fmt::Display for VerifyFailure {
             Self::Lookup {
                 name,
                 lookup_index,
+                input_set_index,
+                input_fail_index,
                 location,
             } => {
                 write!(
                     f,
-                    "Lookup {}(index: {}) is not satisfied {}",
-                    name, lookup_index, location
+                    "Lookup {}(index: {}, set: {}, input: {}) is not satisfied {}",
+                    name, lookup_index, input_set_index, input_fail_index, location
                 )
             }
             Self::Shuffle {
@@ -1140,7 +1147,6 @@ impl<F: FieldExt> MockVerifier<F> {
                                 .collect::<Vec<_>>()
                         })
                         .collect();
-                    //todo test more for logup
                     lookup_input_row_ids
                         .clone()
                         .into_iter()
@@ -1172,16 +1178,19 @@ impl<F: FieldExt> MockVerifier<F> {
                             if lookup_fail_idx.is_none() {
                                 None
                             } else {
-                                let (input_set_idx, input_fail_idx) = lookup_fail_idx.unwrap();
+                                // the failed input name can be found by opening debug print in logup's chunks() function
+                                let (input_set_index, input_fail_index) = lookup_fail_idx.unwrap();
                                 Some(VerifyFailure::Lookup {
                                     name: lookup.name,
                                     lookup_index,
+                                    input_set_index,
+                                    input_fail_index,
                                     location: FailureLocation::find_expressions(
                                         &self.cs,
                                         &self.regions,
                                         input_row,
-                                        lookup.input_expressions_sets[input_set_idx].0
-                                            [input_fail_idx]
+                                        lookup.input_expressions_sets[input_set_index].0
+                                            [input_fail_index]
                                             .iter(),
                                     ),
                                 })
@@ -1240,7 +1249,7 @@ impl<F: FieldExt> MockVerifier<F> {
                                 .flat_map(|((input_value, row), shuffle_value)| {
                                     if input_value != shuffle_value {
                                         Some(VerifyFailure::Shuffle {
-                                            name: shuffle.name.clone(),
+                                            name: shuffle.name,
                                             group_index,
                                             shuffle_index,
                                             location: FailureLocation::find_expressions(
@@ -1513,6 +1522,8 @@ mod tests {
             Err(vec![VerifyFailure::Lookup {
                 name: "lookup",
                 lookup_index: 0,
+                input_set_index: 0,
+                input_fail_index: 0,
                 location: FailureLocation::InRegion {
                     region: (2, "Faulty synthesis").into(),
                     offset: 1,

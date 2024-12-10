@@ -65,7 +65,7 @@ impl<F: Field> Argument<F> {
 pub struct ArgumentTracer<F: Field> {
     pub name: &'static str,
     pub table_expressions: Vec<Expression<F>>,
-    pub input_expression_set: Vec<Vec<Expression<F>>>,
+    pub input_expression_set: Vec<(String, Vec<Expression<F>>)>,
 }
 
 impl<F: Field> ArgumentTracer<F> {
@@ -76,7 +76,7 @@ impl<F: Field> ArgumentTracer<F> {
     ) -> Self {
         ArgumentTracer {
             name,
-            input_expression_set: vec![input_expressions],
+            input_expression_set: vec![(name.into(), input_expressions)],
             table_expressions,
         }
     }
@@ -90,10 +90,13 @@ impl<F: Field> ArgumentTracer<F> {
         let mut argument = Argument {
             name: self.name,
             table_expressions: self.table_expressions.clone(),
-            input_expressions_sets: vec![InputExpressionSet(vec![
-                self.input_expression_set[0].clone()
-            ])],
+            input_expressions_sets: vec![InputExpressionSet(vec![self.input_expression_set[0]
+                .1
+                .clone()])],
         };
+        // records inputs name in lookup argument set
+        let mut argument_inputs_sets = vec![vec![self.input_expression_set[0].0.clone()]];
+
         let mut extra_input_expressions_sets: Vec<InputExpressionSet<F>> = vec![];
         let table_degree = self
             .table_expressions
@@ -103,7 +106,7 @@ impl<F: Field> ArgumentTracer<F> {
             .unwrap();
 
         for input in self.input_expression_set.iter().skip(1) {
-            let new_input_degree = input.iter().map(|e| e.degree()).max().unwrap();
+            let new_input_degree = input.1.iter().map(|e| e.degree()).max().unwrap();
             let mut indicator = false;
 
             // 1. table + input_expressions_set case
@@ -113,12 +116,13 @@ impl<F: Field> ArgumentTracer<F> {
                 .map(|e| e.iter().map(|v| v.degree()).max().unwrap())
                 .sum();
             if table_degree + sum + new_input_degree <= max_degree {
-                argument.input_expressions_sets[0].0.push(input.clone());
+                argument.input_expressions_sets[0].0.push(input.1.clone());
+                argument_inputs_sets[0].push(input.0.clone());
                 continue;
             }
 
             // 2. extra input_expressions_set case
-            for set in extra_input_expressions_sets.iter_mut() {
+            for (i, set) in extra_input_expressions_sets.iter_mut().enumerate() {
                 let sum: usize = set
                     .0
                     .iter()
@@ -126,14 +130,16 @@ impl<F: Field> ArgumentTracer<F> {
                     .sum();
                 // inputs set extension degree only care the inputs degree, no table degree
                 if sum + new_input_degree <= max_degree {
-                    set.0.push(input.clone());
+                    set.0.push(input.1.clone());
+                    argument_inputs_sets[i + 1].push(input.0.clone());
                     indicator = true;
                     break;
                 }
             }
             // 3. new InputExpressionSet to extra input_expressions_set
             if !indicator {
-                extra_input_expressions_sets.push(InputExpressionSet(vec![input.clone()]));
+                extra_input_expressions_sets.push(InputExpressionSet(vec![input.1.clone()]));
+                argument_inputs_sets.push(vec![input.0.clone()]);
             }
         }
         argument
@@ -158,17 +164,25 @@ impl<F: Field> ArgumentTracer<F> {
             .sum::<usize>()
             <= max_degree));
 
+        // for debug the failed input name in the inputs sets
+        if false {
+            println!(
+                "lookup name: {:?}, inputs set map: {:?}",
+                self.name, argument_inputs_sets
+            )
+        }
+
         argument
     }
 
     pub(crate) fn required_degree(&self) -> usize {
         for input in self.input_expression_set.iter() {
-            assert_eq!(input.len(), self.table_expressions.len());
+            assert_eq!(input.1.len(), self.table_expressions.len());
         }
 
         let mut input_degree = 1;
         for inputs in self.input_expression_set.iter() {
-            for expr in inputs {
+            for expr in inputs.1.iter() {
                 input_degree = std::cmp::max(input_degree, expr.degree());
             }
         }
