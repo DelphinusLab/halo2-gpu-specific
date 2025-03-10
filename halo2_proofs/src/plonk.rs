@@ -168,7 +168,7 @@ impl<C: CurveAffine> CircuitData<C> {
         let vkey = Self::read_vkey(reader)?;
 
         let fixed = Vec::fetch(reader)?;
-        let permutation = Assembly::vec_fetch(reader)?;
+        let permutation = Assembly::fetch(reader)?;
 
         Ok(CircuitData {
             vkey,
@@ -189,7 +189,7 @@ impl<C: CurveAffine> CircuitData<C> {
         self.vkey.write(fd)?;
 
         self.fixed.store(fd)?;
-        self.permutation.vec_store(fd)?;
+        self.permutation.store(fd)?;
 
         Ok(())
     }
