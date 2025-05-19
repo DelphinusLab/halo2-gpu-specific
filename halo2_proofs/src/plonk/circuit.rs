@@ -1165,10 +1165,10 @@ struct PinnedShuffles<'a, F: Field>(&'a Vec<shuffle::Argument<F>>);
 impl<'a, F: Field> std::fmt::Debug for PinnedShuffles<'a, F> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
         f.debug_list()
-            .entries(self.0.iter().enumerate().map(|(i, group)| {
+            .entries(self.0.iter().enumerate().flat_map(|(i, group)| {
                 group.0.iter().enumerate().map(move |(j, arg)| {
                     (
-                        format!("shuffle {}-{}", i, j),
+                        format!("shuffle{}-{}", i, j),
                         &arg.input_expressions,
                         &arg.shuffle_expressions,
                     )
