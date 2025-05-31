@@ -44,7 +44,7 @@ use std::io;
 
 use self::evaluation::Evaluator;
 use self::permutation::keygen::Assembly;
-
+// use circuit::PinnedForVerifyKey;
 /// This is a verifying key which allows for the verification of proofs for a
 /// particular circuit.
 #[derive(Debug, Clone)]
@@ -117,7 +117,7 @@ impl<C: CurveAffine> VerifyingKey<C> {
             domain: self.domain.pinned(),
             fixed_commitments: &self.fixed_commitments,
             permutation: &self.permutation,
-            cs: self.cs.pinned(),
+            cs: self.cs.pinned().to_string(),
         }
     }
 }
@@ -211,7 +211,7 @@ pub struct PinnedVerificationKey<'a, C: CurveAffine> {
     base_modulus: &'static str,
     scalar_modulus: &'static str,
     domain: PinnedEvaluationDomain<'a, C::Scalar>,
-    cs: PinnedConstraintSystem<'a, C::Scalar>,
+    cs: String,
     fixed_commitments: &'a Vec<C>,
     permutation: &'a permutation::VerifyingKey<C>,
 }

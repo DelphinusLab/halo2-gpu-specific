@@ -11,6 +11,7 @@ use super::range_check::RangeCheckRel;
 use super::{logup, lookup, permutation, range_check, shuffle, Assigned, Error};
 use crate::circuit::Layouter;
 use crate::{circuit::Region, poly::Rotation};
+use std::fmt::Write;
 
 mod compress_selectors;
 
@@ -1124,6 +1125,12 @@ pub struct ConstraintSystem<F: Field> {
     pub(crate) minimum_degree: Option<usize>,
 }
 
+// format pinned struct to string and fill into vk to determine different vk
+// to unify the struct output and ignore some trivial parameters like name in lookup and shuffle argument.
+pub trait PinnedForVerifyKey {
+    fn to_string(&self) -> String;
+}
+
 /// Represents the minimal parameters that determine a `ConstraintSystem`.
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -1144,47 +1151,96 @@ pub struct PinnedConstraintSystem<'a, F: Field> {
     minimum_degree: &'a Option<usize>,
 }
 
+impl<'a, F: Field> PinnedForVerifyKey for PinnedConstraintSystem<'a, F> {
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        s.push_str("PinnedConstraintSystem{");
+        write!(&mut s, "num_fixed_columns:{},", self.num_fixed_columns).expect("num_fixed_columns");
+        write!(&mut s, "num_advice_columns:{},", self.num_advice_columns)
+            .expect("num_advice_columns");
+        write!(
+            &mut s,
+            "num_instance_columns:{},",
+            self.num_instance_columns
+        )
+        .expect("num_instance_columns");
+        write!(&mut s, "num_selectors:{},", self.num_selectors).expect("num_selectors");
+        write!(&mut s, "selector_map:{:?},", self.selector_map).expect("selector_map");
+        write!(&mut s, "gates:{},", self.gates.to_string()).expect("gates");
+        write!(&mut s, "advice_queries:{:?},", self.advice_queries).expect("advice_queries");
+        write!(&mut s, "instance_queries:{:?},", self.instance_queries).expect("instance_queries");
+        write!(&mut s, "fixed_queries:{:?},", self.fixed_queries).expect("fixed_queries");
+        write!(&mut s, "permutation:{:?},", self.permutation).expect("permutation");
+        write!(&mut s, "lookups:{},", self.lookups.to_string()).expect("lookups");
+        write!(&mut s, "shuffles:{},", self.shuffles.to_string()).expect("shuffles");
+        write!(&mut s, "constants:{:?},", self.constants).expect("constants");
+        write!(&mut s, "minimum_degree:{:?}", self.minimum_degree).expect("minimum_degree");
+        s.push_str("}");
+        s
+    }
+}
+
+#[derive(Debug)]
 struct PinnedLookups<'a, F: Field>(&'a Vec<logup::Argument<F>>);
 
-impl<'a, F: Field> std::fmt::Debug for PinnedLookups<'a, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_list()
-            .entries(self.0.iter().enumerate().map(|(i, arg)| {
-                (
-                    format!("lookup{}", i),
-                    &arg.input_expressions_sets,
-                    &arg.table_expressions,
-                )
-            }))
-            .finish()
+// the lookup Argument's name parameter will be discarded when write to file in cs.
+// if take Debug trait directly, the name parameter will be saved and conflict with the data read from vk file
+// so to unify the Argument parameters by PinnedForVerifyKey trait and ignore the trivial parameters like name.
+impl<'a, F: Field> PinnedForVerifyKey for PinnedLookups<'a, F> {
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        s.push_str("[");
+        self.0.iter().enumerate().for_each(|(i, arg)| {
+            write!(&mut s, "(lookup{},", i).unwrap();
+            write!(
+                &mut s,
+                "{:?},{:?}),",
+                arg.input_expressions_sets, arg.table_expressions
+            )
+            .unwrap();
+        });
+        s.push_str("]");
+        s
     }
 }
 
+#[derive(Debug)]
 struct PinnedShuffles<'a, F: Field>(&'a Vec<shuffle::Argument<F>>);
 
-impl<'a, F: Field> std::fmt::Debug for PinnedShuffles<'a, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_list()
-            .entries(self.0.iter().enumerate().flat_map(|(i, group)| {
-                group.0.iter().enumerate().map(move |(j, arg)| {
-                    (
-                        format!("shuffle{}-{}", i, j),
-                        &arg.input_expressions,
-                        &arg.shuffle_expressions,
-                    )
-                })
-            }))
-            .finish()
+impl<'a, F: Field> PinnedForVerifyKey for PinnedShuffles<'a, F> {
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        s.push_str("[");
+        self.0.iter().enumerate().for_each(|(i, group)| {
+            group.0.iter().enumerate().for_each(|(j, arg)| {
+                write!(&mut s, "(shuffle{}-{},", i, j).unwrap();
+                write!(
+                    &mut s,
+                    "{:?},{:?}),",
+                    arg.input_expressions, arg.shuffle_expressions
+                )
+                .unwrap();
+            })
+        });
+        s.push_str("]");
+        s
     }
 }
 
+#[derive(Debug)]
 struct PinnedGates<'a, F: Field>(&'a Vec<Gate<F>>);
 
-impl<'a, F: Field> std::fmt::Debug for PinnedGates<'a, F> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.debug_list()
-            .entries(self.0.iter().flat_map(|gate| gate.polynomials().iter()))
-            .finish()
+impl<'a, F: Field> PinnedForVerifyKey for PinnedGates<'a, F> {
+    fn to_string(&self) -> String {
+        let mut s = String::new();
+        s.push_str("[");
+        self.0.iter().for_each(|gate| {
+            gate.polynomials().iter().for_each(|poly| {
+                write!(&mut s, "{:?},", poly).unwrap();
+            })
+        });
+        s.push_str("]");
+        s
     }
 }
 
