@@ -81,6 +81,19 @@ impl<F: Field> ArgumentTracer<F> {
         }
     }
 
+    //parse the logup tracer for classic lookup
+    pub fn split(&self) -> Vec<(String, Vec<Expression<F>>, Vec<Expression<F>>)> {
+        let mut rst = vec![];
+        for input in self.input_expression_set.iter() {
+            rst.push((
+                input.0.clone(),
+                self.table_expressions.clone(),
+                input.1.clone(),
+            ))
+        }
+        rst
+    }
+
     // chunk the argument tracer's input expressions to sets by required global degree
     pub fn chunks(&self, global_degree: usize) -> Argument<F> {
         //reserve degree 2: (1 - (l_last + l_blind)) (z(wx)-z(x))

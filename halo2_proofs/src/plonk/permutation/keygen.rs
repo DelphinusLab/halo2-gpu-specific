@@ -5,8 +5,10 @@ use std::{
 };
 
 use ark_std::{end_timer, start_timer};
+use core::mem::take;
 use ff::Field;
 use group::Curve;
+use itertools::Itertools;
 use rayon::prelude::*;
 
 use super::{Argument, ProvingKey, VerifyingKey};
@@ -18,6 +20,84 @@ use crate::{
         EvaluationDomain,
     },
 };
+
+#[derive(Debug)]
+pub(crate) struct Permutation {
+    column_idx: HashMap<(Any, usize), usize>,
+    cycles: Vec<HashSet<(usize, usize)>>,
+    cycle_idx: HashMap<(usize, usize), usize>,
+}
+
+impl Permutation {
+    pub(crate) fn new(column_idx: HashMap<(Any, usize), usize>) -> Self {
+        Self {
+            column_idx,
+            cycles: Default::default(),
+            cycle_idx: Default::default(),
+        }
+    }
+
+    pub(crate) fn copy(
+        &mut self,
+        lhs_column: Column<Any>,
+        lhs_row: usize,
+        rhs_column: Column<Any>,
+        rhs_row: usize,
+    ) -> Result<(), Error> {
+        let lhs_idx = *self
+            .column_idx
+            .get(&(*lhs_column.column_type(), lhs_column.index()))
+            .ok_or(Error::ColumnNotInPermutation(lhs_column))?;
+        let rhs_idx = *self
+            .column_idx
+            .get(&(*rhs_column.column_type(), rhs_column.index()))
+            .ok_or(Error::ColumnNotInPermutation(rhs_column))?;
+
+        match (
+            self.cycle_idx.get(&(lhs_idx, lhs_row)).copied(),
+            self.cycle_idx.get(&(rhs_idx, rhs_row)).copied(),
+        ) {
+            (Some(lhs_cycle_idx), Some(rhs_cycle_idx)) => {
+                for cell in self.cycles[rhs_cycle_idx].iter().copied() {
+                    self.cycle_idx.insert(cell, lhs_cycle_idx);
+                }
+                let rhs_cycle = take(&mut self.cycles[rhs_cycle_idx]);
+                self.cycles[lhs_cycle_idx].extend(rhs_cycle);
+            }
+            cycle_idx => {
+                let cycle_idx = if let (Some(cycle_idx), None) | (None, Some(cycle_idx)) = cycle_idx
+                {
+                    cycle_idx
+                } else {
+                    let cycle_idx = self.cycles.len();
+                    self.cycles.push(Default::default());
+                    cycle_idx
+                };
+                for cell in [(lhs_idx, lhs_row), (rhs_idx, rhs_row)] {
+                    self.cycles[cycle_idx].insert(cell);
+                    self.cycle_idx.insert(cell, cycle_idx);
+                }
+            }
+        };
+
+        Ok(())
+    }
+
+    pub(crate) fn into_cycles(self) -> Vec<Vec<(u32, u32)>> {
+        self.cycles
+            .into_iter()
+            .filter_map(|cycle| {
+                (!cycle.is_empty()).then(|| {
+                    cycle
+                        .into_iter()
+                        .sorted()
+                        .map(|(a, b)| (a as u32, b as u32))
+                        .collect_vec()
+                })
+            })
+            .collect()
+    }
+}
 
 #[derive(Debug)]
 pub(crate) struct ParallelAssembly {

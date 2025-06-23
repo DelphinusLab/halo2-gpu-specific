@@ -67,7 +67,7 @@ impl Argument {
         }
     }
 
-    pub(crate) fn get_columns(&self) -> Vec<Column<Any>> {
+    pub fn get_columns(&self) -> Vec<Column<Any>> {
         self.columns.clone()
     }
 }

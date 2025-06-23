@@ -1,10 +1,12 @@
 use crate::plonk::circuit::FloorPlanner;
-use crate::plonk::range_check::RangeCheckRel;
+use crate::plonk::range_check::{RangeCheckRel, RangeCheckRelAssigner};
 use crate::{
     arithmetic::{CurveAffine, FieldExt},
     plonk::{generate_pk_info, keygen_pk_from_info},
     poly::batch_invert_assigned,
 };
+use ark_std::collections::HashMap;
+
 use crate::{
     plonk::{
         self,
@@ -477,6 +479,8 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
     let fixed_queries = read_queries::<Fixed, R>(reader, Fixed)?;
     let permutation = read_arguments(reader)?;
 
+    //todo write to and read from file
+    let lookups_classic = vec![];
     let mut lookups = vec![];
     let nb_lookup = read_u32(reader)?;
     for _ in 0..nb_lookup {
@@ -550,6 +554,7 @@ pub(crate) fn read_cs<C: CurveAffine, R: io::Read>(
         fixed_queries,
         named_advices,
         permutation,
+        lookups_classic,
         lookups,
         lookup_tracer: None,
         shuffles,
@@ -1060,6 +1065,290 @@ impl<F: FieldExt> Serializable for Assigned<F> {
                 Ok(())
             }
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WitnessCollector<'a, C: CurveAffine> {
+    /// The circuit’s logarithmic degree parameter, such that the
+    /// total number of rows is 2^k.
+    pub k: u32,
+
+    /// A thread-safe container holding the assigned values for each
+    /// advice column, represented as polynomials over the field.
+    pub advice: Arc<Mutex<Vec<Polynomial<Assigned<C::Scalar>, LagrangeCoeff>>>>,
+
+    /// Immutable references to the instance column data, indexed by
+    /// column and then by row.
+    pub instances: &'a [&'a [C::Scalar]],
+
+    /// A bijective mapping from each logical row index to its
+    /// corresponding physical row index in the underlying buffers.
+    pub row_mapping: &'a Vec<usize>,
+
+    _marker: PhantomData<C>,
+}
+
+impl<'a, C: CurveAffine> Into<AssignWitnessCollection<'a, C>> for WitnessCollector<'a, C> {
+    /// Converts this collector into a concrete `AssignWitnessCollection`,
+    /// unwrapping internal buffers and establishing the usable row range
+    /// based on the provided mapping length.
+    fn into(self) -> AssignWitnessCollection<'a, C> {
+        AssignWitnessCollection {
+            k: self.k,
+            advice: Arc::try_unwrap(self.advice)
+                .expect("Mutex unwrapping failed")
+                .into_inner()
+                .expect("Poisoned mutex"),
+            instances: self.instances,
+            usable_rows: ..self.row_mapping.len(),
+        }
+    }
+}
+
+impl<'a, C: CurveAffine> Assignment<C::Scalar> for WitnessCollector<'a, C> {
+    /// Indicates that this collector operates in prove-mode, i.e.,
+    /// recording witness values.
+    fn is_in_prove_mode(&self) -> bool {
+        true
+    }
+
+    /// Marks the entry of a named synthesis region. No action required
+    /// for witness collection.
+    fn enter_region<NR, N>(&self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+        // Intentionally left blank.
+    }
+
+    /// Marks the exit of the current synthesis region. No action required.
+    fn exit_region(&self) {
+        // Intentionally left blank.
+    }
+
+    /// Selectors are not pertinent to witness collection and thus are
+    /// not recorded.
+    fn enable_selector<A, AR>(&self, _: A, _: &Selector, _: usize) -> Result<(), Error>
+    where
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        Ok(())
+    }
+
+    /// Retrieves the assigned instance value at a given logical row,
+    /// mapping through `row_mapping` and enforcing bounds.
+    fn query_instance(
+        &self,
+        column: Column<Instance>,
+        row: usize,
+    ) -> Result<Option<C::Scalar>, Error> {
+        self.instances
+            .get(column.index())
+            .and_then(|col| col.get(row))
+            .copied()
+            .map(Some)
+            .ok_or(Error::BoundsFailure)
+    }
+
+    /// Records an advice assignment by mapping the logical row through
+    /// `row_mapping` and updating the corresponding polynomial slot.
+    fn assign_advice<V, VR, A, AR>(
+        &self,
+        _: A,
+        column: Column<Advice>,
+        virtual_row: usize,
+        to: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Result<VR, Error>,
+        VR: Into<Assigned<C::Scalar>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        let real_row = *self
+            .row_mapping
+            .get(virtual_row)
+            .ok_or(Error::not_enough_rows_available(self.k))?;
+
+        let mut advice = self.advice.lock().unwrap();
+        *advice
+            .get_mut(column.index())
+            .and_then(|col| col.get_mut(real_row))
+            .ok_or(Error::BoundsFailure)? = to()?.into();
+
+        Ok(())
+    }
+
+    /// Fixed-column assignments are not captured by this collector.
+    fn assign_fixed<V, VR, A, AR>(
+        &self,
+        _: A,
+        _: Column<Fixed>,
+        _: usize,
+        _: V,
+    ) -> Result<(), Error>
+    where
+        V: FnOnce() -> Result<VR, Error>,
+        VR: Into<Assigned<C::Scalar>>,
+        A: FnOnce() -> AR,
+        AR: Into<String>,
+    {
+        Ok(())
+    }
+
+    /// Copy constraints are not relevant for witness extraction.
+    fn copy(&self, _: Column<Any>, _: usize, _: Column<Any>, _: usize) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Bulk fills are not pertinent for witness collection.
+    fn fill_from_row(
+        &self,
+        _: Column<Fixed>,
+        _: usize,
+        _: Option<Assigned<C::Scalar>>,
+    ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    /// Namespaces are metadata only and do not affect witness values.
+    fn push_namespace<NR, N>(&self, _: N)
+    where
+        NR: Into<String>,
+        N: FnOnce() -> NR,
+    {
+        // Intentionally left blank.
+    }
+
+    /// Exits a namespace; no operation required for witness data.
+    fn pop_namespace(&self, _: Option<String>) {
+        // Intentionally left blank.
+    }
+}
+
+pub fn get_witness<'a, C: CurveAffine, ConcreteCircuit: Circuit<C::Scalar>>(
+    k: u32,
+    instances: &'a [&'a [C::Scalar]],
+    row_mapping: &'a Vec<usize>,
+    circuit: &ConcreteCircuit,
+) -> Result<Vec<Polynomial<C::Scalar, LagrangeCoeff>>, Error> {
+    let mut meta = ConstraintSystem::default();
+    let config = ConcreteCircuit::configure(&mut meta);
+
+    let mut collector = WitnessCollector {
+        k,
+        advice: Arc::new(Mutex::new(vec![
+            Polynomial {
+                values: vec![C::Scalar::zero().into(); 1 << k as usize],
+                _marker: PhantomData,
+            };
+            meta.num_advice_columns
+        ])),
+        instances,
+        row_mapping,
+        _marker: PhantomData,
+    };
+
+    ConcreteCircuit::FloorPlanner::synthesize(
+        &mut collector,
+        circuit,
+        config.clone(),
+        meta.constants.clone(),
+    )?;
+
+    fn get_two_mut<T>(slice: &mut [T], i: usize, j: usize) -> (&mut T, &mut T) {
+        assert!(i != j, "indices must differ");
+        if i < j {
+            let (head, tail) = slice.split_at_mut(j);
+            (&mut head[i], &mut tail[0])
+        } else {
+            let (head, tail) = slice.split_at_mut(i);
+            (&mut tail[0], &mut head[j])
+        }
+    }
+
+    let awc: AssignWitnessCollection<'a, C> = collector.into();
+    let mut polys = batch_invert_assigned(awc.advice);
+
+    {
+        let domain_n = 1u64 << k;
+        let blinding = meta.blinding_factors() as u64;
+
+        let last_active_offset = domain_n - (blinding + 1) - 1;
+        let unusable_rows_start = (domain_n as usize) - ((blinding + 1) as usize);
+
+        for arg in &meta.range_check.0 {
+            let col = arg.origin.index;
+            let mut vr = last_active_offset as usize;
+            let assigner: RangeCheckRelAssigner = arg.into();
+
+            for v in assigner {
+                let rr = row_mapping[vr];
+                polys[col].values[rr] = C::ScalarExt::from(v as u64);
+                vr -= 1;
+            }
+        }
+
+        for arg in &meta.range_check.0 {
+            let a = arg.origin.index;
+            let b = arg.sort.index;
+
+            let (origin_poly, sort_poly) = get_two_mut(&mut polys, a, b);
+            sort_with_mapping::<C::ScalarExt>(
+                &origin_poly.values,
+                &mut sort_poly.values,
+                arg,
+                row_mapping,
+                unusable_rows_start,
+            );
+        }
+    }
+
+    Ok(polys)
+}
+
+pub fn sort_with_mapping<Scalar: FieldExt>(
+    origin_advice: &[Scalar],
+    sort_advice: &mut [Scalar],
+    argument: &RangeCheckRel<Scalar>,
+    row_mapping: &[usize],
+    unusable_rows_start: usize,
+) {
+    let range = (argument.max.0 as usize)
+        .saturating_sub(argument.min.0 as usize)
+        .saturating_add(1);
+    let mut field_to_u32_map = HashMap::<[u64; 4], u32>::with_capacity(range);
+    let mut count_map = vec![0usize; range];
+
+    let mut cur = argument.min.1;
+    for idx in argument.min.0..=argument.max.0 {
+        let raw = unsafe { std::mem::transmute::<_, &[u64; 4]>(&cur) };
+        field_to_u32_map.insert(*raw, idx);
+        cur += Scalar::one();
+    }
+
+    for vr in 0..unusable_rows_start {
+        let rr = row_mapping[vr];
+        let val = &origin_advice[rr];
+        let raw = unsafe { std::mem::transmute::<_, &[u64; 4]>(val) };
+        let mapped = field_to_u32_map.get(raw).expect("value not in range.");
+        let bucket = (*mapped as usize).saturating_sub(argument.min.0 as usize);
+        count_map[bucket] += 1;
+    }
+
+    let mut offset = 0;
+    let mut val = argument.min.1;
+    for cnt in count_map {
+        for _ in 0..cnt {
+            let vr = offset;
+            let rr = row_mapping[vr];
+            sort_advice[rr] = val;
+            offset += 1;
+        }
+        val += Scalar::one();
     }
 }
 

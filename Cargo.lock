@@ -946,6 +946,7 @@ dependencies = [
  "getrandom",
  "group",
  "gumdrop",
+ "itertools",
  "lazy_static",
  "log",
  "memmap",

@@ -263,6 +263,16 @@ impl Selector {
     pub fn is_simple(&self) -> bool {
         self.1
     }
+
+    /// Returns index of this selector
+    pub fn index(&self) -> usize {
+        self.0
+    }
+
+    /// Return expression from selector
+    pub fn expr<F: Field>(&self) -> Expression<F> {
+        Expression::Selector(*self)
+    }
 }
 
 /// A fixed column of a lookup table.
@@ -985,10 +995,6 @@ impl<F: Field> Mul<F> for Expression<F> {
     }
 }
 
-/// Represents an index into a vector where each entry corresponds to a distinct
-/// point that polynomials are queried at.
-#[derive(Copy, Clone, Debug)]
-pub(crate) struct PointIndex(pub usize);
 
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
@@ -1066,7 +1072,7 @@ impl<F: Field> Gate<F> {
         self.constraint_names[constraint_index]
     }
 
-    pub(crate) fn polynomials(&self) -> &[Expression<F>] {
+    pub fn polynomials(&self) -> &[Expression<F>] {
         &self.polys
     }
 
@@ -1083,10 +1089,10 @@ impl<F: Field> Gate<F> {
 /// permutation arrangements.
 #[derive(Debug, Clone)]
 pub struct ConstraintSystem<F: Field> {
-    pub(crate) num_fixed_columns: usize,
+    pub num_fixed_columns: usize,
     pub num_advice_columns: usize,
     pub num_instance_columns: usize,
-    pub(crate) num_selectors: usize,
+    pub num_selectors: usize,
     pub(crate) selector_map: Vec<Column<Fixed>>,
     pub gates: Vec<Gate<F>>,
     pub advice_queries: Vec<(Column<Advice>, Rotation)>,
@@ -1103,6 +1109,7 @@ pub struct ConstraintSystem<F: Field> {
 
     // Vector of lookup arguments, where each corresponds to a group of sequence of
     // input expressions and a sequence of table expressions involved in the lookup.
+    pub lookups_classic: Vec<lookup::Argument<F>>,
     pub lookups: Vec<logup::Argument<F>>,
     // Vector to record all the lookup arguments applied by lookup api in configure stage
     pub lookup_tracer: Option<BTreeMap<String, logup::ArgumentTracer<F>>>,
@@ -1119,7 +1126,7 @@ pub struct ConstraintSystem<F: Field> {
 
     // Vector of fixed columns, which can be used to store constant values
     // that are copied into advice columns.
-    pub(crate) constants: Vec<Column<Fixed>>,
+    pub constants: Vec<Column<Fixed>>,
 
     pub(crate) minimum_degree: Option<usize>,
 }
@@ -1203,6 +1210,7 @@ impl<F: Field> Default for ConstraintSystem<F> {
             num_advice_queries: Vec::new(),
             instance_queries: Vec::new(),
             permutation: permutation::Argument::new(),
+            lookups_classic: Vec::new(),
             lookups: Vec::new(),
             lookup_tracer: Some(BTreeMap::new()),
             shuffles: Vec::new(),
@@ -1262,7 +1270,10 @@ impl<F: Field> ConstraintSystem<F> {
     ) -> (ConcreteCircuit::Config, Self) {
         let config = ConcreteCircuit::configure(&mut self);
         // chunk lookups and shuffles by degree
-        let cs = self.chunk_lookups().chunk_shuffles();
+        let cs = self
+            .logup_tracer_to_classic_lookups()
+            .chunk_lookups()
+            .chunk_shuffles();
 
         (config, cs)
     }
@@ -1363,6 +1374,33 @@ impl<F: Field> ConstraintSystem<F> {
             .unwrap()
             .iter()
             .map(|(_, lookup)| lookup.chunks(self.degree()))
+            .collect::<Vec<_>>();
+        self
+    }
+
+    pub fn logup_tracer_to_classic_lookups(mut self) -> Self {
+        if self.lookup_tracer.as_ref().unwrap().len() == 0 {
+            return self;
+        }
+
+        self.lookups_classic = self
+            .lookup_tracer
+            .as_ref()
+            .unwrap()
+            .iter()
+            .flat_map(|(_, tracer)| {
+                tracer
+                    .split()
+                    .into_iter()
+                    .map(
+                        |(_name, table_expressions, input_expressions)| lookup::Argument {
+                            name: "",
+                            input_expressions,
+                            table_expressions,
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            })
             .collect::<Vec<_>>();
         self
     }

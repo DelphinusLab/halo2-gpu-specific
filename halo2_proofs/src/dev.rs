@@ -622,7 +622,7 @@ impl<F: Field + Group> Assignment<F> for Parallel<MockProver<F>> {
     fn exit_region(&self) {
         let mut prover = self.lock().unwrap();
 
-        let (region, _) = prover.current_region.take().unwrap();
+        let (region, _unused) = prover.current_region.take().unwrap();
         prover.regions.push(region);
     }
 
