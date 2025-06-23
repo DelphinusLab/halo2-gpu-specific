@@ -1284,7 +1284,7 @@ dependencies = [
 [[package]]
 name = "pairing_bn256"
 version = "0.1.1"
-source = "git+https://github.com/lanbones/pairing#30b052f29d7ec3e68e20528584d9495de678ea05"
+source = "git+https://github.com/mooreland/pairing?branch=support_serder#a3b82656530cb104394a316de900c7abd0fbad08"
 dependencies = [
  "bls12_381",
  "ec-gpu",
@@ -1294,6 +1294,7 @@ dependencies = [
  "num-traits",
  "rand",
  "rand_core",
+ "serde",
  "static_assertions",
  "subtle",
 ]
