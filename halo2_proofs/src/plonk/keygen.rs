@@ -428,7 +428,6 @@ pub fn get_preprocess_polys_and_permutations<'a, C, ConcreteCircuit>(
     row_mapping: &'a Vec<usize>,
     permutation_idx: HashMap<(Any, usize), usize>,
     circuit: &ConcreteCircuit,
-    config: &ConcreteCircuit::Config,
 ) -> Result<
     (
         Vec<Polynomial<C::Scalar, LagrangeCoeff>>,
@@ -441,13 +440,9 @@ where
     ConcreteCircuit: Circuit<C::Scalar>,
 {
     let mut cs = ConstraintSystem::default();
-    let _ = ConcreteCircuit::configure(&mut cs);
+    let config = ConcreteCircuit::configure(&mut cs);
 
     use std::iter::Iterator;
-    let permutation_idx: HashMap<(Any, usize), usize> = permutation_idx
-        .iter()
-        .map(|(&(pany, local_idx), &global_idx)| ((pany.into(), local_idx), global_idx))
-        .collect();
 
     let mut assembly: PreprocessCollector<'a, C::Scalar> = PreprocessCollector {
         k,

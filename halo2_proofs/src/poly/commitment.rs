@@ -237,6 +237,14 @@ impl<C: CurveAffine> Params<C> {
         &self.g_lagrange
     }
 
+    pub fn get_k(&self) ->u32{self.k}
+    pub fn get_sg2<E: Engine<G1Affine = C>>(&self)->E::G2Affine{
+        let additional_data = self.additional_data.clone();
+
+        E::G2Affine::read(&mut additional_data.as_slice()).unwrap()
+
+    }
+
     /// Writes params to a buffer.
     pub fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         writer.write_all(&self.k.to_le_bytes())?;

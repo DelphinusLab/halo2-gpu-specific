@@ -32,7 +32,7 @@ use std::{
     ops::RangeTo,
 };
 
-pub(crate) trait CurveRead: CurveAffine {
+pub trait CurveRead: CurveAffine {
     /// Reads a compressed element from the buffer and attempts to parse it
     /// using `from_bytes`.
     fn read<R: io::Read>(reader: &mut R) -> io::Result<Self> {
@@ -63,13 +63,13 @@ pub trait ParaSerializable: Clone {
     fn vec_store(&self, fd: &mut File) -> io::Result<()>;
 }
 
-fn write_u32<W: io::Write>(v: u32, writer: &mut W) -> io::Result<()> {
+pub fn write_u32<W: io::Write>(v: u32, writer: &mut W) -> io::Result<()> {
     writer.write(&v.to_le_bytes())?;
 
     Ok(())
 }
 
-pub(crate) fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
+pub fn read_u32<R: io::Read>(reader: &mut R) -> io::Result<u32> {
     let mut r = [0u8; 4];
     reader.read(&mut r)?;
     Ok(u32::from_le_bytes(r))
