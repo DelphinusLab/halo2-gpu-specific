@@ -86,6 +86,17 @@ impl Serializable for u32 {
     }
 }
 
+impl Serializable for usize {
+    fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
+        let u = u32::fetch(reader)? as usize;
+        Ok(u)
+    }
+    fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
+        (*self as u32).store(writer)?;
+        Ok(())
+    }
+}
+
 impl Serializable for String {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         let len = read_u32(reader)?;
@@ -102,9 +113,10 @@ impl Serializable for String {
     }
 }
 
-impl Serializable for (String, u32) {
+
+impl<U:Serializable,T:Serializable> Serializable for (U, T) {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
-        Ok((String::fetch(reader)?, u32::fetch(reader)?))
+        Ok((U::fetch(reader)?, T::fetch(reader)?))
     }
     fn store<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         self.0.store(writer)?;
@@ -180,6 +192,7 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         Ok(())
     }
 }
+
 
 impl<B: Clone, F: FieldExt> Serializable for Polynomial<F, B> {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
@@ -1018,6 +1031,7 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
         Ok(advice)
     }
 }
+
 
 #[derive(FromPrimitive)]
 enum AssignedCode {

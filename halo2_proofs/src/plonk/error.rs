@@ -39,6 +39,9 @@ pub enum Error {
     ColumnNotInPermutation(Column<Any>),
     /// Not enough rows for extra range values.
     NotEnoughRowsForRangeCheck,
+
+    //other error
+    Other(String),
 }
 
 impl From<io::Error> for Error {
@@ -85,7 +88,8 @@ impl fmt::Display for Error {
                 f,
                 "Not enough rows for auxiliary range values. Try using a larger value of k
                 "
-            )
+            ),
+            Error::Other(s)=>write!(f,"other error{}",s),
         }
     }
 }
