@@ -113,8 +113,7 @@ impl Serializable for String {
     }
 }
 
-
-impl<U:Serializable,T:Serializable> Serializable for (U, T) {
+impl<U: Serializable, T: Serializable> Serializable for (U, T) {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
         Ok((U::fetch(reader)?, T::fetch(reader)?))
     }
@@ -192,7 +191,6 @@ impl ParaSerializable for Vec<Vec<(u32, u32)>> {
         Ok(())
     }
 }
-
 
 impl<B: Clone, F: FieldExt> Serializable for Polynomial<F, B> {
     fn fetch<R: io::Read>(reader: &mut R) -> io::Result<Self> {
@@ -1031,7 +1029,6 @@ impl<'a, C: CurveAffine> AssignWitnessCollection<'a, C> {
         Ok(advice)
     }
 }
-
 
 #[derive(FromPrimitive)]
 enum AssignedCode {

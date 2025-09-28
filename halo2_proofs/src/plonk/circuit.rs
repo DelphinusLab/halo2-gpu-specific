@@ -995,7 +995,6 @@ impl<F: Field> Mul<F> for Expression<F> {
     }
 }
 
-
 /// A "virtual cell" is a PLONK cell that has been queried at a particular relative offset
 /// within a custom gate.
 #[derive(Clone, Debug)]

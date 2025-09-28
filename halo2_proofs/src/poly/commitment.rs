@@ -5,18 +5,21 @@
 
 use super::{Coeff, LagrangeCoeff, Polynomial, MSM};
 use crate::arithmetic::{
-    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, CurveAffine, CurveExt, Engine,
-    FieldExt, Group,
+    best_fft, best_multiexp, best_multiexp_gpu_cond, parallelize, parallelize2, CurveAffine,
+    CurveExt, Engine, FieldExt, Group, MultiMillerLoop,
 };
 use crate::helpers::CurveRead;
 
+use ark_std::{end_timer, start_timer};
 use ff::{Field, PrimeField};
 use group::{prime::PrimeCurveAffine, Curve, Group as _, GroupEncoding};
 use rand_core::OsRng;
+use rayon::iter::IndexedParallelIterator;
+use rayon::iter::IntoParallelRefIterator;
+use rayon::iter::ParallelIterator;
+use std::io;
 use std::marker::PhantomData;
 use std::ops::{Add, AddAssign, Mul, MulAssign};
-
-use std::io;
 
 /// These are the prover parameters for the polynomial commitment scheme.
 #[derive(Debug)]
@@ -26,6 +29,8 @@ pub struct Params<C: CurveAffine> {
     pub g: Vec<C>,
     pub g_lagrange: Vec<C>,
     pub(crate) additional_data: Vec<u8>,
+    pub(crate) sum_inv_add_s_l_g2_data: Vec<u8>,
+    pub g_cross: Vec<C>,
 }
 
 /// These are the verifier parameters for the polynomial commitment scheme.
@@ -36,6 +41,7 @@ pub struct ParamsVerifier<E: Engine> {
     pub g1: E::G1Affine,
     pub g2: E::G2Affine,
     pub s_g2: E::G2Affine,
+    pub sum_inv_add_s_l_g2: E::G2Affine,
     pub g_lagrange: Vec<E::G1Affine>,
 }
 
@@ -64,6 +70,10 @@ impl<C: CurveAffine> Params<C> {
         let g1 = <E::G1Affine as PrimeCurveAffine>::generator();
         let s = E::Scalar::random(OsRng);
 
+        let s_scalar = (0..n)
+            .into_iter()
+            .map(|i| s.pow_vartime(&[i]))
+            .collect::<Vec<_>>();
         let mut g_projective = vec![E::G1::group_zero(); n as usize];
         parallelize(&mut g_projective, |g, start| {
             let mut current_g: E::G1 = g1.into();
@@ -83,6 +93,7 @@ impl<C: CurveAffine> Params<C> {
         };
 
         let mut g_lagrange_projective = vec![E::G1::group_zero(); n as usize];
+
         let mut root = E::Scalar::ROOT_OF_UNITY_INV.invert().unwrap();
         for _ in k..E::Scalar::S {
             root = root.square();
@@ -90,14 +101,52 @@ impl<C: CurveAffine> Params<C> {
         let n_inv = Option::<E::Scalar>::from(E::Scalar::from(n).invert())
             .expect("inversion should be ok for n = 1<<k");
         let multiplier = (s.pow_vartime(&[n as u64]) - E::Scalar::one()) * n_inv;
-        parallelize(&mut g_lagrange_projective, |g, start| {
+
+        //get lagrange scalars [l0,l1,l2..]
+        let mut lag_scalar = vec![E::Scalar::zero(); n as usize];
+        parallelize2(
+            &mut g_lagrange_projective,
+            &mut lag_scalar,
+            |g, lag, start| {
+                for (idx, (g, lg)) in g.iter_mut().zip(lag.iter_mut()).enumerate() {
+                    let offset = start + idx;
+                    let root_pow = root.pow_vartime(&[offset as u64]);
+                    let scalar = multiplier * root_pow * (s - root_pow).invert().unwrap();
+                    *lg = scalar;
+                    *g = g1 * scalar;
+                }
+            },
+        );
+
+        //[s0+l0, s1+l1,...]
+        let s_add_l_scalars = s_scalar
+            .iter()
+            .zip(lag_scalar.iter())
+            .map(|(s, l)| *s + l)
+            .collect::<Vec<_>>();
+
+        // sum_{1/(si+li)}
+        let sum_inv_add_si_li = s_add_l_scalars
+            .iter()
+            .fold(E::Scalar::zero(), |acc, v| acc + v.invert().unwrap());
+
+        //[(s_i+l_i)*sum_{1/(s_j+l_j)}]
+        let cross_scalars = Self::compute_cross::<E>(&s_add_l_scalars);
+        let mut g_projective = vec![E::G1::group_zero(); n as usize];
+        parallelize(&mut g_projective, |g, start| {
+            let g1: E::G1 = g1.into();
             for (idx, g) in g.iter_mut().enumerate() {
                 let offset = start + idx;
-                let root_pow = root.pow_vartime(&[offset as u64]);
-                let scalar = multiplier * root_pow * (s - root_pow).invert().unwrap();
-                *g = g1 * scalar;
+                *g = g1 * cross_scalars[offset];
             }
         });
+        let g_cross = {
+            let mut g = vec![E::G1Affine::identity(); n as usize];
+            parallelize(&mut g, |g, starts| {
+                E::G1::batch_normalize(&g_projective[starts..(starts + g.len())], g);
+            });
+            g
+        };
 
         let g_lagrange = {
             let mut g_lagrange = vec![E::G1Affine::identity(); n as usize];
@@ -114,13 +163,30 @@ impl<C: CurveAffine> Params<C> {
         let g2 = <E::G2Affine as PrimeCurveAffine>::generator();
         let s_g2 = g2 * s;
         let additional_data = Vec::from(s_g2.to_bytes().as_ref());
+
+        let sum_inv_add_s_l_g2 = g2 * sum_inv_add_si_li;
+        let sum_inv_add_s_l_g2_data = Vec::from(sum_inv_add_s_l_g2.to_bytes().as_ref());
+
         Params {
             k,
             n,
             g,
             g_lagrange,
             additional_data,
+            sum_inv_add_s_l_g2_data,
+            g_cross,
         }
+    }
+
+    fn compute_cross<E: Engine>(a: &[E::Scalar]) -> Vec<E::Scalar> {
+        let invs: Vec<E::Scalar> = a.par_iter().map(|x| x.invert().unwrap()).collect();
+
+        let total_sum: E::Scalar = invs.iter().fold(E::Scalar::zero(), |acc, e| acc + e);
+
+        a.par_iter()
+            .zip(invs.par_iter())
+            .map(|(&ai, &inv_ai)| ai * (total_sum - inv_ai))
+            .collect()
     }
 
     /// This computes a commitment to a polynomial described by the provided
@@ -130,6 +196,12 @@ impl<C: CurveAffine> Params<C> {
         let size = poly.values.len();
         assert!(self.g.len() >= size);
         best_multiexp_gpu_cond(&poly.values[..], &self.g[0..size])
+    }
+
+    pub fn commit_cross(&self, poly: &Polynomial<C::Scalar, Coeff>) -> C::Curve {
+        let size = poly.values.len();
+        assert!(self.g.len() >= size);
+        best_multiexp_gpu_cond(&poly.values[..], &self.g_cross[0..size])
     }
 
     /// This commits to a polynomial using its evaluations over the $2^k$ size
@@ -237,12 +309,22 @@ impl<C: CurveAffine> Params<C> {
         &self.g_lagrange
     }
 
-    pub fn get_k(&self) ->u32{self.k}
-    pub fn get_sg2<E: Engine<G1Affine = C>>(&self)->E::G2Affine{
+    pub fn get_cross_g(&self) -> &Vec<C> {
+        &self.g_cross
+    }
+
+    pub fn get_k(&self) -> u32 {
+        self.k
+    }
+    pub fn get_sg2<E: Engine<G1Affine = C>>(&self) -> E::G2Affine {
         let additional_data = self.additional_data.clone();
 
         E::G2Affine::read(&mut additional_data.as_slice()).unwrap()
+    }
+    pub fn get_sum_inv_add_s_l_g2<E: Engine<G1Affine = C>>(&self) -> E::G2Affine {
+        let data = self.sum_inv_add_s_l_g2_data.clone();
 
+        E::G2Affine::read(&mut data.as_slice()).unwrap()
     }
 
     /// Writes params to a buffer.
@@ -257,6 +339,14 @@ impl<C: CurveAffine> Params<C> {
         let additional_data_len = self.additional_data.len() as u32;
         writer.write_all(&additional_data_len.to_le_bytes())?;
         writer.write_all(&self.additional_data)?;
+
+        let s_l_data_len = self.sum_inv_add_s_l_g2_data.len() as u32;
+        writer.write_all(&s_l_data_len.to_le_bytes())?;
+        writer.write_all(&self.sum_inv_add_s_l_g2_data)?;
+
+        for el in &self.g_cross {
+            writer.write_all(el.to_bytes().as_ref())?;
+        }
         Ok(())
     }
 
@@ -289,15 +379,23 @@ impl<C: CurveAffine> Params<C> {
         reader.read_exact(&mut additional_data_len[..])?;
         let additional_data_len = u32::from_le_bytes(additional_data_len);
         let mut additional_data = vec![0u8; additional_data_len as usize];
-
         reader.read_exact(&mut additional_data[..])?;
 
+        let mut s_l_data_len = [0u8; 4];
+        reader.read_exact(&mut s_l_data_len[..])?;
+        let s_l_data_len = u32::from_le_bytes(s_l_data_len);
+        let mut sum_inv_add_s_l_g2_data = vec![0u8; s_l_data_len as usize];
+        reader.read_exact(&mut sum_inv_add_s_l_g2_data[..])?;
+
+        let g_cross = load_points_from_file_parallelly(&mut reader)?;
         Ok(Params {
             k,
             n: n as u64,
             g,
             g_lagrange,
             additional_data,
+            sum_inv_add_s_l_g2_data,
+            g_cross,
         })
     }
 
@@ -311,8 +409,10 @@ impl<C: CurveAffine> Params<C> {
         let g2 = <E::G2Affine as PrimeCurveAffine>::generator();
 
         let additional_data = self.additional_data.clone();
-
         let s_g2 = E::G2Affine::read(&mut additional_data.as_slice())?;
+
+        let sum_inv_add_s_l_g2_data = self.sum_inv_add_s_l_g2_data.clone();
+        let sum_inv_add_s_l_g2 = E::G2Affine::read(&mut sum_inv_add_s_l_g2_data.as_slice())?;
 
         Ok(ParamsVerifier {
             k: self.k,
@@ -321,6 +421,7 @@ impl<C: CurveAffine> Params<C> {
             g_lagrange,
             g2,
             s_g2,
+            sum_inv_add_s_l_g2,
         })
     }
 }
@@ -405,6 +506,7 @@ impl<E: Engine> ParamsVerifier<E> {
         writer.write_all(self.g1.to_bytes().as_ref())?;
         writer.write_all(self.g2.to_bytes().as_ref())?;
         writer.write_all(self.s_g2.to_bytes().as_ref())?;
+        writer.write_all(self.sum_inv_add_s_l_g2.to_bytes().as_ref())?;
         for el in &self.g_lagrange {
             writer.write_all(el.to_bytes().as_ref())?;
         }
@@ -426,6 +528,7 @@ impl<E: Engine> ParamsVerifier<E> {
         let g1 = E::G1Affine::read(&mut reader)?;
         let g2 = E::G2Affine::read(&mut reader)?;
         let s_g2 = E::G2Affine::read(&mut reader)?;
+        let sum_inv_add_s_l_g2 = E::G2Affine::read(&mut reader)?;
         let g_lagrange: Vec<E::G1Affine> = (0..public_inputs_size)
             .map(|_| E::G1Affine::read(&mut reader))
             .collect::<Result<_, _>>()?;
@@ -436,6 +539,7 @@ impl<E: Engine> ParamsVerifier<E> {
             g1,
             g2,
             s_g2,
+            sum_inv_add_s_l_g2,
             g_lagrange,
         })
     }
@@ -487,6 +591,7 @@ fn test_parameter_serialization() {
 
 #[test]
 fn test_commit_lagrange() {
+    use crate::pairing::arithmetic::{MillerLoopResult, MultiMillerLoop};
     const K: u32 = 6;
 
     let params: Params<G1Affine> = Params::<G1Affine>::unsafe_setup::<Bn256>(K);
@@ -497,7 +602,36 @@ fn test_commit_lagrange() {
     for (i, a) in a.iter_mut().enumerate() {
         *a = Fr::from(i as u64);
     }
+    let mut coeff_f = domain.coeff_from_vec(a.values.clone());
 
     let b = domain.lagrange_to_coeff(a.clone());
     assert_eq!(params.commit(&b), params.commit_lagrange(&a));
+
+    let coeff_comm = params.commit(&coeff_f);
+    let lag_comm = params.commit_lagrange(&a);
+    let cross_comm = params.commit_cross(&coeff_f);
+    let sum_a = coeff_f.values.iter().fold(Fr::zero(), |acc, v| acc + v);
+    let sum_a_comm = (params.g[0] * sum_a);
+    let sum_cross_a_comm = (cross_comm + sum_a_comm).to_affine();
+
+    let g2 = <Bn256 as Engine>::G2Affine::generator();
+    let sum_inv_add_s_l_g2 =
+        <Bn256 as Engine>::G2Affine::read(&mut params.sum_inv_add_s_l_g2_data.as_slice()).unwrap();
+
+    //e(comm(coeff)+comm(lag), -sum_cl_inv_g2) e(comm_a+comm(cross),g2)
+
+    let neg_sum_c_l_inv_g2 = <Bn256 as MultiMillerLoop>::G2Prepared::from(sum_inv_add_s_l_g2);
+    let g2 = <Bn256 as MultiMillerLoop>::G2Prepared::from(-g2);
+    // let s_invG2 = <Bn256 as MultiMillerLoop>::G2Prepared::from(s_inv_g2);
+
+    let (t1, t2) = (
+        (&(coeff_comm + lag_comm).to_affine(), &neg_sum_c_l_inv_g2),
+        (&sum_cross_a_comm, &g2),
+    );
+    let pass = bool::from(
+        <Bn256 as MultiMillerLoop>::multi_miller_loop(&[t1, t2])
+            .final_exponentiation()
+            .is_identity(),
+    );
+    assert_eq!(pass, true);
 }
