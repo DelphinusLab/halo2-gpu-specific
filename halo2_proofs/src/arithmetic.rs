@@ -793,30 +793,6 @@ pub fn parallelize<T: Send, F: Fn(&mut [T], usize) + Send + Sync + Clone>(v: &mu
     });
 }
 
-//TODO temp fun
-pub fn parallelize2<T: Send, P: Send, F: Fn(&mut [T], &mut [P], usize) + Send + Sync + Clone>(
-    v: &mut [T],
-    u: &mut [P],
-    f: F,
-) {
-    let n = v.len();
-    let num_threads = multicore::current_num_threads();
-    let mut chunk = (n as usize) / num_threads;
-    if chunk < num_threads {
-        chunk = n as usize;
-    }
-
-    multicore::scope(|scope| {
-        for (chunk_num, (v, u)) in v.chunks_mut(chunk).zip(u.chunks_mut(chunk)).enumerate() {
-            let f = f.clone();
-            scope.spawn(move |_| {
-                let start = chunk_num * chunk;
-                f(v, u, start);
-            });
-        }
-    });
-}
-
 fn log2_floor(num: usize) -> u32 {
     assert!(num > 0);
 
